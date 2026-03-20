@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     queue_max_delivery_attempts: int = 3
     agent_idle_timeout_seconds: int = 300
     runtime_stale_timeout_seconds: int = 90
+    runtime_degraded_timeout_seconds: int = 45
     observability_unreachable_runtime_threshold: int = 1
     observability_expired_lease_alert_threshold: int = 3
     observability_dead_letter_alert_threshold: int = 1

@@ -6,7 +6,7 @@ import time
 import httpx
 
 from agp.db import SessionLocal, init_db
-from agp.models import Capability, utc_now
+from agp.models import Capability, CapabilityPool, utc_now
 
 
 def _server_url() -> str:
@@ -60,6 +60,15 @@ def ensure_capability() -> None:
                     updated_at=now,
                 )
             )
+            session.flush()
+            if session.get(CapabilityPool, capability_id) is None:
+                session.add(
+                    CapabilityPool(
+                        capability_id=capability_id,
+                        queue_id=f"capability:{capability_id}:v1",
+                        routing_policy="least_recent",
+                    )
+                )
             session.commit()
     finally:
         session.close()

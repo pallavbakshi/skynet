@@ -223,6 +223,27 @@ class IdempotencyKey(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class HealthRecord(Base):
+    __tablename__ = "health_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    entity_type: Mapped[str] = mapped_column(String)
+    entity_id: Mapped[str] = mapped_column(String)
+    health_status: Mapped[str] = mapped_column(String)
+    reason: Mapped[str] = mapped_column(String)
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class CapabilityPool(Base):
+    __tablename__ = "capability_pools"
+
+    capability_id: Mapped[str] = mapped_column(ForeignKey("capabilities.capability_id"), primary_key=True)
+    queue_id: Mapped[str] = mapped_column(String, unique=True)
+    routing_policy: Mapped[str] = mapped_column(String, default="least_recent")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
 class SystemMetadata(Base):
     __tablename__ = "system_metadata"
 

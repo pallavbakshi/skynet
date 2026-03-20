@@ -30,7 +30,7 @@ from agp.control_plane import (
 from agp.db import Base, SessionLocal, current_release_version, engine, init_db
 from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
-from agp.models import Artifact, Capability, Job, Lease, QueueDeliveryRecord, Run, SystemMetadata, utc_now
+from agp.models import Artifact, Capability, CapabilityPool, Job, Lease, QueueDeliveryRecord, Run, SystemMetadata, utc_now
 from agp.queue_backend import get_queue_backend
 from agp.plugins import build_terminal_host, build_agent_adapter
 from agp.runtime import (
@@ -1202,6 +1202,15 @@ def add_capability(
                 updated_at=utc_now(),
             )
         )
+        session.flush()
+        if session.get(CapabilityPool, capability_id) is None:
+            session.add(
+                CapabilityPool(
+                    capability_id=capability_id,
+                    queue_id=f"capability:{capability_id}:{version}",
+                    routing_policy="least_recent",
+                )
+            )
         session.commit()
     finally:
         session.close()

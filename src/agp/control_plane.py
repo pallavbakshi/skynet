@@ -24,13 +24,16 @@ from agp.enums import AgentStatus, ArtifactKind, HealthStatus, JobStatus, LeaseS
 from agp.logs import append_jsonl_log, read_tail_jsonl_family
 from agp.models import (
     Agent,
+    AgentRuntimeBinding,
     Artifact,
     Capability,
+    CapabilityPool,
     Event,
     EventJobLink,
     Handoff,
     HandoffArtifact,
     HandoffJob,
+    HealthRecord,
     IdempotencyKey,
     Job,
     JobArtifact,
@@ -131,6 +134,55 @@ def _error_response(status_code: int, code: str, message: str, retryable: bool =
         status_code=status_code,
         content={"ok": False, "error": {"code": code, "message": message, "retryable": retryable}},
     )
+
+
+def _record_health_transition(
+    db: Session,
+    *,
+    entity_type: str,
+    entity_id: str,
+    health_status: str,
+    reason: str,
+) -> None:
+    """Persist a health observation for audit/historical analysis."""
+    db.add(HealthRecord(
+        entity_type=entity_type,
+        entity_id=entity_id,
+        health_status=health_status,
+        reason=reason,
+    ))
+
+
+def _record_agent_binding(
+    db: Session,
+    *,
+    agent_id: str,
+    runtime_id: str,
+    status: str,
+) -> None:
+    """Write an agent-runtime binding record for lifecycle history."""
+    db.add(AgentRuntimeBinding(
+        agent_id=agent_id,
+        runtime_id=runtime_id,
+        binding_status=status,
+    ))
+
+
+def _ensure_capability_pool(db: Session, capability_id: str) -> CapabilityPool:
+    """Get or create the capability pool entry for a capability."""
+    pool = db.get(CapabilityPool, capability_id)
+    if pool is not None:
+        return pool
+    capability = _require_capability(db, capability_id)
+    queue_id = f"capability:{capability.capability_id}:{capability.version}"
+    pool = CapabilityPool(
+        capability_id=capability_id,
+        queue_id=queue_id,
+        routing_policy="least_recent",
+    )
+    db.add(pool)
+    db.flush()
+    return pool
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:
@@ -238,6 +290,9 @@ def _queue_for_target(target_type: str, target_id: str) -> str:
 
 
 def _capability_queue_for(db: Session, capability_id: str) -> str:
+    pool = db.get(CapabilityPool, capability_id)
+    if pool is not None:
+        return pool.queue_id
     capability = _require_capability(db, capability_id)
     return f"capability:{capability.capability_id}:{capability.version}"
 
@@ -592,6 +647,8 @@ def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[st
         if agent.status != AgentStatus.TERMINATED.value:
             agent.status = AgentStatus.IDLE.value
             # Lease-expiry recovery makes the durable agent available for a new runtime claim.
+            if agent.assigned_runtime_id is not None:
+                _record_agent_binding(db, agent_id=agent.agent_id, runtime_id=agent.assigned_runtime_id, status="released")
             agent.assigned_runtime_id = None
         active_runtime_runs = db.scalar(
             select(func.count()).select_from(Lease).where(
@@ -691,24 +748,59 @@ def sweep_stale_runtimes(
     *,
     now: datetime | None = None,
     stale_timeout_seconds: int | None = None,
+    degraded_timeout_seconds: int | None = None,
 ) -> dict[str, int]:
     now = now or utc_now()
     stale_timeout_seconds = stale_timeout_seconds or settings.runtime_stale_timeout_seconds
-    cutoff = now - timedelta(seconds=stale_timeout_seconds)
-    runtimes = db.scalars(
+    degraded_timeout_seconds = degraded_timeout_seconds or settings.runtime_degraded_timeout_seconds
+    degraded_cutoff = now - timedelta(seconds=degraded_timeout_seconds)
+    offline_cutoff = now - timedelta(seconds=stale_timeout_seconds)
+
+    # Phase 1: mark runtimes as degraded (past degraded threshold but not yet offline threshold)
+    degraded_candidates = db.scalars(
+        select(Runtime).where(
+            Runtime.status.notin_([RuntimeStatus.OFFLINE.value, RuntimeStatus.DEGRADED.value]),
+            Runtime.last_heartbeat_at.is_not(None),
+            Runtime.last_heartbeat_at < degraded_cutoff,
+            Runtime.last_heartbeat_at >= offline_cutoff,
+        )
+    ).all()
+    degraded_runtimes = 0
+    for runtime in degraded_candidates:
+        runtime.status = RuntimeStatus.DEGRADED.value
+        runtime.health_status = HealthStatus.DEGRADED.value
+        runtime.updated_at = now
+        _record_health_transition(
+            db, entity_type="runtime", entity_id=runtime.runtime_id,
+            health_status=HealthStatus.DEGRADED.value, reason="heartbeat_timeout_degraded",
+        )
+        _create_event(
+            db,
+            runtime_id=runtime.runtime_id,
+            event_type="runtime.degraded",
+            body={"reason": "heartbeat_timeout", "degraded_timeout_seconds": degraded_timeout_seconds},
+        )
+        degraded_runtimes += 1
+
+    # Phase 2: mark runtimes as offline (past full stale threshold)
+    offline_candidates = db.scalars(
         select(Runtime).where(
             Runtime.status != RuntimeStatus.OFFLINE.value,
             Runtime.last_heartbeat_at.is_not(None),
-            Runtime.last_heartbeat_at < cutoff,
+            Runtime.last_heartbeat_at < offline_cutoff,
         )
     ).all()
     offlined = 0
     detached_agents = 0
     degraded_agents = 0
-    for runtime in runtimes:
+    for runtime in offline_candidates:
         runtime.status = RuntimeStatus.OFFLINE.value
         runtime.health_status = HealthStatus.UNREACHABLE.value
         runtime.updated_at = now
+        _record_health_transition(
+            db, entity_type="runtime", entity_id=runtime.runtime_id,
+            health_status=HealthStatus.UNREACHABLE.value, reason="heartbeat_timeout_offline",
+        )
         _create_event(
             db,
             runtime_id=runtime.runtime_id,
@@ -730,6 +822,10 @@ def sweep_stale_runtimes(
                 if agent.status != AgentStatus.TERMINATED.value:
                     agent.status = AgentStatus.DEGRADED.value
                     agent.updated_at = now
+                    _record_health_transition(
+                        db, entity_type="agent", entity_id=agent.agent_id,
+                        health_status="degraded", reason="runtime_offline",
+                    )
                     _create_event(
                         db,
                         agent_id=agent.agent_id,
@@ -741,6 +837,7 @@ def sweep_stale_runtimes(
                 continue
             if agent.status in {AgentStatus.TERMINATED.value, AgentStatus.DRAINING.value}:
                 continue
+            _record_agent_binding(db, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, status="released")
             agent.assigned_runtime_id = None
             agent.status = AgentStatus.IDLE.value
             agent.updated_at = now
@@ -753,9 +850,11 @@ def sweep_stale_runtimes(
             )
             detached_agents += 1
         offlined += 1
-    if offlined:
+    changed = degraded_runtimes + offlined
+    if changed:
         db.commit()
     return {
+        "degraded_runtimes": degraded_runtimes,
         "offline_runtimes": offlined,
         "detached_agents": detached_agents,
         "degraded_agents": degraded_agents,
@@ -824,6 +923,10 @@ def sweep_draining_runtimes(
         runtime.status = RuntimeStatus.IDLE.value
         if runtime.health_status == HealthStatus.DRAINING.value:
             runtime.health_status = HealthStatus.HEALTHY.value
+            _record_health_transition(
+                db, entity_type="runtime", entity_id=runtime.runtime_id,
+                health_status=HealthStatus.HEALTHY.value, reason="drain_complete",
+            )
         runtime.updated_at = now
         _create_event(
             db,
@@ -1023,6 +1126,7 @@ def send_message(
             job.latest_run_id = run.run_id
             job.updated_at = utc_now()
             target_agent.status = AgentStatus.BUSY.value
+            _record_agent_binding(db, agent_id=target_agent.agent_id, runtime_id=runtime.runtime_id, status="active")
             target_agent.assigned_runtime_id = runtime.runtime_id
             runtime.status = RuntimeStatus.BUSY.value
             _create_event(
@@ -1307,6 +1411,14 @@ def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_
         child_job_ids.append(child.job_id)
         _queue_backend().enqueue_job(db, job=child)
     for artifact_id in request.artifact_ids:
+        artifact = db.get(Artifact, artifact_id)
+        if artifact is None:
+            raise HTTPException(status_code=400, detail=f"handoff artifact not found: {artifact_id}")
+        if artifact.job_id != source_job.job_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"artifact {artifact_id} does not belong to source job {source_job.job_id}",
+            )
         db.add(HandoffArtifact(handoff_id=handoff.handoff_id, artifact_id=artifact_id))
     _create_event(
         db,
@@ -1484,6 +1596,10 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
             last_heartbeat_at=utc_now(),
         )
         db.add(runtime)
+        _record_health_transition(
+            db, entity_type="runtime", entity_id=runtime_id,
+            health_status=HealthStatus.HEALTHY.value, reason="registered",
+        )
         _create_event(
             db,
             runtime_id=runtime.runtime_id,
@@ -1491,6 +1607,7 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
             body={"hostname": runtime.hostname, "release_version": runtime.release_version},
         )
     else:
+        previous_health = runtime.health_status
         runtime.hostname = request.hostname
         runtime.release_version = request.release_version
         runtime.metadata_json = request.metadata
@@ -1498,6 +1615,11 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
         runtime.health_status = HealthStatus.HEALTHY.value
         runtime.last_seen_at = utc_now()
         runtime.last_heartbeat_at = utc_now()
+        if previous_health != HealthStatus.HEALTHY.value:
+            _record_health_transition(
+                db, entity_type="runtime", entity_id=runtime_id,
+                health_status=HealthStatus.HEALTHY.value, reason="re_registered",
+            )
     db.commit()
     return _ok(
         _serialize(
@@ -1533,19 +1655,66 @@ def list_runtimes(
     if len(runtimes) > limit:
         last = page_items[-1]
         next_cursor = _encode_cursor({"created_at": last.created_at.isoformat(), "runtime_id": last.runtime_id})
-    return _ok(
-        _page(
-            [
-                _serialize(
-                    runtime,
-                    ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at"),
-                )
-                for runtime in page_items
-            ],
-            limit=limit,
-            next_cursor=next_cursor,
+    items = []
+    for runtime in page_items:
+        data = _serialize(
+            runtime,
+            ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at"),
         )
+        active_leases = db.scalars(
+            select(Lease).where(
+                Lease.runtime_id == runtime.runtime_id,
+                Lease.status == LeaseStatus.ACTIVE.value,
+            )
+        ).all()
+        data["claimed_work"] = [
+            {"lease_id": lease.lease_id, "run_id": lease.run_id, "agent_id": lease.agent_id}
+            for lease in active_leases
+        ]
+        data["active_run_count"] = len(active_leases)
+        items.append(data)
+    return _ok(
+        _page(items, limit=limit, next_cursor=next_cursor)
     )
+
+
+@router.get("/runtimes/{runtime_id}", response_model=dict)
+def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
+    runtime = _require_runtime(db, runtime_id)
+    data = _serialize(
+        runtime,
+        ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at", "created_at"),
+    )
+    active_leases = db.scalars(
+        select(Lease).where(
+            Lease.runtime_id == runtime.runtime_id,
+            Lease.status == LeaseStatus.ACTIVE.value,
+        )
+    ).all()
+    claimed_work = []
+    for lease in active_leases:
+        run = db.get(Run, lease.run_id)
+        job = db.get(Job, run.job_id) if run else None
+        claimed_work.append({
+            "lease_id": lease.lease_id,
+            "run_id": lease.run_id,
+            "agent_id": lease.agent_id,
+            "job_id": run.job_id if run else None,
+            "job_status": job.status if job else None,
+            "run_status": run.status if run else None,
+            "fencing_token": lease.fencing_token,
+            "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+        })
+    data["claimed_work"] = claimed_work
+    data["active_run_count"] = len(active_leases)
+    agents = db.scalars(
+        select(Agent).where(Agent.assigned_runtime_id == runtime.runtime_id)
+    ).all()
+    data["agents"] = [
+        _serialize(agent, ("agent_id", "capability_id", "status"))
+        for agent in agents
+    ]
+    return _ok(data)
 
 
 @router.post("/runs/claim", response_model=dict)
@@ -1553,8 +1722,13 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, request.runtime_id)
     if runtime.health_status == HealthStatus.UNREACHABLE.value:
         raise HTTPException(status_code=409, detail="runtime is unreachable")
+    if runtime.health_status == HealthStatus.DEGRADED.value:
+        raise HTTPException(status_code=409, detail="runtime is degraded")
     if runtime.status == RuntimeStatus.DRAINING.value:
         raise HTTPException(status_code=409, detail="runtime is draining")
+    if runtime.status == RuntimeStatus.DEGRADED.value:
+        raise HTTPException(status_code=409, detail="runtime is degraded")
+    routing_decision: dict | None = None
     if request.agent_id is not None:
         agent = _require_agent(db, request.agent_id)
         if agent.status != AgentStatus.IDLE.value:
@@ -1562,15 +1736,29 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
         if agent.assigned_runtime_id is not None and agent.assigned_runtime_id != runtime.runtime_id:
             return _ok({"claimed": False, "agent_id": agent.agent_id})
     elif request.capability_id is not None:
-        agent = db.scalar(
-            select(Agent).where(
-                Agent.capability_id == request.capability_id,
-                Agent.status == AgentStatus.IDLE.value,
-                or_(Agent.assigned_runtime_id.is_(None), Agent.assigned_runtime_id == runtime.runtime_id),
-            )
+        pool = db.get(CapabilityPool, request.capability_id)
+        routing_policy = pool.routing_policy if pool else "least_recent"
+        candidate_query = select(Agent).where(
+            Agent.capability_id == request.capability_id,
+            Agent.status == AgentStatus.IDLE.value,
+            or_(Agent.assigned_runtime_id.is_(None), Agent.assigned_runtime_id == runtime.runtime_id),
         )
+        if routing_policy == "least_recent":
+            candidate_query = candidate_query.order_by(
+                Agent.last_seen_at.asc().nulls_first(), Agent.agent_id.asc()
+            )
+        else:
+            candidate_query = candidate_query.order_by(Agent.agent_id.asc())
+        candidates = db.scalars(candidate_query).all()
+        agent = candidates[0] if candidates else None
         if agent is None:
             return _ok({"claimed": False})
+        routing_decision = {
+            "policy": routing_policy,
+            "candidate_count": len(candidates),
+            "selected_agent_id": agent.agent_id,
+            "candidate_agent_ids": [c.agent_id for c in candidates],
+        }
     else:
         raise HTTPException(status_code=400, detail="claim requires agent_id or capability_id")
 
@@ -1631,6 +1819,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     job.latest_run_id = run.run_id
     job.updated_at = utc_now()
     agent.status = AgentStatus.BUSY.value
+    _record_agent_binding(db, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, status="active")
     agent.assigned_runtime_id = runtime.runtime_id
     runtime.status = RuntimeStatus.BUSY.value
     runtime.last_heartbeat_at = utc_now()
@@ -1652,6 +1841,16 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
         event_type="lease.acquired",
         body={"lease_id": lease.lease_id, "fencing_token": lease.fencing_token, "expires_at": lease.expires_at.isoformat()},
     )
+    if routing_decision is not None:
+        _create_event(
+            db,
+            job_id=job.job_id,
+            run_id=run.run_id,
+            agent_id=agent.agent_id,
+            runtime_id=runtime.runtime_id,
+            event_type="routing.decision",
+            body=routing_decision,
+        )
     _queue_backend().ack_claim(db, delivery=delivery, job=job)
     db.commit()
     return _ok(
@@ -1986,14 +2185,34 @@ def list_run_artifacts(run_id: str, role: str | None = Query(default=None), db: 
 
 
 @router.get("/artifacts/{artifact_id}/content", response_model=dict)
-def get_artifact_content(artifact_id: str, db: Session = Depends(get_db)) -> dict:
+def get_artifact_content(
+    artifact_id: str,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+) -> dict:
     artifact = db.get(Artifact, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"artifact not found: {artifact_id}")
     content = _artifact_store().read_text(storage_ref=artifact.storage_ref)
-    payload = {"artifact_id": artifact.artifact_id, "storage_ref": artifact.storage_ref, "content_type": artifact.content_type}
+    payload: dict = {
+        "artifact_id": artifact.artifact_id,
+        "storage_ref": artifact.storage_ref,
+        "content_type": artifact.content_type,
+        "size_bytes": artifact.size_bytes,
+    }
     if content is not None:
-        payload["content"] = content
+        total_length = len(content)
+        payload["total_length"] = total_length
+        if offset > 0 or limit > 0:
+            end = offset + limit if limit > 0 else total_length
+            payload["content"] = content[offset:end]
+            payload["offset"] = offset
+            payload["limit"] = limit
+            payload["has_more"] = end < total_length
+        else:
+            payload["content"] = content
+            payload["has_more"] = False
     return _ok(payload)
 
 
@@ -2317,6 +2536,174 @@ def list_queue_deliveries(
             next_cursor=next_cursor,
         )
     )
+
+
+@router.get("/observability/triage", response_model=dict)
+def observability_triage(db: Session = Depends(get_db)) -> dict:
+    """Consolidated operator triage surface: active jobs by runtime, recent failures, stale runtimes."""
+    # Active jobs grouped by runtime
+    active_leases = db.scalars(
+        select(Lease).where(Lease.status == LeaseStatus.ACTIVE.value)
+    ).all()
+    active_by_runtime: dict[str, list[dict]] = {}
+    for lease in active_leases:
+        run = db.get(Run, lease.run_id)
+        job = db.get(Job, run.job_id) if run else None
+        entry = {
+            "lease_id": lease.lease_id,
+            "run_id": lease.run_id,
+            "agent_id": lease.agent_id,
+            "job_id": run.job_id if run else None,
+            "job_status": job.status if job else None,
+            "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+        }
+        active_by_runtime.setdefault(lease.runtime_id, []).append(entry)
+
+    # Recent failures (last 20)
+    recent_failures = db.scalars(
+        select(Job).where(Job.status == JobStatus.FAILED.value)
+        .order_by(Job.updated_at.desc()).limit(20)
+    ).all()
+    failure_items = [
+        _serialize(job, ("job_id", "target_agent_id", "target_queue", "status", "retry_count", "latest_run_id", "updated_at"))
+        for job in recent_failures
+    ]
+
+    # Stale/degraded/offline runtimes
+    problem_runtimes = db.scalars(
+        select(Runtime).where(
+            Runtime.status.in_([RuntimeStatus.OFFLINE.value, RuntimeStatus.DEGRADED.value])
+        )
+    ).all()
+    stale_items = [
+        _serialize(runtime, ("runtime_id", "hostname", "status", "health_status", "last_heartbeat_at"))
+        for runtime in problem_runtimes
+    ]
+
+    # Capability summary
+    capabilities = db.scalars(select(Capability)).all()
+    cap_summary = []
+    for cap in capabilities:
+        idle_agents = int(db.scalar(
+            select(func.count()).select_from(Agent).where(
+                Agent.capability_id == cap.capability_id,
+                Agent.status == AgentStatus.IDLE.value,
+            )
+        ) or 0)
+        busy_agents = int(db.scalar(
+            select(func.count()).select_from(Agent).where(
+                Agent.capability_id == cap.capability_id,
+                Agent.status == AgentStatus.BUSY.value,
+            )
+        ) or 0)
+        queued_jobs = int(db.scalar(
+            select(func.count()).select_from(Job).where(
+                Job.target_queue.like(f"%{cap.capability_id}%"),
+                Job.status == JobStatus.QUEUED.value,
+            )
+        ) or 0)
+        cap_summary.append({
+            "capability_id": cap.capability_id,
+            "name": cap.name,
+            "idle_agents": idle_agents,
+            "busy_agents": busy_agents,
+            "queued_jobs": queued_jobs,
+        })
+
+    return _ok({
+        "active_jobs_by_runtime": active_by_runtime,
+        "recent_failures": failure_items,
+        "stale_runtimes": stale_items,
+        "capabilities": cap_summary,
+    })
+
+
+@router.get("/observability/health-records", response_model=dict)
+def list_health_records(
+    entity_type: str | None = Query(default=None),
+    entity_id: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Query persisted health-record history."""
+    query = select(HealthRecord)
+    if entity_type is not None:
+        query = query.where(HealthRecord.entity_type == entity_type)
+    if entity_id is not None:
+        query = query.where(HealthRecord.entity_id == entity_id)
+    records = db.scalars(query.order_by(HealthRecord.observed_at.desc()).limit(limit)).all()
+    return _ok({
+        "items": [
+            {
+                "entity_type": r.entity_type,
+                "entity_id": r.entity_id,
+                "health_status": r.health_status,
+                "reason": r.reason,
+                "observed_at": r.observed_at.isoformat() if r.observed_at else None,
+            }
+            for r in records
+        ],
+    })
+
+
+@router.post("/capabilities/seed", response_model=dict)
+def seed_capability(request: dict, db: Session = Depends(get_db)) -> dict:
+    """Seed a capability and auto-create its capability pool."""
+    capability_id = request.get("capability_id")
+    if not capability_id:
+        raise HTTPException(status_code=400, detail="capability_id is required")
+    existing = db.get(Capability, capability_id)
+    if existing is not None:
+        pool = _ensure_capability_pool(db, capability_id)
+        db.commit()
+        return _ok({
+            "capability_id": capability_id,
+            "created": False,
+            "pool_queue_id": pool.queue_id,
+            "pool_routing_policy": pool.routing_policy,
+        })
+    capability = Capability(
+        capability_id=capability_id,
+        name=request.get("name", capability_id),
+        version=request.get("version", "v1"),
+        image_ref=request.get("image_ref", ""),
+        model_ref=request.get("model_ref", ""),
+        resource_tier=request.get("resource_tier", "default"),
+        permission_profile=request.get("permission_profile", "default"),
+        queue_mode=request.get("queue_mode", "agent"),
+        runtime_requirements_json=request.get("runtime_requirements", {}),
+    )
+    db.add(capability)
+    db.flush()
+    pool = _ensure_capability_pool(db, capability_id)
+    _create_event(
+        db,
+        event_type="capability.seeded",
+        body={"capability_id": capability_id, "pool_queue_id": pool.queue_id},
+    )
+    db.commit()
+    return _ok({
+        "capability_id": capability_id,
+        "created": True,
+        "pool_queue_id": pool.queue_id,
+        "pool_routing_policy": pool.routing_policy,
+    })
+
+
+@router.get("/capability-pools", response_model=dict)
+def list_capability_pools(db: Session = Depends(get_db)) -> dict:
+    """List all persisted capability pools."""
+    pools = db.scalars(select(CapabilityPool).order_by(CapabilityPool.capability_id.asc())).all()
+    return _ok({
+        "items": [
+            {
+                "capability_id": pool.capability_id,
+                "queue_id": pool.queue_id,
+                "routing_policy": pool.routing_policy,
+            }
+            for pool in pools
+        ],
+    })
 
 
 def build_app() -> FastAPI:
