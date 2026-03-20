@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from pathlib import Path
 from threading import Thread
@@ -12,6 +13,7 @@ import shutil
 import typer
 import json
 import httpx
+from typer.testing import CliRunner
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
@@ -24,6 +26,7 @@ from agp.db import Base, SessionLocal, engine, init_db
 from agp.models import Agent, Capability, Event, QueueDeliveryRecord, Runtime, utc_now
 from agp.enums import HealthStatus, RuntimeStatus
 from agp.cli import (
+    app,
     fetch_artifact_via_api,
     interrupt_job_via_api,
     list_agents_via_api,
@@ -144,6 +147,7 @@ class MvpFlowTest(unittest.TestCase):
         return refs
 
     def setUp(self) -> None:
+        self.cli_runner = CliRunner()
         settings.operator_bearer_token = None
         settings.operator_token_roles_json = {}
         settings.runtime_active_tokens_json = []
@@ -3283,7 +3287,7 @@ class MvpFlowTest(unittest.TestCase):
                     )
                 elif text and not text.startswith("ncodex"):
                     self._history.setdefault(session.session_id, []).append(
-                        "Here is the result of your task.\n"
+                        "\u203a explain this code\n\u2022 Here is the result of your task.\n"
                     )
 
         class SupervisorStub:
@@ -3298,7 +3302,13 @@ class MvpFlowTest(unittest.TestCase):
                 self.progress.append({"message": message, "details": details or {}})
                 return {"status": "ok"}
 
-        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="ncodex",
+            idle_poll_seconds=0.0,
+            idle_after=1,
+            idle_timeout_seconds=0.1,
+        )
         host = TuiHost()
         session = host.get_or_create_session(agent_id="agt_tui")
         adapter.ensure_bootstrapped(host=host, session=session, claimed={})
@@ -3334,7 +3344,13 @@ class MvpFlowTest(unittest.TestCase):
             def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
                 return {"status": "ok"}
 
-        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="ncodex",
+            idle_poll_seconds=0.0,
+            idle_after=1,
+            idle_timeout_seconds=0.05,
+        )
         host = SilentHost()
         session = host.get_or_create_session(agent_id="agt_empty_tui")
         session.metadata["codex_bootstrapped"] = True
@@ -3760,6 +3776,272 @@ class MvpFlowTest(unittest.TestCase):
         }
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(result.artifacts[-1].content, "tmux codex result")
+
+    def test_plugin_host_cli_round_trip_for_tmux_and_wezterm(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        for host_kind in ("tmux", "wezterm"):
+            tmp = Path(mkdtemp())
+            try:
+                if host_kind == "tmux":
+                    state = {"exists": False, "text": "", "abs_line": 0}
+
+                    def runner(argv: list[str], **_: object) -> Result:
+                        cmd = argv[1]
+                        if cmd == "has-session":
+                            return Result(returncode=0 if state["exists"] else 1)
+                        if cmd == "new-session":
+                            state["exists"] = True
+                            return Result()
+                        if cmd == "send-keys":
+                            if "-l" in argv:
+                                state["text"] += argv[-1]
+                            elif argv[-1] == "Enter":
+                                state["text"] += "\n"
+                            elif argv[-1] == "C-c":
+                                state["text"] += "INTERRUPT\n"
+                            return Result()
+                        if cmd == "display-message":
+                            state["abs_line"] += 1
+                            return Result(str(state["abs_line"]))
+                        if cmd == "capture-pane":
+                            return Result(state["text"])
+                        if cmd == "kill-session":
+                            state["exists"] = False
+                            return Result()
+                        raise AssertionError(f"unexpected tmux argv: {argv}")
+
+                    def factory(kind: str, **kwargs: object):
+                        self.assertEqual(kind, "tmux")
+                        from agp.plugins.tmux import TmuxHost
+                        return TmuxHost(runner=runner, checkpoint_dir=tmp, default_cwd="/tmp")
+                else:
+                    state = {"exists": False, "text": "", "pane_id": "901"}
+
+                    def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
+                        cmd = argv[2]
+                        if cmd == "list":
+                            if not state["exists"]:
+                                return Result("[]")
+                            return Result(json.dumps([{
+                                "pane_id": int(state["pane_id"]),
+                                "tab_id": 1,
+                                "window_id": 1,
+                                "workspace": "agp-test",
+                                "window_title": "AGP:agt_host",
+                                "tab_title": "AGP:agt_host",
+                                "cwd": "/tmp",
+                            }]))
+                        if cmd == "spawn":
+                            state["exists"] = True
+                            return Result(state["pane_id"])
+                        if cmd == "set-window-title" or cmd == "set-tab-title":
+                            return Result()
+                        if cmd == "send-text":
+                            state["text"] += argv[-1]
+                            return Result()
+                        if cmd == "get-text":
+                            return Result(state["text"])
+                        if cmd == "kill-pane":
+                            state["exists"] = False
+                            return Result()
+                        raise AssertionError(f"unexpected wezterm argv: {argv}")
+
+                    def factory(kind: str, **kwargs: object):
+                        self.assertEqual(kind, "wezterm")
+                        return WezTermHost(
+                            workspace="agp-test",
+                            runner=runner,
+                            checkpoint_dir=tmp,
+                            default_cwd="/tmp",
+                        )
+
+                with patch("agp.cli.build_terminal_host", side_effect=factory):
+                    created = self.cli_runner.invoke(app, ["host", "create", host_kind, "agt_host", "--workspace-ref", "/tmp"])
+                    self.assertEqual(created.exit_code, 0, created.output)
+                    created_payload = json.loads(created.stdout)
+                    session_id = created_payload["session_id"]
+
+                    sent = self.cli_runner.invoke(app, ["host", "send", host_kind, session_id, "agt_host", "hello"])
+                    self.assertEqual(sent.exit_code, 0, sent.output)
+
+                    read = self.cli_runner.invoke(app, ["host", "read", host_kind, session_id, "agt_host"])
+                    self.assertEqual(read.exit_code, 0, read.output)
+                    read_payload = json.loads(read.stdout)
+                    self.assertIn("hello", read_payload["full_text"])
+
+                    health = self.cli_runner.invoke(app, ["host", "health", host_kind, session_id, "agt_host"])
+                    self.assertEqual(health.exit_code, 0, health.output)
+                    self.assertTrue(json.loads(health.stdout)["healthy"])
+
+                    interrupted = self.cli_runner.invoke(app, ["host", "interrupt", host_kind, session_id, "agt_host"])
+                    self.assertEqual(interrupted.exit_code, 0, interrupted.output)
+
+                    snap = self.cli_runner.invoke(app, ["host", "snapshot", host_kind, session_id, "agt_host"])
+                    self.assertEqual(snap.exit_code, 0, snap.output)
+
+                    terminated = self.cli_runner.invoke(app, ["host", "terminate", host_kind, session_id, "agt_host"])
+                    self.assertEqual(terminated.exit_code, 0, terminated.output)
+            finally:
+                shutil.rmtree(tmp)
+
+    def test_plugin_adapter_cli_run_once_marker_mode(self) -> None:
+        class CodexHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "AGP task instructions:" in text:
+                    first_line = text.splitlines()[0]
+                    run_id = first_line.split()[-1]
+                    marker = f'AGP_RUN_RESULT {run_id} {{"status":"success","result":"marker success"}}\n'
+                    self._history.setdefault(session.session_id, []).append(marker)
+
+        tmp = Path(mkdtemp())
+        try:
+            with (
+                patch("agp.cli.build_terminal_host", return_value=CodexHost()),
+                patch("agp.cli.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
+            ):
+                result = self.cli_runner.invoke(
+                    app,
+                    [
+                        "adapter", "run-once", "codex", "inprocess", "agt_codex",
+                        "--task", "summarize",
+                        "--output-root", str(tmp),
+                    ],
+                )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            result_artifact = next(item for item in payload["artifacts"] if item["role"] == "result")
+            self.assertEqual(Path(result_artifact["path"]).read_text(encoding="utf-8"), "marker success")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_plugin_adapter_cli_run_once_tui_mode(self) -> None:
+        class TuiHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.screen = "\u203a ready\n"
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("codex"):
+                    self.screen = "\u203a ready\n"
+                elif text == "answer the task":
+                    self.screen = "\u203a answer the task\n\u2022 tui success\n"
+
+            def read_visible(self, session) -> str:
+                return self.screen
+
+            def wait_for_idle(self, session, **kwargs: object) -> bool:  # noqa: ARG002
+                return True
+
+        tmp = Path(mkdtemp())
+        try:
+            with (
+                patch("agp.cli.build_terminal_host", return_value=TuiHost()),
+                patch(
+                    "agp.cli.build_agent_adapter",
+                    return_value=CodexAdapter(
+                        tui_mode=True,
+                        cli_command="codex",
+                        idle_poll_seconds=0.0,
+                        idle_after=1,
+                    ),
+                ),
+            ):
+                result = self.cli_runner.invoke(
+                    app,
+                    [
+                        "adapter", "run-once", "codex", "inprocess", "agt_tui",
+                        "--task", "answer the task",
+                        "--output-root", str(tmp),
+                    ],
+                )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            result_artifact = next(item for item in payload["artifacts"] if item["role"] == "result")
+            self.assertEqual(Path(result_artifact["path"]).read_text(encoding="utf-8"), "tui success")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_plugin_run_cli_integrated_inprocess_default(self) -> None:
+        tmp = Path(mkdtemp())
+        try:
+            result = self.cli_runner.invoke(
+                app,
+                [
+                    "plugin", "run", "inprocess", "default", "agt_plugin",
+                    "--task", "hello plugin",
+                    "--output-root", str(tmp),
+                ],
+            )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["host_kind"], "inprocess")
+            self.assertEqual(payload["adapter_kind"], "default")
+            self.assertTrue(any(item["role"] == "result" for item in payload["artifacts"]))
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_plugin_run_cli_integrated_tmux_codex(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        capture_count = {"n": 0}
+        state = {"run_id": None}
+
+        def runner(argv: list[str], **_: object) -> Result:
+            cmd = argv[1]
+            if cmd == "has-session":
+                return Result(returncode=0)
+            if cmd == "new-session":
+                return Result()
+            if cmd == "send-keys":
+                if "-l" in argv and "AGP_RUN_BEGIN" in argv[-1]:
+                    state["run_id"] = argv[-1].splitlines()[0].split()[-1]
+                return Result()
+            if cmd == "display-message":
+                return Result("0")
+            if cmd == "capture-pane":
+                capture_count["n"] += 1
+                if capture_count["n"] <= 1:
+                    return Result("baseline\n")
+                return Result(f'baseline\nAGP_RUN_RESULT {state["run_id"]} {{"status":"success","result":"tmux plugin success"}}\n')
+            if cmd == "kill-session":
+                return Result()
+            raise AssertionError(f"unexpected tmux argv: {argv}")
+
+        tmp = Path(mkdtemp())
+        try:
+            from agp.plugins.tmux import TmuxHost
+
+            with patch("agp.cli.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
+                result = self.cli_runner.invoke(
+                    app,
+                    [
+                        "plugin", "run", "tmux", "codex", "agt_tmux_plugin",
+                        "--task", "tmux task",
+                        "--output-root", str(tmp),
+                        "--keep-session",
+                    ],
+                )
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["ok"])
+            result_artifact = next(item for item in payload["artifacts"] if item["role"] == "result")
+            self.assertEqual(Path(result_artifact["path"]).read_text(encoding="utf-8"), "tmux plugin success")
+        finally:
+            shutil.rmtree(tmp)
 
 
     # ----------------------------------------------------------------

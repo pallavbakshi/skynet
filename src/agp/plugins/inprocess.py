@@ -102,6 +102,15 @@ class DefaultAgentAdapter(AgentAdapter):
     def kind(self) -> str:
         return "default"
 
+    def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
+        return {
+            "adapter_kind": self.kind,
+            "run_id": run_id,
+            "supported": True,
+            "text": text,
+            "text_length": len(text),
+        }
+
     def execute_run(
         self,
         *,

@@ -158,6 +158,21 @@ class CodexAdapter(AgentAdapter):
     def kind(self) -> str:
         return "codex"
 
+    def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
+        cleaned = _clean_codex_tui_output(text)
+        payload = self._extract_terminal_payload(run_id=run_id, output=text) if run_id else None
+        return {
+            "adapter_kind": self.kind,
+            "mode": "tui" if self.tui_mode else "marker",
+            "run_id": run_id,
+            "cleaned_output": cleaned,
+            "marker_payload": payload,
+            "looks_like_gate_prompt": self._looks_like_gate_prompt(_strip_ansi(text)),
+            "looks_like_codex_ready": self._looks_like_codex_ready(_strip_ansi(text)),
+            "looks_like_shell_returned": self._looks_like_shell_returned(_strip_ansi(text)),
+            "supported": True,
+        }
+
     def ensure_bootstrapped(self, *, host: TerminalHost, session: TerminalSession, claimed: dict[str, Any]) -> None:  # noqa: ARG002
         if session.metadata.get("codex_bootstrapped"):
             return
