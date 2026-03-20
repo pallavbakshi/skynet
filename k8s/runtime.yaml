@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runtime
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: runtime
+  template:
+    metadata:
+      labels:
+        app: runtime
+    spec:
+      containers:
+        - name: runtime
+          image: agp:latest
+          command:
+            - python
+            - -m
+            - agp
+            - runtime-work-loop
+            - rtm_local
+            - --server-url
+            - http://control-plane:7860
+            - --hostname
+            - runtime-1
+            - --agent-id
+            - agt_local
+            - --artifact-root
+            - /artifacts
+            - --idle-sleep-seconds
+            - "1"
+          envFrom:
+            - configMapRef:
+                name: agp-config
+            - secretRef:
+                name: agp-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: artifacts
+              mountPath: /artifacts
+            - name: logs
+              mountPath: /logs
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agp-data
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: agp-artifacts
+        - name: logs
+          persistentVolumeClaim:
+            claimName: agp-logs

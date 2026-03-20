@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agp-config
+data:
+  AGP_HOST: "0.0.0.0"
+  AGP_PORT: "7860"
+  AGP_DATABASE_URL: "sqlite+pysqlite:////data/agp.db"
+  AGP_QUEUE_BACKEND: "redis"
+  AGP_REDIS_URL: "redis://redis:6379/0"
+  AGP_REDIS_QUEUE_KEY_PREFIX: "agp-k8s"
+  AGP_ARTIFACT_BACKEND: "registryfs"
+  AGP_ARTIFACT_ROOT: "/artifacts"
+  AGP_LOG_ROOT: "/logs"
+  AGP_SERVER_URL: "http://control-plane:7860"
+  AGP_BOOTSTRAP_CAPABILITY_ID: "cap_python"
+  AGP_BOOTSTRAP_AGENT_ID: "agt_local"
+  AGP_BOOTSTRAP_RUNTIME_ID: "rtm_local"

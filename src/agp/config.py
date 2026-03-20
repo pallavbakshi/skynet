@@ -1,0 +1,48 @@
+"""Configuration for the AGP scaffold."""
+
+from pathlib import Path
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Application settings loaded from environment."""
+
+    model_config = SettingsConfigDict(env_prefix="AGP_", extra="ignore")
+
+    host: str = "127.0.0.1"
+    port: int = 7860
+    database_url: str = "sqlite+pysqlite:///./agp.db"
+    app_name: str = "AGP Control Plane"
+    artifact_root: Path = Path(".agp-artifacts")
+    log_root: Path = Path(".agp-logs")
+    observability_log_rotation_bytes: int = 1_000_000
+    observability_control_plane_log_retention_days: int = 30
+    observability_runtime_log_retention_days: int = 30
+    artifact_backend: str = "localfs"
+    queue_backend: str = "delivery_table"
+    redis_url: str = "redis://127.0.0.1:6379/0"
+    redis_queue_key_prefix: str = "agp"
+    queue_visibility_timeout_seconds: int = 30
+    queue_max_delivery_attempts: int = 3
+    agent_idle_timeout_seconds: int = 300
+    runtime_stale_timeout_seconds: int = 90
+    observability_unreachable_runtime_threshold: int = 1
+    observability_expired_lease_alert_threshold: int = 3
+    observability_dead_letter_alert_threshold: int = 1
+    observability_terminal_failure_sample_size: int = 3
+    observability_terminal_failure_rate_threshold: float = 0.5
+    operator_bearer_token: str | None = None
+    operator_token_roles_json: dict[str, str] = {}
+    runtime_active_tokens_json: list[str] = []
+    runtime_bearer_token: str | None = None
+    runtime_terminal_host_kind: str = "inprocess"
+    runtime_agent_adapter_kind: str = "default"
+    wezterm_workspace: str = "agp"
+    codex_begin_marker: str = "AGP_RUN_BEGIN"
+    codex_result_marker: str = "AGP_RUN_RESULT"
+    codex_poll_interval_seconds: float = 0.25
+    codex_max_polls: int = 20
+
+
+settings = Settings()

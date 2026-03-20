@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lease-sweeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: lease-sweeper
+  template:
+    metadata:
+      labels:
+        app: lease-sweeper
+    spec:
+      containers:
+        - name: lease-sweeper
+          image: agp:latest
+          command:
+            - python
+            - -m
+            - agp
+            - sweep-loop
+            - --interval-seconds
+            - "5"
+          envFrom:
+            - configMapRef:
+                name: agp-config
+            - secretRef:
+                name: agp-secrets
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: artifacts
+              mountPath: /artifacts
+            - name: logs
+              mountPath: /logs
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agp-data
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: agp-artifacts
+        - name: logs
+          persistentVolumeClaim:
+            claimName: agp-logs

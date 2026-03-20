@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: control-plane
+  template:
+    metadata:
+      labels:
+        app: control-plane
+    spec:
+      containers:
+        - name: control-plane
+          image: agp:latest
+          command:
+            - sh
+            - -lc
+            - python -m agp initdb && python -m agp serve --host 0.0.0.0 --port 7860
+          envFrom:
+            - configMapRef:
+                name: agp-config
+            - secretRef:
+                name: agp-secrets
+          ports:
+            - containerPort: 7860
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7860
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 7860
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: artifacts
+              mountPath: /artifacts
+            - name: logs
+              mountPath: /logs
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: agp-data
+        - name: artifacts
+          persistentVolumeClaim:
+            claimName: agp-artifacts
+        - name: logs
+          persistentVolumeClaim:
+            claimName: agp-logs
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: control-plane
+spec:
+  selector:
+    app: control-plane
+  ports:
+    - name: http
+      port: 7860
+      targetPort: 7860
