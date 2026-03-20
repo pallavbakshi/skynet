@@ -310,7 +310,7 @@ class CodexAdapter(AgentAdapter):
         if not health.healthy:
             raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
 
-        cursor = host.create_cursor(session)
+        cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         supervisor.emit_progress(
             claimed,
             message="runtime.tui_dispatch",
@@ -383,7 +383,7 @@ class CodexAdapter(AgentAdapter):
         if not health.healthy:
             raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
 
-        cursor = host.create_cursor(session)
+        cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         host.send_text(session, self._task_payload(run_id=run_id, prompt=prompt), enter=True)
         transcript_parts: list[str] = [f"prompt={prompt}\n"]
         idle_count = 0

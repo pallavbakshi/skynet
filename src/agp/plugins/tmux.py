@@ -115,16 +115,39 @@ class TmuxHost(TerminalHost):
         if enter:
             self._run(["send-keys", "-t", session.session_id, "Enter"])
 
+    # ── Absolute line tracking via tmux format variables ────────────
+
+    def _absolute_line(self, session: TerminalSession) -> int:
+        """Return the cursor's absolute line (history_size + cursor_y).
+
+        This is a monotonically increasing position that survives scrollback
+        shifts — the key advantage tmux has over heuristic text-diffing.
+        """
+        hist = self._run(["display-message", "-t", session.session_id, "-p", "#{history_size}"]).strip()
+        cur_y = self._run(["display-message", "-t", session.session_id, "-p", "#{cursor_y}"]).strip()
+        return int(hist) + int(cur_y)
+
     def create_cursor(self, session: TerminalSession) -> OutputCursor:
-        baseline = self._capture(session)
+        abs_line = self._absolute_line(session)
         return OutputCursor(
             session_id=session.session_id,
-            checkpoint=baseline,
-            metadata={"line_count": 0},
+            checkpoint="",
+            metadata={"absolute_line": abs_line, "line_count": 0},
         )
 
-    def _capture(self, session: TerminalSession) -> str:
-        """Capture pane content including scrollback."""
+    def _capture_from(self, session: TerminalSession, absolute_start: int) -> str:
+        """Capture pane text from an absolute line position onward."""
+        hist = int(self._run(
+            ["display-message", "-t", session.session_id, "-p", "#{history_size}"],
+        ).strip())
+        start_offset = absolute_start - hist
+        return self._run([
+            "capture-pane", "-t", session.session_id, "-p", "-J",
+            "-S", str(start_offset),
+        ])
+
+    def _capture_full(self, session: TerminalSession) -> str:
+        """Capture full pane content including scrollback."""
         return self._run([
             "capture-pane", "-t", session.session_id, "-p",
             "-S", str(-self.scrollback_lines),
@@ -133,22 +156,22 @@ class TmuxHost(TerminalHost):
     def read_output(
         self, session: TerminalSession, cursor: OutputCursor
     ) -> OutputReadResult:
-        raw = self._capture(session)
-        delta = _compute_output_delta(raw, cursor.checkpoint)
+        mark = cursor.metadata.get("absolute_line")
+        if mark is not None:
+            delta = self._capture_from(session, mark)
+        else:
+            raw = self._capture_full(session)
+            delta = _compute_output_delta(raw, cursor.checkpoint)
+
         accumulator = self._get_accumulator(session)
         accumulator.append(delta)
-        prior_lines = cursor.metadata.get("line_count", 0)
+        abs_line = self._absolute_line(session)
         updated = OutputCursor(
             session_id=session.session_id,
-            checkpoint=raw,
+            checkpoint="",
             metadata={
-                **cursor.metadata,
-                "line_count": prior_lines + delta.count("\n"),
-                "trailing_hash": (
-                    hashlib.sha256(raw[-2048:].encode()).hexdigest()[:16]
-                    if raw
-                    else ""
-                ),
+                "absolute_line": abs_line,
+                "line_count": cursor.metadata.get("line_count", 0) + delta.count("\n"),
             },
         )
         self._save_cursor(session, updated)
@@ -157,7 +180,7 @@ class TmuxHost(TerminalHost):
             cursor=updated,
             text=delta,
             full_text=accumulator.text,
-            changed=bool(delta),
+            changed=bool(delta.strip()),
         )
 
     def _save_cursor(self, session: TerminalSession, cursor: OutputCursor) -> None:
@@ -165,10 +188,25 @@ class TmuxHost(TerminalHost):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "session_id": session.session_id,
+            "absolute_line": cursor.metadata.get("absolute_line", 0),
             "line_count": cursor.metadata.get("line_count", 0),
-            "trailing_hash": cursor.metadata.get("trailing_hash", ""),
-            "checkpoint_len": len(cursor.checkpoint),
         }, sort_keys=True))
+
+    def load_cursor(self, session: TerminalSession) -> OutputCursor | None:
+        """Load a persisted cursor from a previous runtime process."""
+        path = self.checkpoint_dir / f"cursor-{session.session_id}.json"
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        return OutputCursor(
+            session_id=session.session_id,
+            checkpoint="",
+            metadata={
+                "absolute_line": data.get("absolute_line", data.get("line_count", 0)),
+                "line_count": data.get("line_count", 0),
+                "restored": True,
+            },
+        )
 
     def interrupt(self, session: TerminalSession) -> None:
         self._run(["send-keys", "-t", session.session_id, "C-c"])
@@ -189,7 +227,7 @@ class TmuxHost(TerminalHost):
             acc.reset()
 
     def snapshot(self, session: TerminalSession) -> dict[str, Any]:
-        text = self._capture(session) if self._session_exists_raw(session.session_id) else ""
+        text = self._capture_full(session) if self._session_exists_raw(session.session_id) else ""
         acc = self._accumulators.get(session.session_id)
         return {
             "session_id": session.session_id,
@@ -256,7 +294,7 @@ class TmuxHost(TerminalHost):
                 on_poll()
             try:
                 raw = self._run([
-                    "capture-pane", "-t", session.session_id, "-p",
+                    "capture-pane", "-t", session.session_id, "-p", "-J",
                     "-S", str(-check_lines),
                 ])
             except RuntimeError:

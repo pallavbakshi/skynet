@@ -468,6 +468,14 @@ class TerminalHost(ABC):
     def session_exists(self, session: TerminalSession) -> bool:
         raise NotImplementedError
 
+    def load_cursor(self, session: TerminalSession) -> "OutputCursor | None":  # noqa: ARG002
+        """Load a persisted cursor from a previous runtime process.
+
+        Returns None if no checkpoint exists.  Hosts that support
+        restart-safe cursors should override this.
+        """
+        return None
+
     def read_visible(self, session: TerminalSession) -> str:  # noqa: ARG002
         """Read the currently visible screen content (including alternate buffer).
 
@@ -674,6 +682,11 @@ class RuntimeSupervisor:
         run = claimed["run"]
         lease = claimed["lease"]
         session = self.host.get_or_create_session(agent_id=claimed["agent_id"])
+        # Attempt to restore a cursor checkpoint from a previous runtime
+        # process.  The adapter can use this via session.metadata["restored_cursor"].
+        restored = self.host.load_cursor(session)
+        if restored is not None:
+            session.metadata["restored_cursor"] = restored
         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
         stop = Event()
 
