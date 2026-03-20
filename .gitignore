@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+agp.db
+.agp-artifacts/
+.agp-artifacts-tests/
+.wezu/
+.pytest_cache/
+.idea/
+.vscode/
+*.log
+logs/
+*.sqlite3
+.env
