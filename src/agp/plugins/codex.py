@@ -10,34 +10,100 @@ from agp.runtime import (
     _strip_ansi,
 )
 
-# Box-drawing and decorative characters used by TUI borders/frames.
+# ── Codex TUI markers ────────────────────────────────────────────────
+_PROMPT_MARKER = "\u203a"  # › = user prompt
+_RESPONSE_MARKER = "\u2022"  # • = assistant response
 _BOX_CHARS = set("\u2500\u2502\u256d\u256e\u256f\u2570\u2514\u250c\u2510\u2518\u2524\u251c\u252c\u2534\u253c\u2501\u2503")
+
+# Lines matching any of these are TUI noise, not content.
+_NOISE_PREFIXES = (
+    "Token usage:",
+    "To continue this session",
+    "Tip:",
+    "\u26a0",  # ⚠ warning
+    "\u2728",  # ✨ update banner
+    "See https://",
+    "See full release",
+    ">_",  # welcome box header
+    "model:",
+    "directory:",
+    "Press enter to",
+    "Approaching rate",
+    "Switch to gpt-",
+    "Keep current model",
+    "Hide future rate",
+    "Optimized for codex",
+)
+_NOISE_INFIXES = (
+    "\u00b7",  # · in status bar
+)
+
+
+def _is_noise_line(line: str) -> bool:
+    s = line.strip()
+    if not s:
+        return True
+    if all(ch in _BOX_CHARS or ch in " \t" for ch in s):
+        return True
+    for prefix in _NOISE_PREFIXES:
+        if s.startswith(prefix):
+            return True
+    for infix in _NOISE_INFIXES:
+        if infix in s and ("left" in s or "%" in s):
+            return True
+    return False
 
 
 def _clean_codex_tui_output(text: str) -> str:
-    """Strip Codex TUI chrome from raw terminal text.
+    """Extract the last Codex response from raw TUI output.
 
-    Removes ANSI escapes, box-drawing borders, the status bar, and blank noise
-    to leave only the meaningful response text.
+    Parses the TUI structure using › (prompt) and • (response) markers,
+    strips all chrome (box borders, status bar, banners, tips, token usage),
+    and returns only the response text from the most recent turn.
     """
     stripped = _strip_ansi(text)
     lines = stripped.splitlines()
-    cleaned: list[str] = []
+
+    # Find turns: each turn starts with a › prompt line.
+    turns: list[dict[str, Any]] = []
+    current_prompt = ""
+    response_lines: list[str] = []
+    in_response = False
+
     for line in lines:
-        content = line.rstrip()
-        # Skip lines that are entirely box-drawing / whitespace.
-        if content and all(ch in _BOX_CHARS or ch in " \t" for ch in content):
-            continue
-        # Skip Codex status-bar lines (model · tokens · path pattern).
-        if "\u00b7" in content and ("left" in content or "%" in content):
-            continue
-        cleaned.append(content)
-    # Trim leading/trailing blank lines.
-    while cleaned and not cleaned[0]:
-        cleaned.pop(0)
-    while cleaned and not cleaned[-1]:
-        cleaned.pop()
-    return "\n".join(cleaned)
+        s = line.strip()
+        if s.startswith(_PROMPT_MARKER):
+            if in_response and response_lines:
+                turns.append({"prompt": current_prompt, "response": list(response_lines)})
+            current_prompt = s.removeprefix(_PROMPT_MARKER).strip()
+            response_lines = []
+            in_response = False
+        elif s.startswith(_RESPONSE_MARKER):
+            in_response = True
+            content = s.removeprefix(_RESPONSE_MARKER).strip()
+            if content:
+                response_lines.append(content)
+        elif in_response and not _is_noise_line(line):
+            response_lines.append(s)
+
+    # Capture the last open turn.
+    if in_response and response_lines:
+        turns.append({"prompt": current_prompt, "response": list(response_lines)})
+
+    if not turns:
+        # Fallback: strip noise and return whatever is left.
+        fallback = [ln.rstrip() for ln in lines if not _is_noise_line(ln)]
+        while fallback and not fallback[0]:
+            fallback.pop(0)
+        while fallback and not fallback[-1]:
+            fallback.pop()
+        return "\n".join(fallback)
+
+    # Return the response from the last real turn.
+    last = turns[-1]["response"]
+    while last and not last[-1]:
+        last.pop()
+    return "\n".join(last)
 
 
 class CodexAdapter(AgentAdapter):
@@ -83,7 +149,7 @@ class CodexAdapter(AgentAdapter):
         if self.tui_mode:
             host.send_text(session, self.cli_command, enter=True)
             # Poll the visible screen (alternate buffer) to detect gate
-            # prompts and the Codex ready state.
+            # prompts, CLI exit, and the Codex ready state.
             deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
             while monotonic() < deadline:
                 sleep(self.idle_poll_seconds)
@@ -91,6 +157,10 @@ class CodexAdapter(AgentAdapter):
                 if self._looks_like_gate_prompt(screen):
                     host.send_text(session, "", enter=True)
                     continue
+                if self._looks_like_shell_returned(screen):
+                    raise RecoverableExecutionError(
+                        "codex cli exited back to shell during bootstrap"
+                    )
                 if self._looks_like_codex_ready(screen):
                     break
             else:
@@ -130,11 +200,21 @@ class CodexAdapter(AgentAdapter):
         lower = text.lower()
         return any(pat in lower for pat in self._GATE_PATTERNS)
 
+    # Characters that indicate a shell prompt (CLI exited).
+    _SHELL_MARKERS = {"\u276f", "$", "%", "#"}
+
     @staticmethod
     def _looks_like_codex_ready(text: str) -> bool:
         """Return True when the visible screen shows the Codex input prompt."""
-        # The Codex TUI shows › as the input prompt marker when ready.
-        return "\u203a" in text
+        return _PROMPT_MARKER in text
+
+    def _looks_like_shell_returned(self, text: str) -> bool:
+        """Return True when the visible screen shows a shell prompt (CLI exited)."""
+        lines = text.strip().splitlines()
+        tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
+        has_tui = any(_PROMPT_MARKER in ln for ln in tail)
+        has_shell = any(ln[0] in self._SHELL_MARKERS for ln in tail if ln)
+        return has_shell and not has_tui
 
     def _begin_line(self, run_id: str) -> str:
         return f"{self.begin_marker} {run_id}"
@@ -216,6 +296,11 @@ class CodexAdapter(AgentAdapter):
         )
         if not idle:
             raise RecoverableExecutionError("codex tui did not become idle within timeout")
+
+        # Verify the CLI is still running — not back to the shell.
+        screen = _strip_ansi(host.read_visible(session))
+        if self._looks_like_shell_returned(screen):
+            raise RecoverableExecutionError("codex cli exited during execution")
 
         read = host.read_output(session, cursor)
         raw_output = read.text or read.full_text

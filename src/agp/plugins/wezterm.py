@@ -10,8 +10,14 @@ from typing import Any
 from agp.config import settings
 from agp.runtime import (
     OutputCursor, OutputReadResult, SessionHealth, TerminalHost, TerminalSession,
-    _OutputAccumulator, _compute_output_delta,
+    _OutputAccumulator, _compute_output_delta, _strip_ansi,
 )
+
+# Shell prompt characters that indicate the CLI exited and the shell returned.
+_SHELL_PROMPT_CHARS = {"\u276f", "\u2733", "$", "%", "#"}
+
+# Known TUI process names for foreground detection.
+_TUI_PROCESSES = {"codex", "ncodex", "claude", "gemini"}
 
 
 class WezTermHost(TerminalHost):
@@ -117,6 +123,37 @@ class WezTermHost(TerminalHost):
         baseline = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
         return OutputCursor(session_id=session.session_id, checkpoint=baseline, metadata={"line_count": 0})
 
+    def save_cursor(self, session: TerminalSession, cursor: OutputCursor) -> None:
+        """Persist cursor state to disk for restart resilience."""
+        path = self.checkpoint_dir / f"cursor-{session.session_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "session_id": session.session_id,
+            "line_count": cursor.metadata.get("line_count", 0),
+            "trailing_hash": cursor.metadata.get("trailing_hash", ""),
+            "checkpoint_len": len(cursor.checkpoint),
+        }, sort_keys=True))
+
+    def load_cursor(self, session: TerminalSession) -> OutputCursor | None:
+        """Load a persisted cursor.  Returns None if no checkpoint exists."""
+        path = self.checkpoint_dir / f"cursor-{session.session_id}.json"
+        if not path.exists():
+            return None
+        data = json.loads(path.read_text())
+        # We cannot restore the exact checkpoint text, but we can create a
+        # fresh cursor from the current scrollback and rely on the accumulator
+        # for previously captured output.
+        raw = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
+        return OutputCursor(
+            session_id=session.session_id,
+            checkpoint=raw,
+            metadata={
+                "line_count": data.get("line_count", 0),
+                "trailing_hash": data.get("trailing_hash", ""),
+                "restored": True,
+            },
+        )
+
     def read_output(self, session: TerminalSession, cursor: OutputCursor) -> OutputReadResult:
         raw = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
         delta = _compute_output_delta(raw, cursor.checkpoint)
@@ -132,6 +169,7 @@ class WezTermHost(TerminalHost):
                 "trailing_hash": hashlib.sha256(raw[-2048:].encode()).hexdigest()[:16] if raw else "",
             },
         )
+        self.save_cursor(session, updated)
         return OutputReadResult(
             session_id=session.session_id,
             cursor=updated,
@@ -139,6 +177,28 @@ class WezTermHost(TerminalHost):
             full_text=accumulator.text,
             changed=bool(delta),
         )
+
+    def is_foreground_tui(self, session: TerminalSession) -> bool:
+        """Check whether a TUI process is still in the foreground.
+
+        Reads the visible screen and checks for TUI-specific markers vs.
+        shell prompt markers.  Returns True if a TUI appears to be running,
+        False if the shell prompt has returned.
+        """
+        screen = _strip_ansi(self.read_visible(session))
+        if not screen.strip():
+            return False
+        lines = screen.strip().splitlines()
+        # Check the last few non-empty lines for shell vs. TUI indicators.
+        tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
+        has_tui = any("\u203a" in ln for ln in tail)  # › = Codex prompt
+        has_shell = any(ln[0] in _SHELL_PROMPT_CHARS for ln in tail if ln)
+        if has_tui:
+            return True
+        if has_shell:
+            return False
+        # Ambiguous — assume TUI is still alive.
+        return True
 
     def interrupt(self, session: TerminalSession) -> None:
         self._run(["send-text", "--pane-id", session.session_id, "--no-paste", "\u0003"])

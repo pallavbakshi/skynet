@@ -3230,15 +3230,40 @@ class MvpFlowTest(unittest.TestCase):
             "\u256d\u2500\u2500\u2500\u2500\u256e\n"
             "\u2502 Welcome \u2502\n"
             "\u2570\u2500\u2500\u2500\u2500\u256f\n"
-            "Here is the answer to your question.\n"
-            "It has two lines.\n"
+            "\u203a What is 2 + 2?\n"
+            "\n"
+            "\u2022 4\n"
+            "\n"
             "gpt-4.1 \u00b7 87% left \u00b7 ~/projects\n"
         )
         cleaned = _clean_codex_tui_output(raw)
-        self.assertIn("Here is the answer", cleaned)
-        self.assertIn("two lines", cleaned)
+        self.assertEqual(cleaned, "4")
         self.assertNotIn("\u256d", cleaned)
         self.assertNotIn("gpt-4.1", cleaned)
+
+    def test_clean_codex_tui_output_extracts_last_turn(self) -> None:
+        raw = (
+            "\u203a first question\n"
+            "\u2022 first answer\n"
+            "\u203a second question\n"
+            "\u2022 second answer\n"
+            "\u2022 with continuation\n"
+        )
+        cleaned = _clean_codex_tui_output(raw)
+        self.assertIn("second answer", cleaned)
+        self.assertIn("with continuation", cleaned)
+        self.assertNotIn("first answer", cleaned)
+
+    def test_clean_codex_tui_output_strips_noise_lines(self) -> None:
+        raw = (
+            "\u203a do work\n"
+            "\u2022 here is the result\n"
+            "Token usage: total=100 input=80 output=20\n"
+            "To continue this session, run codex resume abc123\n"
+            "Tip: Try the new feature\n"
+        )
+        cleaned = _clean_codex_tui_output(raw)
+        self.assertEqual(cleaned, "here is the result")
 
     def test_clean_codex_tui_output_preserves_content(self) -> None:
         raw = "line one\nline two\nline three\n"
@@ -3354,6 +3379,103 @@ class MvpFlowTest(unittest.TestCase):
         }
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(result.artifacts[-1].content, "marker result")
+
+    # ── Gap-closure tests: CLI exit detection ────────────────────────
+
+    def test_codex_adapter_tui_detects_shell_returned_during_bootstrap(self) -> None:
+        class ShellReturnHost(InProcessTerminalHost):
+            """Host where read_visible shows a shell prompt (CLI exited)."""
+            def read_visible(self, session):
+                return "\u276f some shell prompt\n"
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0)
+        host = ShellReturnHost()
+        session = host.get_or_create_session(agent_id="agt_exit_boot")
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        self.assertIn("exited back to shell", str(ctx.exception))
+
+    def test_codex_adapter_tui_detects_shell_returned_during_execution(self) -> None:
+        call_count = {"n": 0}
+
+        class ExitDuringRunHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("ncodex"):
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a Summarize recent commits\n"
+                    )
+
+            def read_visible(self, session):
+                call_count["n"] += 1
+                if call_count["n"] <= 1:
+                    return "\u203a ready\n"
+                return "\u276f shell prompt\n"
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_exit"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        host = ExitDuringRunHost()
+        session = host.get_or_create_session(agent_id="agt_exit_run")
+        adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        claimed = {
+            "agent_id": "agt_exit_run",
+            "job": {"job_id": "job_exit_run"},
+            "run": {"run_id": "run_exit_run"},
+            "message": {"text": "do work"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("exited during execution", str(ctx.exception))
+
+    # ── Gap-closure tests: cursor persistence ────────────────────────
+
+    def test_wezterm_host_cursor_persistence(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        get_text_responses = iter(["baseline\n", "baseline\nnew line\n"])
+
+        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
+            if argv[2] == "get-text":
+                return Result(next(get_text_responses))
+            if argv[2] == "list":
+                return Result(
+                    json.dumps([{"pane_id": 77, "tab_id": 1, "window_id": 1,
+                                 "workspace": "agp-test", "window_title": "AGP:agt_persist",
+                                 "tab_title": "AGP:agt_persist", "cwd": "/tmp"}])
+                )
+            raise AssertionError(f"unexpected: {argv}")
+
+        tmp = Path(mkdtemp())
+        try:
+            host = WezTermHost(workspace="agp-test", runner=runner, checkpoint_dir=tmp)
+            session = host.get_or_create_session(agent_id="agt_persist")
+            cursor = host.create_cursor(session)
+            read = host.read_output(session, cursor)
+            self.assertTrue(read.changed)
+
+            cursor_file = tmp / f"cursor-{session.session_id}.json"
+            self.assertTrue(cursor_file.exists())
+
+            import json as _json
+            saved = _json.loads(cursor_file.read_text())
+            self.assertEqual(saved["session_id"], session.session_id)
+            self.assertIn("line_count", saved)
+            self.assertIn("trailing_hash", saved)
+        finally:
+            shutil.rmtree(tmp)
 
 
 if __name__ == "__main__":
