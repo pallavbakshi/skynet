@@ -631,6 +631,37 @@ class RuntimeSupervisor:
             details=details or {},
         )
 
+    def run_forever(
+        self,
+        *,
+        agent_id: str | None = None,
+        capability_id: str | None = None,
+        lease_ttl_seconds: int = 30,
+        heartbeat_interval_seconds: float = 5.0,
+        idle_sleep_seconds: float = 0.25,
+        max_iterations: int | None = None,
+        stop_event: Event | None = None,
+        max_local_recoveries: int = 1,
+    ) -> list[dict[str, Any]]:
+        outcomes: list[dict[str, Any]] = []
+        iterations = 0
+        stop_event = stop_event or Event()
+        while not stop_event.is_set():
+            if max_iterations is not None and iterations >= max_iterations:
+                break
+            outcome = self.run_once(
+                agent_id=agent_id,
+                capability_id=capability_id,
+                lease_ttl_seconds=lease_ttl_seconds,
+                heartbeat_interval_seconds=heartbeat_interval_seconds,
+                max_local_recoveries=max_local_recoveries,
+            )
+            outcomes.append(outcome)
+            iterations += 1
+            if not outcome.get("claimed"):
+                stop_event.wait(idle_sleep_seconds)
+        return outcomes
+
     def run_once(
         self,
         *,
@@ -1096,36 +1127,6 @@ class StandalonePluginRunner:
                 except Exception:  # noqa: BLE001
                     pass
 
-    def run_forever(
-        self,
-        *,
-        agent_id: str | None = None,
-        capability_id: str | None = None,
-        lease_ttl_seconds: int = 30,
-        heartbeat_interval_seconds: float = 5.0,
-        idle_sleep_seconds: float = 0.25,
-        max_iterations: int | None = None,
-        stop_event: Event | None = None,
-        max_local_recoveries: int = 1,
-    ) -> list[dict[str, Any]]:
-        outcomes: list[dict[str, Any]] = []
-        iterations = 0
-        stop_event = stop_event or Event()
-        while not stop_event.is_set():
-            if max_iterations is not None and iterations >= max_iterations:
-                break
-            outcome = self.run_once(
-                agent_id=agent_id,
-                capability_id=capability_id,
-                lease_ttl_seconds=lease_ttl_seconds,
-                heartbeat_interval_seconds=heartbeat_interval_seconds,
-                max_local_recoveries=max_local_recoveries,
-            )
-            outcomes.append(outcome)
-            iterations += 1
-            if not outcome.get("claimed"):
-                stop_event.wait(idle_sleep_seconds)
-        return outcomes
 
 
 # Backward-compatible re-exports — plugins are the canonical location.
