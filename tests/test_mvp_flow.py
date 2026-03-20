@@ -36,7 +36,9 @@ from agp.cli import (
     list_run_artifacts_via_api,
     observability_alerts_via_api,
     observability_control_plane_logs_via_api,
+    observability_dispatch_alerts_via_api,
     observability_job_trace_via_api,
+    observability_metrics_via_api,
     observability_runtime_logs_via_api,
     observability_summary_via_api,
     rotate_operator_tokens_via_api,
@@ -119,6 +121,26 @@ class FakeRedisClient:
 
     def sadd(self, name: str, value: str) -> None:
         self.sets.setdefault(name, set()).add(value)
+
+
+class _FakeWebhookResponse:
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeWebhookClient:
+    def __init__(self, sink: list[dict]) -> None:
+        self.sink = sink
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+    def post(self, url: str, json: dict) -> _FakeWebhookResponse:
+        self.sink.append({"url": url, "json": json})
+        return _FakeWebhookResponse()
 
     def srem(self, name: str, value: str) -> None:
         self.sets.setdefault(name, set()).discard(value)
@@ -955,6 +977,22 @@ class MvpFlowTest(unittest.TestCase):
         self.assertGreaterEqual(summary["queue"]["depth"], 1)
         self.assertGreater(summary["events"]["latest_event_seq"], 0)
 
+    def test_observability_metrics_export_prometheus_text(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_metrics", "capability_id": "cap_python"})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_metrics"},
+                "message": {"text": "metrics export", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "metrics-export-1"},
+        )
+        metrics = observability_metrics_via_api(self.client)
+        self.assertIn("# HELP agp_jobs_total", metrics)
+        self.assertIn('agp_jobs_total{status="queued"}', metrics)
+        self.assertIn("# HELP agp_queue_deliveries_total", metrics)
+        self.assertIn("agp_events_latest_seq ", metrics)
+
     def test_observability_job_trace_reports_ordered_timeline_and_durations(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_trace", "capability_id": "cap_python"})
         self.client.post(
@@ -1237,6 +1275,33 @@ class MvpFlowTest(unittest.TestCase):
         self.assertNotIn("repeated_fencing_events", codes)
         self.assertNotIn("queue_dead_lettering", codes)
         self.assertNotIn("rising_terminal_failure_rate", codes)
+
+    def test_observability_dispatch_alerts_posts_to_configured_webhook(self) -> None:
+        settings.observability_alert_webhook_url = "https://alerts.example.invalid/agp"
+        try:
+            self.client.post("/runtimes/register", json={"runtime_id": "rtm_alert_dispatch", "hostname": "localhost"})
+            session = SessionLocal()
+            try:
+                runtime = session.get(Runtime, "rtm_alert_dispatch")
+                assert runtime is not None
+                runtime.health_status = HealthStatus.UNREACHABLE.value
+                session.commit()
+            finally:
+                session.close()
+
+            sink: list[dict] = []
+            with patch.object(control_plane_module.httpx, "Client", return_value=_FakeWebhookClient(sink)):
+                payload = observability_dispatch_alerts_via_api(self.client)
+
+            self.assertTrue(payload["delivered"])
+            self.assertEqual(payload["target"], settings.observability_alert_webhook_url)
+            self.assertEqual(len(sink), 1)
+            self.assertEqual(sink[0]["url"], settings.observability_alert_webhook_url)
+            self.assertEqual(sink[0]["json"]["kind"], "observability_alerts")
+            codes = {item["code"] for item in sink[0]["json"]["items"]}
+            self.assertIn("runtime_unreachable", codes)
+        finally:
+            settings.observability_alert_webhook_url = None
 
     def test_backup_and_restore_snapshot_preserves_state_and_artifacts(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_backup", "capability_id": "cap_python"})

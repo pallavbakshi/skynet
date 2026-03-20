@@ -1037,6 +1037,18 @@ def observability_alerts_via_api(client: httpx.Client) -> dict:
     return response.json()["data"]
 
 
+def observability_metrics_via_api(client: httpx.Client) -> str:
+    response = client.get("/observability/metrics")
+    response.raise_for_status()
+    return response.text
+
+
+def observability_dispatch_alerts_via_api(client: httpx.Client) -> dict:
+    response = client.post("/observability/alerts/dispatch")
+    response.raise_for_status()
+    return response.json()["data"]
+
+
 def system_auth_status_via_api(client: httpx.Client) -> dict:
     response = client.get("/system/auth-status")
     response.raise_for_status()
@@ -2061,6 +2073,30 @@ def observability_alerts(
 
     with httpx.Client(base_url=server_url.rstrip("/"), headers=_build_headers(operator_token), timeout=10.0) as client:
         payload = observability_alerts_via_api(client)
+    typer.echo(json.dumps(payload, default=str))
+
+
+@app.command()
+def observability_metrics(
+    server_url: str = "http://127.0.0.1:7860",
+    operator_token: str | None = settings.operator_bearer_token,
+) -> None:
+    """Fetch Prometheus-style metrics for AGP."""
+
+    with httpx.Client(base_url=server_url.rstrip("/"), headers=_build_headers(operator_token), timeout=10.0) as client:
+        payload = observability_metrics_via_api(client)
+    typer.echo(payload, nl=False)
+
+
+@app.command()
+def observability_dispatch_alerts(
+    server_url: str = "http://127.0.0.1:7860",
+    operator_token: str | None = settings.operator_bearer_token,
+) -> None:
+    """Dispatch current active alerts to the configured webhook."""
+
+    with httpx.Client(base_url=server_url.rstrip("/"), headers=_build_headers(operator_token), timeout=10.0) as client:
+        payload = observability_dispatch_alerts_via_api(client)
     typer.echo(json.dumps(payload, default=str))
 
 

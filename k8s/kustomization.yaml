@@ -6,8 +6,10 @@ resources:
   - configmap.yaml
   - secret.yaml
   - pvc-data.yaml
+  - pvc-postgres.yaml
   - pvc-artifacts.yaml
   - pvc-logs.yaml
+  - postgres.yaml
   - redis.yaml
   - control-plane.yaml
   - bootstrap-job.yaml

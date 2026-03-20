@@ -5,7 +5,6 @@ metadata:
 data:
   AGP_HOST: "0.0.0.0"
   AGP_PORT: "7860"
-  AGP_DATABASE_URL: "sqlite+pysqlite:////data/agp.db"
   AGP_QUEUE_BACKEND: "redis"
   AGP_REDIS_URL: "redis://redis:6379/0"
   AGP_REDIS_QUEUE_KEY_PREFIX: "agp-k8s"

@@ -1,0 +1,154 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: agp
+      POSTGRES_USER: agp
+      POSTGRES_PASSWORD: agp
+    volumes:
+      - agp_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agp -d agp"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+
+  control-plane:
+    build:
+      context: .
+    command:
+      - sh
+      - -lc
+      - python -m agp initdb && python -m agp serve --host 0.0.0.0 --port 7860
+    environment:
+      AGP_HOST: 0.0.0.0
+      AGP_PORT: "7860"
+      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
+      AGP_QUEUE_BACKEND: redis
+      AGP_REDIS_URL: redis://redis:6379/0
+      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
+      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_ROOT: /artifacts
+      AGP_LOG_ROOT: /logs
+    volumes:
+      - agp_artifacts:/artifacts
+      - agp_logs:/logs
+    ports:
+      - "7860:7860"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health', timeout=2).read()"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  bootstrap:
+    build:
+      context: .
+    command: ["python", "scripts/bootstrap_local_stack.py"]
+    environment:
+      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
+      AGP_QUEUE_BACKEND: redis
+      AGP_REDIS_URL: redis://redis:6379/0
+      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
+      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_ROOT: /artifacts
+      AGP_LOG_ROOT: /logs
+      AGP_SERVER_URL: http://control-plane:7860
+      AGP_BOOTSTRAP_CAPABILITY_ID: cap_python
+      AGP_BOOTSTRAP_AGENT_ID: agt_local
+      AGP_BOOTSTRAP_RUNTIME_ID: rtm_local
+    volumes:
+      - agp_artifacts:/artifacts
+      - agp_logs:/logs
+    depends_on:
+      control-plane:
+        condition: service_healthy
+    restart: "no"
+
+  runtime:
+    build:
+      context: .
+    command:
+      - python
+      - -m
+      - agp
+      - runtime-work-loop
+      - rtm_local
+      - --server-url
+      - http://control-plane:7860
+      - --hostname
+      - runtime-1
+      - --agent-id
+      - agt_local
+      - --artifact-root
+      - /artifacts
+      - --idle-sleep-seconds
+      - "1"
+    environment:
+      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
+      AGP_QUEUE_BACKEND: redis
+      AGP_REDIS_URL: redis://redis:6379/0
+      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
+      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_ROOT: /artifacts
+      AGP_LOG_ROOT: /logs
+    volumes:
+      - agp_artifacts:/artifacts
+      - agp_logs:/logs
+    depends_on:
+      control-plane:
+        condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
+
+  lease-sweeper:
+    build:
+      context: .
+    command: ["python", "-m", "agp", "sweep-loop", "--interval-seconds", "5"]
+    environment:
+      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
+      AGP_QUEUE_BACKEND: redis
+      AGP_REDIS_URL: redis://redis:6379/0
+      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
+      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_ROOT: /artifacts
+      AGP_LOG_ROOT: /logs
+    volumes:
+      - agp_artifacts:/artifacts
+      - agp_logs:/logs
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+  runtime-sweeper:
+    build:
+      context: .
+    command: ["python", "-m", "agp", "sweep-runtimes-loop", "--interval-seconds", "10"]
+    environment:
+      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
+      AGP_QUEUE_BACKEND: redis
+      AGP_REDIS_URL: redis://redis:6379/0
+      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
+      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_ROOT: /artifacts
+      AGP_LOG_ROOT: /logs
+    volumes:
+      - agp_artifacts:/artifacts
+      - agp_logs:/logs
+    depends_on:
+      control-plane:
+        condition: service_healthy
+
+volumes:
+  agp_pgdata:
+  agp_artifacts:
+  agp_logs:

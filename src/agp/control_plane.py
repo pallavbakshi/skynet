@@ -10,9 +10,10 @@ from threading import Lock
 from types import SimpleNamespace
 from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.exc import OperationalError
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -110,6 +111,16 @@ def _count_by(db: Session, model, column, values: list[str]) -> dict[str, int]:
         value: int(db.scalar(select(func.count()).select_from(model).where(column == value)) or 0)
         for value in values
     }
+
+
+def _prom_metric(name: str, value: int | float, labels: dict[str, str] | None = None) -> str:
+    if not labels:
+        return f"{name} {value}"
+    escaped = []
+    for key, item in labels.items():
+        value_text = str(item).replace("\\", "\\\\").replace('"', '\\"')
+        escaped.append(f'{key}="{value_text}"')
+    return f"{name}{{{','.join(escaped)}}} {value}"
 
 
 def _new_id(prefix: str) -> str:
@@ -2282,8 +2293,7 @@ def observability_summary(db: Session = Depends(get_db)) -> dict:
     )
 
 
-@router.get("/observability/alerts", response_model=dict)
-def observability_alerts(db: Session = Depends(get_db)) -> dict:
+def _current_alerts_payload(db: Session) -> dict:
     expired_leases = int(
         db.scalar(select(func.count()).select_from(Lease).where(Lease.status == LeaseStatus.EXPIRED.value)) or 0
     )
@@ -2371,17 +2381,105 @@ def observability_alerts(db: Session = Depends(get_db)) -> dict:
             }
         )
 
+    return {
+        "items": alerts,
+        "counts": {
+            "active": len(alerts),
+            "expired_leases": expired_leases,
+            "dead_lettered_deliveries": dead_lettered_deliveries,
+            "unreachable_runtimes": unreachable_runtimes,
+        },
+    }
+
+
+@router.get("/observability/alerts", response_model=dict)
+def observability_alerts(db: Session = Depends(get_db)) -> dict:
+    return _ok(_current_alerts_payload(db))
+
+
+@router.post("/observability/alerts/dispatch", response_model=dict)
+def observability_dispatch_alerts(db: Session = Depends(get_db)) -> dict:
+    if not settings.observability_alert_webhook_url:
+        raise HTTPException(status_code=409, detail="observability alert webhook is not configured")
+    payload = {
+        "source": "agp",
+        "kind": "observability_alerts",
+        "generated_at": utc_now().isoformat(),
+        **_current_alerts_payload(db),
+    }
+    with httpx.Client(timeout=settings.observability_alert_webhook_timeout_seconds) as client:
+        response = client.post(settings.observability_alert_webhook_url, json=payload)
+        response.raise_for_status()
     return _ok(
         {
-            "items": alerts,
-            "counts": {
-                "active": len(alerts),
-                "expired_leases": expired_leases,
-                "dead_lettered_deliveries": dead_lettered_deliveries,
-                "unreachable_runtimes": unreachable_runtimes,
-            },
+            "delivered": True,
+            "target": settings.observability_alert_webhook_url,
+            "alert_count": len(payload["items"]),
         }
     )
+
+
+@router.get("/observability/metrics")
+def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
+    lines = [
+        "# HELP agp_jobs_total Jobs grouped by status.",
+        "# TYPE agp_jobs_total gauge",
+    ]
+    for status, count in _count_by(db, Job, Job.status, [item.value for item in JobStatus]).items():
+        lines.append(_prom_metric("agp_jobs_total", count, {"status": status}))
+
+    lines.extend(["# HELP agp_runs_total Runs grouped by status.", "# TYPE agp_runs_total gauge"])
+    for status, count in _count_by(db, Run, Run.status, [item.value for item in RunStatus]).items():
+        lines.append(_prom_metric("agp_runs_total", count, {"status": status}))
+
+    lines.extend(["# HELP agp_agents_total Agents grouped by status.", "# TYPE agp_agents_total gauge"])
+    for status, count in _count_by(db, Agent, Agent.status, [item.value for item in AgentStatus]).items():
+        lines.append(_prom_metric("agp_agents_total", count, {"status": status}))
+
+    lines.extend(["# HELP agp_runtimes_total Runtimes grouped by status.", "# TYPE agp_runtimes_total gauge"])
+    for status, count in _count_by(db, Runtime, Runtime.status, [item.value for item in RuntimeStatus]).items():
+        lines.append(_prom_metric("agp_runtimes_total", count, {"status": status}))
+
+    lines.extend(
+        ["# HELP agp_runtime_health_total Runtimes grouped by health status.", "# TYPE agp_runtime_health_total gauge"]
+    )
+    for status, count in _count_by(db, Runtime, Runtime.health_status, [item.value for item in HealthStatus]).items():
+        lines.append(_prom_metric("agp_runtime_health_total", count, {"status": status}))
+
+    lines.extend(["# HELP agp_leases_total Leases grouped by status.", "# TYPE agp_leases_total gauge"])
+    for status, count in _count_by(db, Lease, Lease.status, [item.value for item in LeaseStatus]).items():
+        lines.append(_prom_metric("agp_leases_total", count, {"status": status}))
+
+    lines.extend(
+        ["# HELP agp_queue_deliveries_total Queue deliveries grouped by state.", "# TYPE agp_queue_deliveries_total gauge"]
+    )
+    for state in ("pending", "delivered", "acked", "dead_lettered"):
+        count = int(
+            db.scalar(select(func.count()).select_from(QueueDeliveryRecord).where(QueueDeliveryRecord.state == state)) or 0
+        )
+        lines.append(_prom_metric("agp_queue_deliveries_total", count, {"state": state}))
+
+    lines.extend(
+        ["# HELP agp_observability_active_alerts Current active alerts grouped by code.", "# TYPE agp_observability_active_alerts gauge"]
+    )
+    for item in _current_alerts_payload(db)["items"]:
+        lines.append(
+            _prom_metric(
+                "agp_observability_active_alerts",
+                1,
+                {"code": item["code"], "severity": item["severity"]},
+            )
+        )
+
+    latest_event_seq = int(db.scalar(select(func.max(Event.event_seq))) or 0)
+    lines.extend(
+        [
+            "# HELP agp_events_latest_seq Latest allocated event sequence.",
+            "# TYPE agp_events_latest_seq gauge",
+            _prom_metric("agp_events_latest_seq", latest_event_seq),
+        ]
+    )
+    return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @router.get("/observability/jobs/{job_id}/trace", response_model=dict)
