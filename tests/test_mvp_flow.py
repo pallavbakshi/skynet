@@ -3489,7 +3489,7 @@ class MvpFlowTest(unittest.TestCase):
                 self.stderr = stderr
                 self.returncode = returncode
 
-        state = {"session_exists": False, "captures": 0}
+        state = {"session_exists": False, "captures": 0, "abs_line": 0}
 
         def runner(argv: list[str], **_: object) -> Result:
             calls.append(argv)
@@ -3501,9 +3501,12 @@ class MvpFlowTest(unittest.TestCase):
                 return Result()
             if cmd == "send-keys":
                 return Result()
+            if cmd == "display-message":
+                state["abs_line"] += 1
+                return Result(str(state["abs_line"]))
             if cmd == "capture-pane":
                 state["captures"] += 1
-                if state["captures"] == 1:
+                if state["captures"] <= 1:
                     return Result("baseline\n")
                 return Result("baseline\nnew output\n")
             if cmd == "kill-session":
@@ -3521,9 +3524,9 @@ class MvpFlowTest(unittest.TestCase):
 
         host.send_text(session, "hello", enter=True)
         send_calls = [c for c in calls if c[1] == "send-keys"]
-        self.assertEqual(len(send_calls), 1)
+        self.assertEqual(len(send_calls), 2)  # -l text + Enter as separate calls
         self.assertIn("hello", send_calls[0])
-        self.assertIn("Enter", send_calls[0])
+        self.assertIn("Enter", send_calls[1])
 
         cursor = host.create_cursor(session)
         read = host.read_output(session, cursor)
@@ -3547,6 +3550,8 @@ class MvpFlowTest(unittest.TestCase):
         def runner(argv: list[str], **_: object) -> Result:
             if argv[1] == "has-session":
                 return Result(returncode=0)
+            if argv[1] == "display-message":
+                return Result("0")
             if argv[1] == "capture-pane":
                 return Result("existing\n")
             return Result()
@@ -3567,6 +3572,8 @@ class MvpFlowTest(unittest.TestCase):
         def runner(argv: list[str], **_: object) -> Result:
             if argv[1] == "has-session":
                 return Result(returncode=0)
+            if argv[1] == "display-message":
+                return Result("0")
             if argv[1] == "capture-pane":
                 if "-S" in argv:
                     return Result("scrollback content\n")
@@ -3598,6 +3605,8 @@ class MvpFlowTest(unittest.TestCase):
                 return Result()
             if argv[1] == "send-keys":
                 return Result()
+            if argv[1] == "display-message":
+                return Result("0")
             if argv[1] == "capture-pane":
                 capture_count["n"] += 1
                 if "-S" not in argv:
