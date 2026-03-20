@@ -1,6 +1,7 @@
 """Codex CLI agent adapter plugin."""
 from __future__ import annotations
 import json
+import shlex
 from time import monotonic, sleep
 from typing import Any
 
@@ -180,6 +181,13 @@ class CodexAdapter(AgentAdapter):
         if not health.healthy:
             raise RecoverableExecutionError(f"session unhealthy before bootstrap: {health.reason}")
         if self.tui_mode:
+            # On this Linux host, interactive Codex launched inside tmux accepts the
+            # prompt visually but does not progress when the prompt is injected later
+            # with send-keys.  We therefore use a per-run launch path for tmux TUI
+            # execution and skip persistent bootstrap here.
+            if host.kind == "tmux":
+                session.metadata["codex_bootstrapped"] = True
+                return
             host.send_text(session, self.cli_command, enter=True)
             # Poll the visible screen (alternate buffer) to detect gate
             # prompts, CLI exit, and the Codex ready state.
@@ -321,6 +329,13 @@ class CodexAdapter(AgentAdapter):
         prompt = claimed["message"]["text"]
         run_id = claimed["run"]["run_id"]
 
+        if host.kind == "tmux":
+            # Tmux works reliably here only when Codex is launched with the task
+            # prompt on the initial command line.  Reset the session to a clean
+            # shell before each run so we don't depend on persistent interactive
+            # Codex state inside tmux.
+            session = host.reset_session(session)
+
         health = host.health(session)
         if not health.healthy:
             raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
@@ -331,7 +346,10 @@ class CodexAdapter(AgentAdapter):
             message="runtime.tui_dispatch",
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
-        host.send_text(session, prompt, enter=True)
+        if host.kind == "tmux":
+            host.send_text(session, f"{self.cli_command} {shlex.quote(prompt)}", enter=True)
+        else:
+            host.send_text(session, prompt, enter=True)
 
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)

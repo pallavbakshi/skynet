@@ -3364,6 +3364,66 @@ class MvpFlowTest(unittest.TestCase):
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertIn("no output", str(ctx.exception))
 
+    def test_codex_adapter_tui_mode_tmux_launches_prompt_inline_per_run(self) -> None:
+        class TmuxTuiHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.reset_calls = 0
+                self.sent: list[str] = []
+
+            def reset_session(self, session):
+                self.reset_calls += 1
+                return super().reset_session(session)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+                super().send_text(session, text, enter=enter)
+                if text.startswith("ncodex "):
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a What is 2 + 2? Reply with just the number.\n\u2022 4\n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_tui"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="ncodex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=1,
+            idle_timeout_seconds=0.1,
+        )
+        host = TmuxTuiHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_tui")
+        adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        self.assertTrue(session.metadata.get("codex_bootstrapped"))
+        self.assertEqual(host.sent, [])
+
+        claimed = {
+            "agent_id": "agt_tmux_tui",
+            "job": {"job_id": "job_tmux_tui"},
+            "run": {"run_id": "run_tmux_tui"},
+            "message": {"text": "What is 2 + 2? Reply with just the number."},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(host.reset_calls, 1)
+        self.assertTrue(any(text.startswith("ncodex --full-auto ") for text in host.sent))
+        self.assertEqual(result.artifacts[-1].content, "4")
+        self.assertEqual(result.summary["mode"], "tui")
+
     def test_codex_adapter_marker_mode_still_works(self) -> None:
         class CodexHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
