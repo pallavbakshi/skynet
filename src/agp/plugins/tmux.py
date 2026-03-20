@@ -108,11 +108,12 @@ class TmuxHost(TerminalHost):
     def send_text(
         self, session: TerminalSession, text: str, *, enter: bool = True
     ) -> None:
-        # tmux send-keys treats each argument as a key; pass text + optional Enter.
-        args = ["send-keys", "-t", session.session_id, text]
+        # Use -l (literal) for the text to prevent tmux interpreting key names,
+        # then send Enter as a separate key event.
+        if text:
+            self._run(["send-keys", "-t", session.session_id, "-l", text])
         if enter:
-            args.append("Enter")
-        self._run(args)
+            self._run(["send-keys", "-t", session.session_id, "Enter"])
 
     def create_cursor(self, session: TerminalSession) -> OutputCursor:
         baseline = self._capture(session)

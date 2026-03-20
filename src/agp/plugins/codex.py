@@ -91,7 +91,15 @@ def _clean_codex_tui_output(text: str) -> str:
         turns.append({"prompt": current_prompt, "response": list(response_lines)})
 
     if not turns:
-        # Fallback: strip noise and return whatever is left.
+        # Fallback: collect all •-prefixed lines as response content.
+        response_lines = []
+        for line in lines:
+            s = line.strip()
+            if s.startswith(_RESPONSE_MARKER):
+                response_lines.append(s.removeprefix(_RESPONSE_MARKER).strip())
+        if response_lines:
+            return "\n".join(response_lines)
+        # Last resort: strip noise and return whatever is left.
         fallback = [ln.rstrip() for ln in lines if not _is_noise_line(ln)]
         while fallback and not fallback[0]:
             fallback.pop(0)
@@ -99,11 +107,21 @@ def _clean_codex_tui_output(text: str) -> str:
             fallback.pop()
         return "\n".join(fallback)
 
-    # Return the response from the last real turn.
-    last = turns[-1]["response"]
-    while last and not last[-1]:
-        last.pop()
-    return "\n".join(last)
+    # Find the last turn that has actual response content (not dialog noise).
+    for turn in reversed(turns):
+        content = [ln for ln in turn["response"] if ln.strip()]
+        if content:
+            while content and not content[-1]:
+                content.pop()
+            return "\n".join(content)
+
+    # All turns were noise — fall back to collecting all • lines.
+    response_lines = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith(_RESPONSE_MARKER):
+            response_lines.append(s.removeprefix(_RESPONSE_MARKER).strip())
+    return "\n".join(response_lines)
 
 
 class CodexAdapter(AgentAdapter):
@@ -155,12 +173,8 @@ class CodexAdapter(AgentAdapter):
                 sleep(self.idle_poll_seconds)
                 screen = _strip_ansi(host.read_visible(session))
                 if self._looks_like_gate_prompt(screen):
-                    host.send_text(session, "", enter=True)
+                    host.send_text(session, self._gate_response(screen), enter=True)
                     continue
-                if self._looks_like_shell_returned(screen):
-                    raise RecoverableExecutionError(
-                        "codex cli exited back to shell during bootstrap"
-                    )
                 if self._looks_like_codex_ready(screen):
                     break
             else:
@@ -184,7 +198,9 @@ class CodexAdapter(AgentAdapter):
                 raise RecoverableExecutionError(f"session unhealthy after bootstrap: {health.reason}")
         session.metadata["codex_bootstrapped"] = True
 
-    # Patterns that indicate a TUI gate/confirmation prompt.
+    # Patterns that indicate a TUI gate/confirmation prompt that should
+    # be auto-dismissed.  For numbered menus, the adapter sends the
+    # preferred choice; for simple confirmations it sends Enter.
     _GATE_PATTERNS = (
         "trust the contents",
         "do you trust",
@@ -194,11 +210,29 @@ class CodexAdapter(AgentAdapter):
         "confirm",
         "permission",
         "allow",
+        "approaching rate limits",
+        "switch to gpt-",
+        "press enter to confirm or esc",
     )
+
+    # Preferred default choices for numbered dialog menus.
+    # Maps a recognisable phrase to the number key to send.
+    _GATE_CHOICES = {
+        "approaching rate limits": "3",  # "Keep current model (never show again)"
+        "switch to gpt-": "3",
+    }
 
     def _looks_like_gate_prompt(self, text: str) -> bool:
         lower = text.lower()
         return any(pat in lower for pat in self._GATE_PATTERNS)
+
+    def _gate_response(self, text: str) -> str:
+        """Return the key to send for a gate prompt (a number for menus, empty for Enter)."""
+        lower = text.lower()
+        for phrase, choice in self._GATE_CHOICES.items():
+            if phrase in lower:
+                return choice
+        return ""
 
     # Characters that indicate a shell prompt (CLI exited).
     _SHELL_MARKERS = {"\u276f", "$", "%", "#"}
@@ -287,23 +321,37 @@ class CodexAdapter(AgentAdapter):
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)
 
-        idle = host.wait_for_idle(
-            session,
-            poll_seconds=self.idle_poll_seconds,
-            idle_after=self.idle_after,
-            timeout_seconds=self.idle_timeout_seconds,
-            on_poll=_poll_hook,
-        )
-        if not idle:
-            raise RecoverableExecutionError("codex tui did not become idle within timeout")
+        # Wait for idle, verify Codex produced a response, and auto-dismiss
+        # any gate prompts (like rate-limit dialogs) that appear mid-run.
+        timeout = self.idle_timeout_seconds or 180.0
+        deadline = monotonic() + timeout
+        while monotonic() < deadline:
+            remaining = max(deadline - monotonic(), 1.0)
+            idle = host.wait_for_idle(
+                session,
+                poll_seconds=self.idle_poll_seconds,
+                idle_after=self.idle_after,
+                timeout_seconds=remaining,
+                on_poll=_poll_hook,
+            )
+            if not idle:
+                raise RecoverableExecutionError("codex tui did not become idle within timeout")
 
-        # Verify the CLI is still running — not back to the shell.
-        screen = _strip_ansi(host.read_visible(session))
-        if self._looks_like_shell_returned(screen):
-            raise RecoverableExecutionError("codex cli exited during execution")
+            screen = _strip_ansi(host.read_visible(session))
+            if self._looks_like_shell_returned(screen):
+                raise RecoverableExecutionError("codex cli exited during execution")
+            if self._looks_like_gate_prompt(screen):
+                host.send_text(session, self._gate_response(screen), enter=True)
+                continue
+            if _RESPONSE_MARKER in screen:
+                break
+            sleep(self.idle_poll_seconds)
 
+        # Use the visible screen for TUI output — scrollback deltas are
+        # unreliable because TUI apps repaint the entire screen.
+        raw_output = _strip_ansi(host.read_visible(session))
+        # Also update the cursor/accumulator for bookkeeping.
         read = host.read_output(session, cursor)
-        raw_output = read.text or read.full_text
         cleaned = _clean_codex_tui_output(raw_output)
 
         if not cleaned.strip():

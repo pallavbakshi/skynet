@@ -3382,18 +3382,18 @@ class MvpFlowTest(unittest.TestCase):
 
     # ── Gap-closure tests: CLI exit detection ────────────────────────
 
-    def test_codex_adapter_tui_detects_shell_returned_during_bootstrap(self) -> None:
-        class ShellReturnHost(InProcessTerminalHost):
-            """Host where read_visible shows a shell prompt (CLI exited)."""
+    def test_codex_adapter_tui_bootstrap_times_out_when_cli_never_ready(self) -> None:
+        class NeverReadyHost(InProcessTerminalHost):
+            """Host where read_visible never shows the Codex ready marker."""
             def read_visible(self, session):
-                return "\u276f some shell prompt\n"
+                return "loading...\n"
 
-        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0)
-        host = ShellReturnHost()
-        session = host.get_or_create_session(agent_id="agt_exit_boot")
+        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_timeout_seconds=0.01)
+        host = NeverReadyHost()
+        session = host.get_or_create_session(agent_id="agt_timeout_boot")
         with self.assertRaises(RecoverableExecutionError) as ctx:
             adapter.ensure_bootstrapped(host=host, session=session, claimed={})
-        self.assertIn("exited back to shell", str(ctx.exception))
+        self.assertIn("did not become ready", str(ctx.exception))
 
     def test_codex_adapter_tui_detects_shell_returned_during_execution(self) -> None:
         call_count = {"n": 0}
