@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     codex_idle_timeout_seconds: float = 0.0
     wezterm_default_cwd: str = ""
     wezterm_scrollback_lines: int = 5000
+    tmux_default_cwd: str = ""
+    tmux_session_prefix: str = "agp"
     output_checkpoint_dir: Path = Path(".agp-checkpoints")
 
 

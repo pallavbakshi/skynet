@@ -3478,5 +3478,162 @@ class MvpFlowTest(unittest.TestCase):
             shutil.rmtree(tmp)
 
 
+    # ── Gap-closure tests: tmux terminal host plugin ───────────────
+
+    def test_tmux_host_session_lifecycle(self) -> None:
+        calls: list[list[str]] = []
+
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        state = {"session_exists": False, "captures": 0}
+
+        def runner(argv: list[str], **_: object) -> Result:
+            calls.append(argv)
+            cmd = argv[1]
+            if cmd == "has-session":
+                return Result(returncode=0 if state["session_exists"] else 1)
+            if cmd == "new-session":
+                state["session_exists"] = True
+                return Result()
+            if cmd == "send-keys":
+                return Result()
+            if cmd == "capture-pane":
+                state["captures"] += 1
+                if state["captures"] == 1:
+                    return Result("baseline\n")
+                return Result("baseline\nnew output\n")
+            if cmd == "kill-session":
+                state["session_exists"] = False
+                return Result()
+            raise AssertionError(f"unexpected tmux command: {argv}")
+
+        from agp.plugins.tmux import TmuxHost
+        host = TmuxHost(runner=runner, checkpoint_dir=Path(mkdtemp()))
+        session = host.get_or_create_session(agent_id="agt_tmux", workspace_ref="/tmp")
+        self.assertEqual(session.session_id, "agp-agt_tmux")
+        self.assertTrue(host.session_exists(session))
+        health = host.health(session)
+        self.assertTrue(health.healthy)
+
+        host.send_text(session, "hello", enter=True)
+        send_calls = [c for c in calls if c[1] == "send-keys"]
+        self.assertEqual(len(send_calls), 1)
+        self.assertIn("hello", send_calls[0])
+        self.assertIn("Enter", send_calls[0])
+
+        cursor = host.create_cursor(session)
+        read = host.read_output(session, cursor)
+        self.assertTrue(read.changed)
+        self.assertIn("new output", read.text)
+
+        host.interrupt(session)
+        interrupt_calls = [c for c in calls if c[1] == "send-keys" and "C-c" in c]
+        self.assertEqual(len(interrupt_calls), 1)
+
+        host.terminate_session(session)
+        self.assertFalse(host.session_exists(session))
+
+    def test_tmux_host_reuses_existing_session(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        def runner(argv: list[str], **_: object) -> Result:
+            if argv[1] == "has-session":
+                return Result(returncode=0)
+            if argv[1] == "capture-pane":
+                return Result("existing\n")
+            return Result()
+
+        from agp.plugins.tmux import TmuxHost
+        host = TmuxHost(runner=runner, checkpoint_dir=Path(mkdtemp()))
+        s1 = host.get_or_create_session(agent_id="agt_reuse")
+        s2 = host.get_or_create_session(agent_id="agt_reuse")
+        self.assertEqual(s1.session_id, s2.session_id)
+
+    def test_tmux_host_read_visible_captures_current_screen(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        def runner(argv: list[str], **_: object) -> Result:
+            if argv[1] == "has-session":
+                return Result(returncode=0)
+            if argv[1] == "capture-pane":
+                if "-S" in argv:
+                    return Result("scrollback content\n")
+                return Result("visible screen content\n")
+            return Result()
+
+        from agp.plugins.tmux import TmuxHost
+        host = TmuxHost(runner=runner, checkpoint_dir=Path(mkdtemp()))
+        session = host.get_or_create_session(agent_id="agt_vis")
+        visible = host.read_visible(session)
+        self.assertEqual(visible, "visible screen content\n")
+
+    def test_tmux_host_works_with_codex_adapter(self) -> None:
+        """Prove the plugin boundary: CodexAdapter works with TmuxHost, not just WezTermHost."""
+
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        capture_count = {"n": 0}
+        marker_line = 'AGP_RUN_RESULT run_tmux_codex {"status":"success","result":"tmux codex result"}\n'
+
+        def runner(argv: list[str], **_: object) -> Result:
+            if argv[1] == "has-session":
+                return Result(returncode=0)
+            if argv[1] == "new-session":
+                return Result()
+            if argv[1] == "send-keys":
+                return Result()
+            if argv[1] == "capture-pane":
+                capture_count["n"] += 1
+                if "-S" not in argv:
+                    return Result("\u203a ready\n")
+                # First capture = cursor baseline, subsequent = include marker.
+                if capture_count["n"] <= 1:
+                    return Result("baseline\n")
+                return Result("baseline\n" + marker_line)
+            return Result()
+
+        from agp.plugins.tmux import TmuxHost
+        host = TmuxHost(runner=runner, checkpoint_dir=Path(mkdtemp()))
+        session = host.get_or_create_session(agent_id="agt_tmux_codex")
+
+        adapter = CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)
+        adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        claimed = {
+            "agent_id": "agt_tmux_codex",
+            "job": {"job_id": "job_tmux_codex"},
+            "run": {"run_id": "run_tmux_codex"},
+            "message": {"text": "do tmux work"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(result.artifacts[-1].content, "tmux codex result")
+
+
 if __name__ == "__main__":
     unittest.main()

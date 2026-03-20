@@ -15,6 +15,12 @@ def build_terminal_host(kind: str, **kwargs: Any):
         kwargs.setdefault("checkpoint_dir", settings.output_checkpoint_dir)
         kwargs.setdefault("default_cwd", settings.wezterm_default_cwd)
         return WezTermHost(**kwargs)
+    if kind == "tmux":
+        from agp.plugins.tmux import TmuxHost
+        kwargs.setdefault("scrollback_lines", settings.wezterm_scrollback_lines)
+        kwargs.setdefault("checkpoint_dir", settings.output_checkpoint_dir)
+        kwargs.setdefault("default_cwd", getattr(settings, "tmux_default_cwd", "") or "")
+        return TmuxHost(**kwargs)
     raise ValueError(f"unsupported terminal host kind: {kind}")
 
 
