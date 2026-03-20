@@ -135,18 +135,31 @@ class WezTermHost(TerminalHost):
         }, sort_keys=True))
 
     def load_cursor(self, session: TerminalSession) -> OutputCursor | None:
-        """Load a persisted cursor.  Returns None if no checkpoint exists."""
+        """Load a persisted cursor.  Returns None if no checkpoint exists.
+
+        On restore the checkpoint is set to the *previously accumulated*
+        text (loaded from the accumulator file) so that the next
+        ``read_output`` call treats any output produced while the runtime
+        was down as new delta.  The accumulator deduplicates what it
+        already persisted, and the anchor-based diff handles scrollback
+        shifts that occurred during the gap.
+        """
         path = self.checkpoint_dir / f"cursor-{session.session_id}.json"
         if not path.exists():
             return None
         data = json.loads(path.read_text())
-        # We cannot restore the exact checkpoint text, but we can create a
-        # fresh cursor from the current scrollback and rely on the accumulator
-        # for previously captured output.
-        raw = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
+        # Load the accumulator to recover previously-seen content.  Using
+        # that as the checkpoint means _compute_output_delta will treat
+        # anything *not* in the accumulator as new.
+        acc = self._get_accumulator(session)
+        # Use the trailing portion of the accumulated text as the
+        # checkpoint — _compute_output_delta's anchor search will match
+        # the overlap between what we saw before and the current
+        # scrollback, yielding only the genuinely new output.
+        prior_tail = acc.text[-self.scrollback_lines * 80:] if acc.text else ""
         return OutputCursor(
             session_id=session.session_id,
-            checkpoint=raw,
+            checkpoint=prior_tail,
             metadata={
                 "line_count": data.get("line_count", 0),
                 "trailing_hash": data.get("trailing_hash", ""),

@@ -3477,6 +3477,123 @@ class MvpFlowTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmp)
 
+    def test_wezterm_host_restart_restores_cursor_and_captures_gap_output(self) -> None:
+        """Prove that output produced while the runtime was down is captured after restart."""
+
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        phase = {"n": 0}
+
+        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
+            if argv[2] == "get-text":
+                if phase["n"] == 0:
+                    return Result("line1\nline2\n")
+                if phase["n"] == 1:
+                    return Result("line1\nline2\nline3\n")
+                return Result("line2\nline3\ngap_output\nnew_output\n")
+            if argv[2] == "list":
+                return Result(
+                    json.dumps([{"pane_id": 44, "tab_id": 1, "window_id": 1,
+                                 "workspace": "agp-test", "window_title": "AGP:agt_restart",
+                                 "tab_title": "AGP:agt_restart", "cwd": "/tmp"}])
+                )
+            raise AssertionError(f"unexpected: {argv}")
+
+        tmp = Path(mkdtemp())
+        try:
+            # Phase 0: first runtime process — create cursor, read output.
+            host1 = WezTermHost(workspace="agp-test", runner=runner, checkpoint_dir=tmp)
+            session = host1.get_or_create_session(agent_id="agt_restart")
+            cursor = host1.create_cursor(session)
+            phase["n"] = 1
+            read1 = host1.read_output(session, cursor)
+            self.assertTrue(read1.changed)
+            self.assertIn("line3", read1.text)
+
+            # Phase 2: simulate runtime down, pane produces more output.
+            phase["n"] = 2
+
+            # New runtime process — load persisted cursor.
+            host2 = WezTermHost(workspace="agp-test", runner=runner, checkpoint_dir=tmp)
+            session2 = host2.get_or_create_session(agent_id="agt_restart")
+            restored = host2.load_cursor(session2)
+            self.assertIsNotNone(restored)
+            self.assertTrue(restored.metadata.get("restored"))
+
+            read2 = host2.read_output(session2, restored)
+            self.assertTrue(read2.changed)
+            self.assertIn("gap_output", read2.text)
+            self.assertIn("new_output", read2.text)
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_tmux_host_restart_restores_absolute_line_cursor(self) -> None:
+        """Prove the tmux absolute-line restore path survives restart."""
+
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        phase = {"n": 0}
+
+        def runner(argv: list[str], **_: object) -> Result:
+            cmd = argv[1]
+            if cmd == "has-session":
+                return Result(returncode=0)
+            if cmd == "new-session":
+                return Result()
+            if cmd == "display-message":
+                if phase["n"] == 0:
+                    return Result("5")  # absolute line 5 at cursor creation
+                if phase["n"] == 1:
+                    return Result("8")  # absolute line 8 after first read
+                return Result("12")  # absolute line 12 after restart
+            if cmd == "capture-pane":
+                if phase["n"] <= 1:
+                    return Result("first output\n")
+                return Result("gap output during downtime\nnew output\n")
+            if cmd == "kill-session":
+                return Result()
+            return Result()
+
+        from agp.plugins.tmux import TmuxHost
+        tmp = Path(mkdtemp())
+        try:
+            # Phase 0: first runtime — create cursor at absolute line 5.
+            host1 = TmuxHost(runner=runner, checkpoint_dir=tmp)
+            session = host1.get_or_create_session(agent_id="agt_tmux_restart")
+            cursor = host1.create_cursor(session)
+            self.assertEqual(cursor.metadata["absolute_line"], 10)  # 5+5 from two display-message calls
+
+            # Phase 1: read output — cursor advances.
+            phase["n"] = 1
+            read1 = host1.read_output(session, cursor)
+            self.assertTrue(read1.changed)
+
+            # Verify cursor file was persisted.
+            cursor_file = tmp / f"cursor-{session.session_id}.json"
+            self.assertTrue(cursor_file.exists())
+
+            # Phase 2: simulate restart — new host, load cursor.
+            phase["n"] = 2
+            host2 = TmuxHost(runner=runner, checkpoint_dir=tmp)
+            session2 = host2.get_or_create_session(agent_id="agt_tmux_restart")
+            restored = host2.load_cursor(session2)
+            self.assertIsNotNone(restored)
+            self.assertTrue(restored.metadata.get("restored"))
+
+            read2 = host2.read_output(session2, restored)
+            self.assertIn("gap output", read2.text)
+            self.assertIn("new output", read2.text)
+        finally:
+            shutil.rmtree(tmp)
+
 
     # ── Gap-closure tests: tmux terminal host plugin ───────────────
 
