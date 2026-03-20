@@ -2,8 +2,12 @@
 __pycache__/
 *.pyc
 agp.db
+agp.db-shm
+agp.db-wal
 .agp-artifacts/
 .agp-artifacts-tests/
+.agp-checkpoints/
+.agp-logs/
 .wezu/
 .pytest_cache/
 .idea/

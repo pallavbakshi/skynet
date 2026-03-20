@@ -32,12 +32,11 @@ from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
 from agp.models import Artifact, Capability, Job, Lease, QueueDeliveryRecord, Run, SystemMetadata, utc_now
 from agp.queue_backend import get_queue_backend
+from agp.plugins import build_terminal_host, build_agent_adapter
 from agp.runtime import (
     RuntimeClient,
     RuntimeIdentity,
     RuntimeSupervisor,
-    build_agent_adapter,
-    build_terminal_host,
 )
 from agp.sweeper import LeaseSweeperService, SweeperService
 

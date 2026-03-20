@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     codex_result_marker: str = "AGP_RUN_RESULT"
     codex_poll_interval_seconds: float = 0.25
     codex_max_polls: int = 20
+    codex_bootstrap_settle_seconds: float = 0.0
+    codex_idle_timeout_polls: int = 0
+    codex_health_check_interval_polls: int = 10
+    codex_cli_command: str = "codex"
+    codex_tui_mode: bool = False
+    codex_idle_poll_seconds: float = 2.0
+    codex_idle_after: int = 3
+    codex_idle_timeout_seconds: float = 0.0
+    wezterm_default_cwd: str = ""
+    wezterm_scrollback_lines: int = 5000
+    output_checkpoint_dir: Path = Path(".agp-checkpoints")
 
 
 settings = Settings()

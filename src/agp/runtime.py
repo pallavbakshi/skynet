@@ -6,8 +6,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 import json
+import re
 from pathlib import Path
-import subprocess
 from threading import Event, Thread
 from time import monotonic, sleep
 from typing import Any
@@ -344,6 +344,88 @@ class AdapterExecutionFailed(Exception):
         self.output = output
 
 
+class _OutputAccumulator:
+    """Append-only output log for durable session transcript capture.
+
+    Persists all deltas to a file so the full transcript is available even
+    when the terminal scrollback buffer shifts.  The file survives runtime
+    restarts — on reload the prior content is recovered automatically.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._buffer: list[str] = []
+        if path.exists():
+            self._buffer = [path.read_text()]
+
+    def append(self, delta: str) -> None:
+        if not delta:
+            return
+        self._buffer.append(delta)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self._path, "a") as fh:
+            fh.write(delta)
+
+    @property
+    def text(self) -> str:
+        return "".join(self._buffer)
+
+    def reset(self) -> None:
+        self._buffer = []
+        if self._path.exists():
+            self._path.unlink()
+
+
+def _compute_output_delta(current_text: str, prior_text: str) -> str:
+    """Compute new output since the last read, surviving scrollback shifts.
+
+    Strategy:
+    1. Fast path — prior is a prefix of current (buffer did not shift).
+    2. Slow path — find trailing-line anchors from prior in current.
+    3. Fallback — return all of current (data gap, best effort).
+    """
+    if not prior_text:
+        return current_text
+    if not current_text:
+        return ""
+    if current_text.startswith(prior_text):
+        return current_text[len(prior_text):]
+
+    prior_lines = prior_text.splitlines()
+    current_lines = current_text.splitlines()
+    if not prior_lines:
+        return current_text
+
+    for anchor_size in (20, 10, 5, 3, 2):
+        if anchor_size > len(prior_lines):
+            continue
+        anchor = prior_lines[-anchor_size:]
+        for i in range(len(current_lines) - anchor_size + 1):
+            if current_lines[i : i + anchor_size] == anchor:
+                new_start = i + anchor_size
+                if new_start >= len(current_lines):
+                    return ""
+                return "\n".join(current_lines[new_start:]) + "\n"
+
+    return current_text
+
+
+_ANSI_RE = re.compile(
+    r"\x1b"
+    r"(?:"
+    r"\[[0-9;]*[A-Za-z]"  # CSI sequences
+    r"|\][^\x07]*\x07"  # OSC sequences (terminated by BEL)
+    r"|\][^\x1b]*\x1b\\"  # OSC sequences (terminated by ST)
+    r"|[^[\]][^\x1b]?"  # two-char escapes
+    r")",
+    re.DOTALL,
+)
+
+def _strip_ansi(text: str) -> str:
+    """Remove ANSI escape sequences from terminal output."""
+    return _ANSI_RE.sub("", text)
+
+
 class TerminalHost(ABC):
     @property
     @abstractmethod
@@ -386,9 +468,35 @@ class TerminalHost(ABC):
     def session_exists(self, session: TerminalSession) -> bool:
         raise NotImplementedError
 
+    def read_visible(self, session: TerminalSession) -> str:  # noqa: ARG002
+        """Read the currently visible screen content (including alternate buffer).
+
+        Default returns empty string.  Hosts that can capture the alternate
+        screen buffer should override this.
+        """
+        return ""
+
     @abstractmethod
     def health(self, session: TerminalSession) -> SessionHealth:
         raise NotImplementedError
+
+    def wait_for_idle(
+        self,
+        session: TerminalSession,
+        *,
+        poll_seconds: float = 2.0,
+        idle_after: int = 3,
+        timeout_seconds: float = 0.0,
+        check_lines: int = 20,
+        on_poll: Any | None = None,
+    ) -> bool:
+        """Block until pane output stops changing.
+
+        Returns True when idle is detected, False on timeout.
+        *on_poll* is called each iteration and may raise to abort.
+        Default implementation returns True immediately (for in-process hosts).
+        """
+        return True
 
 
 class AgentAdapter(ABC):
@@ -448,475 +556,6 @@ class AgentAdapter(ABC):
                 ),
             ],
             summary={"adapter": self.kind, "exception_type": type(error).__name__},
-        )
-
-
-class InProcessTerminalHost(TerminalHost):
-    def __init__(self) -> None:
-        self._sessions: dict[str, TerminalSession] = {}
-        self._history: dict[str, list[str]] = {}
-
-    @property
-    def kind(self) -> str:
-        return "inprocess"
-
-    def get_or_create_session(self, *, agent_id: str, workspace_ref: str | None = None) -> TerminalSession:
-        session = self._sessions.get(agent_id)
-        if session is None:
-            session = TerminalSession(session_id=f"inproc-{agent_id}", agent_id=agent_id, workspace_ref=workspace_ref)
-            self._sessions[agent_id] = session
-            self._history[session.session_id] = []
-        return session
-
-    def send_text(self, session: TerminalSession, text: str, *, enter: bool = True) -> None:
-        suffix = "\n" if enter else ""
-        self._history.setdefault(session.session_id, []).append(f"SEND:{text}{suffix}")
-
-    def create_cursor(self, session: TerminalSession) -> OutputCursor:
-        history = "".join(self._history.get(session.session_id, []))
-        return OutputCursor(session_id=session.session_id, checkpoint=history)
-
-    def read_output(self, session: TerminalSession, cursor: OutputCursor) -> OutputReadResult:
-        full_text = "".join(self._history.get(session.session_id, []))
-        prior = cursor.checkpoint
-        if full_text.startswith(prior):
-            delta = full_text[len(prior):]
-        else:
-            delta = full_text
-        updated = OutputCursor(session_id=session.session_id, checkpoint=full_text, metadata=dict(cursor.metadata))
-        return OutputReadResult(
-            session_id=session.session_id,
-            cursor=updated,
-            text=delta,
-            full_text=full_text,
-            changed=bool(delta),
-        )
-
-    def interrupt(self, session: TerminalSession) -> None:
-        self._history.setdefault(session.session_id, []).append("INTERRUPT")
-
-    def reset_session(self, session: TerminalSession) -> TerminalSession:
-        reset = TerminalSession(
-            session_id=f"{session.session_id}-reset-{int(monotonic() * 1000)}",
-            agent_id=session.agent_id,
-            workspace_ref=session.workspace_ref,
-            metadata=dict(session.metadata),
-        )
-        self._sessions[session.agent_id] = reset
-        self._history[reset.session_id] = []
-        return reset
-
-    def terminate_session(self, session: TerminalSession) -> None:
-        self._sessions.pop(session.agent_id, None)
-
-    def snapshot(self, session: TerminalSession) -> dict[str, Any]:
-        return {
-            "session_id": session.session_id,
-            "agent_id": session.agent_id,
-            "workspace_ref": session.workspace_ref,
-            "history": list(self._history.get(session.session_id, [])),
-        }
-
-    def session_exists(self, session: TerminalSession) -> bool:
-        existing = self._sessions.get(session.agent_id)
-        return existing is not None and existing.session_id == session.session_id
-
-    def health(self, session: TerminalSession) -> SessionHealth:
-        exists = self.session_exists(session)
-        return SessionHealth(
-            session_id=session.session_id,
-            exists=exists,
-            healthy=exists,
-            reason=None if exists else "session_missing",
-            metadata={"host_kind": self.kind},
-        )
-
-
-class WezTermHost(TerminalHost):
-    def __init__(
-        self,
-        *,
-        wezterm_bin: str = "wezterm",
-        workspace: str = "agp",
-        shell_argv: list[str] | None = None,
-        runner: Any | None = None,
-    ) -> None:
-        self.wezterm_bin = wezterm_bin
-        self.workspace = workspace
-        self.shell_argv = shell_argv or ["zsh", "-l"]
-        self._runner = runner or subprocess.run
-
-    @property
-    def kind(self) -> str:
-        return "wezterm"
-
-    def _run(self, args: list[str], *, stdin_text: str | None = None) -> str:
-        completed = self._runner(
-            [self.wezterm_bin, "cli", *args],
-            input=stdin_text,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if completed.returncode != 0:
-            stderr = (completed.stderr or "").strip()
-            raise RuntimeError(f"wezterm command failed: {' '.join(args)} :: {stderr}")
-        return completed.stdout or ""
-
-    def _marker(self, agent_id: str) -> str:
-        return f"AGP:{agent_id}"
-
-    def _list_panes(self) -> list[dict[str, Any]]:
-        raw = self._run(["list", "--format", "json"])
-        if not raw:
-            return []
-        payload = json.loads(raw)
-        return payload if isinstance(payload, list) else []
-
-    def _find_existing(self, *, agent_id: str) -> TerminalSession | None:
-        marker = self._marker(agent_id)
-        for pane in self._list_panes():
-            if pane.get("workspace") != self.workspace:
-                continue
-            if pane.get("window_title") == marker or pane.get("tab_title") == marker:
-                return TerminalSession(
-                    session_id=str(pane["pane_id"]),
-                    agent_id=agent_id,
-                    workspace_ref=pane.get("cwd"),
-                    metadata={
-                        "pane_id": pane["pane_id"],
-                        "tab_id": pane.get("tab_id"),
-                        "window_id": pane.get("window_id"),
-                        "workspace": pane.get("workspace"),
-                    },
-                )
-        return None
-
-    def get_or_create_session(self, *, agent_id: str, workspace_ref: str | None = None) -> TerminalSession:
-        existing = self._find_existing(agent_id=agent_id)
-        if existing is not None:
-            return existing
-        args = ["spawn", "--new-window", "--workspace", self.workspace]
-        if workspace_ref:
-            args.extend(["--cwd", workspace_ref])
-        args.extend(["--", *self.shell_argv])
-        pane_id = self._run(args).strip()
-        session = TerminalSession(
-            session_id=pane_id,
-            agent_id=agent_id,
-            workspace_ref=workspace_ref,
-            metadata={"pane_id": int(pane_id), "workspace": self.workspace},
-        )
-        self._run(["set-window-title", "--pane-id", pane_id, self._marker(agent_id)])
-        self._run(["set-tab-title", "--pane-id", pane_id, self._marker(agent_id)])
-        return session
-
-    def send_text(self, session: TerminalSession, text: str, *, enter: bool = True) -> None:
-        self._run(["send-text", "--pane-id", session.session_id, "--no-paste", text])
-        if enter:
-            self._run(["send-text", "--pane-id", session.session_id, "--no-paste", "\r"])
-
-    def create_cursor(self, session: TerminalSession) -> OutputCursor:
-        baseline = self._run(["get-text", "--pane-id", session.session_id, "--start-line", "-200"])
-        return OutputCursor(session_id=session.session_id, checkpoint=baseline)
-
-    def read_output(self, session: TerminalSession, cursor: OutputCursor) -> OutputReadResult:
-        full_text = self._run(["get-text", "--pane-id", session.session_id, "--start-line", "-200"])
-        prior = cursor.checkpoint
-        if full_text.startswith(prior):
-            delta = full_text[len(prior):]
-        else:
-            delta = full_text
-        updated = OutputCursor(session_id=session.session_id, checkpoint=full_text, metadata=dict(cursor.metadata))
-        return OutputReadResult(
-            session_id=session.session_id,
-            cursor=updated,
-            text=delta,
-            full_text=full_text,
-            changed=bool(delta),
-        )
-
-    def interrupt(self, session: TerminalSession) -> None:
-        self._run(["send-text", "--pane-id", session.session_id, "--no-paste", "\u0003"])
-
-    def reset_session(self, session: TerminalSession) -> TerminalSession:
-        try:
-            self.terminate_session(session)
-        except Exception:  # noqa: BLE001
-            pass
-        return self.get_or_create_session(agent_id=session.agent_id, workspace_ref=session.workspace_ref)
-
-    def terminate_session(self, session: TerminalSession) -> None:
-        self._run(["kill-pane", "--pane-id", session.session_id])
-
-    def snapshot(self, session: TerminalSession) -> dict[str, Any]:
-        pane = next((item for item in self._list_panes() if str(item.get("pane_id")) == session.session_id), None)
-        text = self._run(["get-text", "--pane-id", session.session_id, "--start-line", "-200"])
-        return {
-            "session_id": session.session_id,
-            "agent_id": session.agent_id,
-            "pane": pane,
-            "text": text,
-        }
-
-    def session_exists(self, session: TerminalSession) -> bool:
-        return any(str(item.get("pane_id")) == session.session_id for item in self._list_panes())
-
-    def health(self, session: TerminalSession) -> SessionHealth:
-        pane = next((item for item in self._list_panes() if str(item.get("pane_id")) == session.session_id), None)
-        if pane is None:
-            return SessionHealth(
-                session_id=session.session_id,
-                exists=False,
-                healthy=False,
-                reason="pane_missing",
-                metadata={"host_kind": self.kind},
-            )
-        return SessionHealth(
-            session_id=session.session_id,
-            exists=True,
-            healthy=True,
-            reason=None,
-            metadata={
-                "host_kind": self.kind,
-                "workspace": pane.get("workspace"),
-                "pane_id": pane.get("pane_id"),
-                "tab_id": pane.get("tab_id"),
-                "window_id": pane.get("window_id"),
-            },
-        )
-
-
-def build_terminal_host(kind: str, **kwargs: Any) -> TerminalHost:
-    if kind == "inprocess":
-        return InProcessTerminalHost()
-    if kind == "wezterm":
-        return WezTermHost(**kwargs)
-    raise ValueError(f"unsupported terminal host kind: {kind}")
-
-
-def build_agent_adapter(kind: str, **kwargs: Any) -> AgentAdapter:
-    if kind == "default":
-        return DefaultAgentAdapter(**kwargs)
-    if kind == "codex":
-        return CodexAdapter(
-            begin_marker=kwargs.get("begin_marker", settings.codex_begin_marker),
-            result_marker=kwargs.get("result_marker", settings.codex_result_marker),
-            max_polls=kwargs.get("max_polls", settings.codex_max_polls),
-            poll_interval_seconds=kwargs.get("poll_interval_seconds", settings.codex_poll_interval_seconds),
-        )
-    raise ValueError(f"unsupported agent adapter kind: {kind}")
-
-
-class DefaultAgentAdapter(AgentAdapter):
-    def __init__(self, *, execute: Any | None = None, recover: Any | None = None) -> None:
-        self._execute = execute
-        self._recover = recover
-
-    @property
-    def kind(self) -> str:
-        return "default"
-
-    def execute_run(
-        self,
-        *,
-        host: TerminalHost,
-        session: TerminalSession,
-        claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
-    ) -> ExecutionResult:
-        if self._execute is not None:
-            custom = self._execute(claimed)
-            if isinstance(custom, ExecutionResult):
-                return custom
-            return custom  # type: ignore[return-value]
-
-        host.send_text(session, claimed["message"]["text"], enter=True)
-        artifacts = [
-            ArtifactPayload(role="prompt", name="prompt.txt", content=claimed["message"]["text"]),
-            ArtifactPayload(
-                role="transcript_log",
-                name="transcript.txt",
-                content=f"runtime.started\nmessage={claimed['message']['text']}\n",
-            ),
-        ]
-        for step in range(3):
-            supervisor.check_interrupt(claimed)
-            sleep(0.02)
-            supervisor.emit_progress(claimed, message="runtime.step", details={"step": step + 1, "session_id": session.session_id})
-        artifacts.append(ArtifactPayload(role="exec_log", name="exec.txt", content="step=1\nstep=2\nstep=3\n"))
-        content = (
-            f"runtime={supervisor.client.identity.runtime_id}\n"
-            f"job_id={claimed['job']['job_id']}\n"
-            f"message={claimed['message']['text']}\n"
-            f"session_id={session.session_id}\n"
-            f"host_kind={host.kind}\n"
-            f"adapter_kind={self.kind}\n"
-        )
-        artifacts.append(ArtifactPayload(role="result", name="result.txt", content=content))
-        return ExecutionResult(artifacts=artifacts, summary={"adapter": self.kind, "host": host.kind})
-
-    def recover(
-        self,
-        *,
-        host: TerminalHost,
-        session: TerminalSession,
-        claimed: dict[str, Any],
-        attempt: int,
-        error: Exception,
-        supervisor: "RuntimeSupervisor",
-    ) -> None:
-        if self._recover is not None:
-            self._recover(claimed, attempt=attempt, error=error)
-            return
-        sleep(0.01)
-
-
-class CodexAdapter(AgentAdapter):
-    def __init__(
-        self,
-        *,
-        begin_marker: str = "AGP_RUN_BEGIN",
-        result_marker: str = "AGP_RUN_RESULT",
-        max_polls: int = 20,
-        poll_interval_seconds: float = 0.25,
-    ) -> None:
-        self.begin_marker = begin_marker
-        self.result_marker = result_marker
-        self.max_polls = max_polls
-        self.poll_interval_seconds = poll_interval_seconds
-
-    @property
-    def kind(self) -> str:
-        return "codex"
-
-    def ensure_bootstrapped(self, *, host: TerminalHost, session: TerminalSession, claimed: dict[str, Any]) -> None:  # noqa: ARG002
-        if session.metadata.get("codex_bootstrapped"):
-            return
-        bootstrap = (
-            "You are running inside AGP. "
-            "Each AGP task will provide a run envelope. "
-            f"When you see a line starting with {self.begin_marker} followed by a run id, treat that as the current task context. "
-            f"When that task reaches a terminal outcome, emit exactly one line beginning with "
-            f"{self.result_marker} <run_id> "
-            'followed by compact JSON like {"status":"success","result":"..."} '
-            'or {"status":"failure","error":"..."}. '
-            f"Do not emit lines beginning with {self.result_marker} except as the single terminal line for the active AGP task."
-        )
-        host.send_text(session, bootstrap, enter=True)
-        session.metadata["codex_bootstrapped"] = True
-
-    def _begin_line(self, run_id: str) -> str:
-        return f"{self.begin_marker} {run_id}"
-
-    def _result_prefix(self, run_id: str) -> str:
-        return f"{self.result_marker} {run_id} "
-
-    def _task_payload(self, *, run_id: str, prompt: str) -> str:
-        return (
-            f"{self._begin_line(run_id)}\n"
-            "AGP task instructions:\n"
-            f"{prompt}\n\n"
-            "Terminal contract:\n"
-            f"- Finalize this task by emitting exactly one line that starts with {self._result_prefix(run_id)}\n"
-            '- Use JSON payload {"status":"success","result":"..."} or {"status":"failure","error":"..."}\n'
-            "- Do not emit terminal lines for any other run id.\n"
-        )
-
-    def _extract_terminal_payload(self, *, run_id: str, output: str) -> dict[str, Any] | None:
-        prefix = self._result_prefix(run_id)
-        for line in reversed(output.splitlines()):
-            if not line.startswith(prefix):
-                continue
-            raw = line.removeprefix(prefix).strip()
-            try:
-                payload = json.loads(raw)
-            except json.JSONDecodeError:
-                raise RuntimeError(f"invalid codex terminal payload for run {run_id}") from None
-            if not isinstance(payload, dict):
-                raise RuntimeError(f"invalid codex terminal payload type for run {run_id}")
-            return payload
-        return None
-
-    def execute_run(
-        self,
-        *,
-        host: TerminalHost,
-        session: TerminalSession,
-        claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
-    ) -> ExecutionResult:
-        prompt = claimed["message"]["text"]
-        run_id = claimed["run"]["run_id"]
-        cursor = host.create_cursor(session)
-        host.send_text(session, self._task_payload(run_id=run_id, prompt=prompt), enter=True)
-        transcript_parts: list[str] = [f"prompt={prompt}\n"]
-        for attempt in range(self.max_polls):
-            supervisor.check_interrupt(claimed)
-            read = host.read_output(session, cursor)
-            cursor = read.cursor
-            if read.changed and read.text:
-                transcript_parts.append(read.text)
-                supervisor.emit_progress(
-                    claimed,
-                    message="runtime.output",
-                    details={
-                        "adapter": self.kind,
-                        "session_id": session.session_id,
-                        "poll": attempt + 1,
-                        "changed": True,
-                    },
-                )
-                payload = self._extract_terminal_payload(run_id=run_id, output=read.full_text)
-                if payload is not None:
-                    transcript = "".join(transcript_parts)
-                    status = str(payload.get("status", "")).strip().lower()
-                    if status == "failure":
-                        raise AdapterExecutionFailed(
-                            str(payload.get("error") or "codex adapter reported task failure"),
-                            transcript=transcript,
-                            output=read.full_text,
-                        )
-                    if status != "success":
-                        raise RuntimeError(f"invalid codex terminal status for run {run_id}: {status or 'missing'}")
-                    result_text = str(payload.get("result") or "").strip()
-                    return ExecutionResult(
-                        artifacts=[
-                            ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
-                            ArtifactPayload(role="transcript_log", name="transcript.txt", content=transcript),
-                            ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
-                            ArtifactPayload(role="result", name="result.txt", content=result_text or json.dumps(payload, sort_keys=True)),
-                        ],
-                        summary={"adapter": self.kind, "host": host.kind, "run_id": run_id},
-                    )
-            sleep(self.poll_interval_seconds)
-        raise RecoverableExecutionError("codex adapter did not observe completion marker before poll budget exhausted")
-
-    def build_failure_result(
-        self,
-        *,
-        host: TerminalHost,
-        session: TerminalSession,
-        claimed: dict[str, Any],
-        error: Exception,
-        supervisor: "RuntimeSupervisor",
-    ) -> ExecutionResult:
-        if isinstance(error, AdapterExecutionFailed):
-            return ExecutionResult(
-                artifacts=[
-                    ArtifactPayload(role="prompt", name="prompt.txt", content=claimed["message"]["text"]),
-                    ArtifactPayload(role="transcript_log", name="transcript.txt", content=error.transcript),
-                    ArtifactPayload(role="exec_log", name="exec.txt", content=error.output),
-                    ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
-                ],
-                summary={"adapter": self.kind, "host": host.kind, "exception_type": type(error).__name__},
-            )
-        return super().build_failure_result(
-            host=host,
-            session=session,
-            claimed=claimed,
-            error=error,
-            supervisor=supervisor,
         )
 
 
@@ -1281,3 +920,29 @@ class RuntimeSupervisor:
             if not outcome.get("claimed"):
                 stop_event.wait(idle_sleep_seconds)
         return outcomes
+
+
+# Backward-compatible re-exports — plugins are the canonical location.
+# Lazy imports via __getattr__ to avoid circular-import issues when plugin
+# modules import core types from this file.
+
+_COMPAT_IMPORTS: dict[str, tuple[str, str]] = {
+    "InProcessTerminalHost": ("agp.plugins.inprocess", "InProcessTerminalHost"),
+    "DefaultAgentAdapter": ("agp.plugins.inprocess", "DefaultAgentAdapter"),
+    "WezTermHost": ("agp.plugins.wezterm", "WezTermHost"),
+    "CodexAdapter": ("agp.plugins.codex", "CodexAdapter"),
+    "_clean_codex_tui_output": ("agp.plugins.codex", "_clean_codex_tui_output"),
+    "build_terminal_host": ("agp.plugins", "build_terminal_host"),
+    "build_agent_adapter": ("agp.plugins", "build_agent_adapter"),
+}
+
+
+def __getattr__(name: str):  # noqa: E302
+    if name in _COMPAT_IMPORTS:
+        import importlib
+        mod_path, attr = _COMPAT_IMPORTS[name]
+        mod = importlib.import_module(mod_path)
+        val = getattr(mod, attr)
+        globals()[name] = val
+        return val
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

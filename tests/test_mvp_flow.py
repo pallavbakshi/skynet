@@ -62,6 +62,10 @@ from agp.runtime import (
     RuntimeIdentity,
     RuntimeSupervisor,
     WezTermHost,
+    _OutputAccumulator,
+    _clean_codex_tui_output,
+    _compute_output_delta,
+    _strip_ansi,
     build_agent_adapter,
     build_terminal_host,
 )
@@ -2900,6 +2904,456 @@ class MvpFlowTest(unittest.TestCase):
         refs = [item["storage_ref"] for item in artifacts if item["role"] == "failure_evidence"]
         self.assertTrue(any(ref.endswith("session-snapshot.json") for ref in refs))
         self.assertTrue(any(ref.endswith("session-health.json") for ref in refs))
+
+    # ── Gap-closure tests: durable output checkpointing ──────────────
+
+    def test_compute_output_delta_prefix_match(self) -> None:
+        delta = _compute_output_delta("line1\nline2\nline3\n", "line1\nline2\n")
+        self.assertEqual(delta, "line3\n")
+
+    def test_compute_output_delta_scrollback_shift(self) -> None:
+        prior = "line1\nline2\nline3\nline4\nline5\n"
+        current = "line3\nline4\nline5\nline6\nline7\n"
+        delta = _compute_output_delta(current, prior)
+        self.assertEqual(delta, "line6\nline7\n")
+
+    def test_compute_output_delta_no_overlap_returns_full_text(self) -> None:
+        delta = _compute_output_delta("completely\nnew\n", "totally\nold\n")
+        self.assertEqual(delta, "completely\nnew\n")
+
+    def test_compute_output_delta_empty_prior(self) -> None:
+        delta = _compute_output_delta("hello\n", "")
+        self.assertEqual(delta, "hello\n")
+
+    def test_compute_output_delta_identical(self) -> None:
+        delta = _compute_output_delta("same\n", "same\n")
+        self.assertEqual(delta, "")
+
+    def test_output_accumulator_persists_and_restores(self) -> None:
+        tmp = Path(mkdtemp())
+        try:
+            path = tmp / "test-session.output.txt"
+            acc1 = _OutputAccumulator(path)
+            acc1.append("chunk1\n")
+            acc1.append("chunk2\n")
+            self.assertEqual(acc1.text, "chunk1\nchunk2\n")
+            acc2 = _OutputAccumulator(path)
+            self.assertEqual(acc2.text, "chunk1\nchunk2\n")
+            acc2.append("chunk3\n")
+            self.assertEqual(acc2.text, "chunk1\nchunk2\nchunk3\n")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_output_accumulator_reset_clears_file(self) -> None:
+        tmp = Path(mkdtemp())
+        try:
+            path = tmp / "test-reset.output.txt"
+            acc = _OutputAccumulator(path)
+            acc.append("data\n")
+            self.assertTrue(path.exists())
+            acc.reset()
+            self.assertFalse(path.exists())
+            self.assertEqual(acc.text, "")
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_wezterm_host_handles_scrollback_shift(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        get_text_responses = iter([
+            "line1\nline2\nline3\n",
+            "line2\nline3\nline4\nline5\n",
+            "line4\nline5\nline6\n",
+        ])
+
+        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
+            if argv[2] == "get-text":
+                return Result(next(get_text_responses))
+            if argv[2] == "list":
+                return Result(
+                    json.dumps(
+                        [{"pane_id": 99, "tab_id": 1, "window_id": 1,
+                          "workspace": "agp-test", "window_title": "AGP:agt_shift",
+                          "tab_title": "AGP:agt_shift", "cwd": "/tmp"}]
+                    )
+                )
+            raise AssertionError(f"unexpected: {argv}")
+
+        tmp = Path(mkdtemp())
+        try:
+            host = WezTermHost(workspace="agp-test", runner=runner, checkpoint_dir=tmp)
+            session = host.get_or_create_session(agent_id="agt_shift")
+            cursor = host.create_cursor(session)
+
+            r1 = host.read_output(session, cursor)
+            self.assertTrue(r1.changed)
+            self.assertEqual(r1.text, "line4\nline5\n")
+
+            r2 = host.read_output(session, r1.cursor)
+            self.assertTrue(r2.changed)
+            self.assertEqual(r2.text, "line6\n")
+            self.assertIn("line4", r2.full_text)
+            self.assertIn("line6", r2.full_text)
+        finally:
+            shutil.rmtree(tmp)
+
+    def test_wezterm_host_accumulator_captures_full_transcript(self) -> None:
+        class Result:
+            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+                self.stdout = stdout
+                self.stderr = stderr
+                self.returncode = returncode
+
+        get_text_responses = iter([
+            "a\nb\n",
+            "a\nb\nc\nd\n",
+            "c\nd\ne\nf\n",
+        ])
+
+        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
+            if argv[2] == "get-text":
+                return Result(next(get_text_responses))
+            if argv[2] == "list":
+                return Result(
+                    json.dumps(
+                        [{"pane_id": 88, "tab_id": 1, "window_id": 1,
+                          "workspace": "agp-test", "window_title": "AGP:agt_acc",
+                          "tab_title": "AGP:agt_acc", "cwd": "/tmp"}]
+                    )
+                )
+            raise AssertionError(f"unexpected: {argv}")
+
+        tmp = Path(mkdtemp())
+        try:
+            host = WezTermHost(workspace="agp-test", runner=runner, checkpoint_dir=tmp)
+            session = host.get_or_create_session(agent_id="agt_acc")
+            cursor = host.create_cursor(session)
+
+            r1 = host.read_output(session, cursor)
+            r2 = host.read_output(session, r1.cursor)
+            self.assertIn("c\nd\n", r1.full_text)
+            self.assertIn("e\nf\n", r2.full_text)
+            self.assertIn("c\nd\n", r2.full_text)
+        finally:
+            shutil.rmtree(tmp)
+
+    # ── Gap-closure tests: CodexAdapter hardening ────────────────────
+
+    def test_codex_adapter_malformed_payload_triggers_recovery(self) -> None:
+        class CodexHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("AGP_RUN_BEGIN run_malformed"):
+                    self._history.setdefault(session.session_id, []).append(
+                        "AGP_RUN_RESULT run_malformed {not valid json\n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_mal"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
+        host = CodexHost()
+        session = host.get_or_create_session(agent_id="agt_mal")
+        claimed = {
+            "agent_id": "agt_mal",
+            "job": {"job_id": "job_mal"},
+            "run": {"run_id": "run_malformed"},
+            "message": {"text": "malformed work"},
+        }
+        with self.assertRaises(RecoverableExecutionError):
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+    def test_codex_adapter_idle_timeout_triggers_recovery(self) -> None:
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_idle")
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_idle"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(max_polls=10, poll_interval_seconds=0.0, idle_timeout_polls=3)
+        claimed = {
+            "agent_id": "agt_idle",
+            "job": {"job_id": "job_idle"},
+            "run": {"run_id": "run_idle"},
+            "message": {"text": "wedge work"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("idle", str(ctx.exception))
+
+    def test_codex_adapter_health_check_detects_lost_session(self) -> None:
+        call_count = {"n": 0}
+
+        class DisappearingHost(InProcessTerminalHost):
+            def health(self, session):
+                call_count["n"] += 1
+                if call_count["n"] >= 3:
+                    from agp.runtime import SessionHealth
+                    return SessionHealth(
+                        session_id=session.session_id,
+                        exists=False,
+                        healthy=False,
+                        reason="pane_vanished",
+                    )
+                return super().health(session)
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_disappear"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(max_polls=50, poll_interval_seconds=0.0, health_check_interval_polls=2)
+        host = DisappearingHost()
+        session = host.get_or_create_session(agent_id="agt_disappear")
+        claimed = {
+            "agent_id": "agt_disappear",
+            "job": {"job_id": "job_disappear"},
+            "run": {"run_id": "run_disappear"},
+            "message": {"text": "vanishing work"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("session lost", str(ctx.exception))
+
+    def test_codex_adapter_bootstrap_verifies_session_health(self) -> None:
+        from agp.runtime import SessionHealth
+
+        class UnhealthyHost(InProcessTerminalHost):
+            def health(self, session):
+                return SessionHealth(
+                    session_id=session.session_id,
+                    exists=False,
+                    healthy=False,
+                    reason="pane_dead",
+                )
+
+        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
+        host = UnhealthyHost()
+        session = host.get_or_create_session(agent_id="agt_boot_health")
+        claimed = {
+            "agent_id": "agt_boot_health",
+            "job": {"job_id": "job_boot_health"},
+            "run": {"run_id": "run_boot_health"},
+            "message": {"text": "boot check"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.assertIn("unhealthy before bootstrap", str(ctx.exception))
+
+    def test_codex_adapter_invalid_status_triggers_recovery(self) -> None:
+        class CodexHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("AGP_RUN_BEGIN run_badstatus"):
+                    self._history.setdefault(session.session_id, []).append(
+                        'AGP_RUN_RESULT run_badstatus {"status":"unknown_state","result":"huh"}\n'
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_bs"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
+        host = CodexHost()
+        session = host.get_or_create_session(agent_id="agt_bs")
+        claimed = {
+            "agent_id": "agt_bs",
+            "job": {"job_id": "job_bs"},
+            "run": {"run_id": "run_badstatus"},
+            "message": {"text": "bad status work"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("invalid codex terminal status", str(ctx.exception))
+
+    def test_codex_adapter_recover_sends_interrupt(self) -> None:
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_rec")
+        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_rec"})()})()
+
+        adapter.recover(
+            host=host,
+            session=session,
+            claimed={"agent_id": "agt_rec", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
+            attempt=1,
+            error=RecoverableExecutionError("test"),
+            supervisor=SupervisorStub(),
+        )
+        history = host._history.get(session.session_id, [])
+        self.assertTrue(any("INTERRUPT" in entry for entry in history))
+
+    # ── Gap-closure tests: ANSI stripping and Codex TUI cleaning ─────
+
+    def test_strip_ansi_removes_escape_sequences(self) -> None:
+        raw = "\x1b[32mgreen\x1b[0m plain \x1b[1;31mbold-red\x1b[0m"
+        self.assertEqual(_strip_ansi(raw), "green plain bold-red")
+
+    def test_strip_ansi_handles_osc_sequences(self) -> None:
+        raw = "\x1b]0;title\x07visible"
+        self.assertEqual(_strip_ansi(raw), "visible")
+
+    def test_clean_codex_tui_output_strips_chrome(self) -> None:
+        raw = (
+            "\u256d\u2500\u2500\u2500\u2500\u256e\n"
+            "\u2502 Welcome \u2502\n"
+            "\u2570\u2500\u2500\u2500\u2500\u256f\n"
+            "Here is the answer to your question.\n"
+            "It has two lines.\n"
+            "gpt-4.1 \u00b7 87% left \u00b7 ~/projects\n"
+        )
+        cleaned = _clean_codex_tui_output(raw)
+        self.assertIn("Here is the answer", cleaned)
+        self.assertIn("two lines", cleaned)
+        self.assertNotIn("\u256d", cleaned)
+        self.assertNotIn("gpt-4.1", cleaned)
+
+    def test_clean_codex_tui_output_preserves_content(self) -> None:
+        raw = "line one\nline two\nline three\n"
+        cleaned = _clean_codex_tui_output(raw)
+        self.assertEqual(cleaned, "line one\nline two\nline three")
+
+    # ── Gap-closure tests: TUI mode CodexAdapter ─────────────────────
+
+    def test_codex_adapter_tui_mode_send_wait_read_cycle(self) -> None:
+        class TuiHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("ncodex"):
+                    # Simulate Codex TUI ready state with › prompt marker.
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a Summarize recent commits\n"
+                    )
+                elif text and not text.startswith("ncodex"):
+                    self._history.setdefault(session.session_id, []).append(
+                        "Here is the result of your task.\n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tui"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        host = TuiHost()
+        session = host.get_or_create_session(agent_id="agt_tui")
+        adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        self.assertTrue(session.metadata.get("codex_bootstrapped"))
+        history = host._history.get(session.session_id, [])
+        self.assertTrue(any("ncodex" in entry for entry in history))
+
+        claimed = {
+            "agent_id": "agt_tui",
+            "job": {"job_id": "job_tui"},
+            "run": {"run_id": "run_tui"},
+            "message": {"text": "explain this code"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        roles = [a.role for a in result.artifacts]
+        self.assertEqual(roles, ["prompt", "transcript_log", "exec_log", "result"])
+        self.assertIn("result of your task", result.artifacts[-1].content)
+        self.assertEqual(result.summary["mode"], "tui")
+
+    def test_codex_adapter_tui_mode_empty_output_triggers_recovery(self) -> None:
+        class SilentHost(InProcessTerminalHost):
+            """Host where sends don't appear in scrollback (simulates TUI input area)."""
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:  # noqa: ARG002
+                pass
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_empty"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        host = SilentHost()
+        session = host.get_or_create_session(agent_id="agt_empty_tui")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_empty_tui",
+            "job": {"job_id": "job_empty_tui"},
+            "run": {"run_id": "run_empty_tui"},
+            "message": {"text": "silent work"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("no output", str(ctx.exception))
+
+    def test_codex_adapter_marker_mode_still_works(self) -> None:
+        class CodexHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if text.startswith("AGP_RUN_BEGIN run_compat"):
+                    self._history.setdefault(session.session_id, []).append(
+                        'AGP_RUN_RESULT run_compat {"status":"success","result":"marker result"}\n'
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_compat"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)
+        host = CodexHost()
+        session = host.get_or_create_session(agent_id="agt_compat")
+        adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        claimed = {
+            "agent_id": "agt_compat",
+            "job": {"job_id": "job_compat"},
+            "run": {"run_id": "run_compat"},
+            "message": {"text": "do compat work"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(result.artifacts[-1].content, "marker result")
 
 
 if __name__ == "__main__":
