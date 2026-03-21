@@ -347,7 +347,15 @@ class CodexAdapter(AgentAdapter):
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
         if host.kind == "tmux":
-            host.send_text(session, f"{self.cli_command} {shlex.quote(prompt)}", enter=True)
+            # Inline env vars so the shell in the tmux pane has them
+            # (tmux set-environment only affects new panes, not existing shells).
+            import os
+            env_prefix = ""
+            for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY"):
+                val = os.environ.get(key)
+                if val:
+                    env_prefix += f"{key}={shlex.quote(val)} "
+            host.send_text(session, f"{env_prefix}{self.cli_command} {shlex.quote(prompt)}", enter=True)
         else:
             host.send_text(session, prompt, enter=True)
 

@@ -40,6 +40,7 @@ from agp.models import (
     JobArtifact,
     Lease,
     Message,
+    Nudge,
     QueueDeliveryRecord,
     Run,
     RunArtifact,
@@ -50,7 +51,9 @@ from agp.models import (
 from agp.queue_backend import QueueDelivery, get_queue_backend
 from agp.schemas import (
     AgentDownRequest,
+    AgentPatchRequest,
     AgentUpRequest,
+    CreateNudgeRequest,
     ArtifactUploadRequest,
     CancelRunRequest,
     CapabilitySeedRequest,
@@ -140,6 +143,48 @@ def _serialize_artifact_with_role(artifact: Artifact, role: str) -> dict:
     )
     payload["role"] = role
     return payload
+
+
+_NUDGE_SEP = "========================================="
+
+
+def _format_job_nudge(job: Job, status_label: str) -> str:
+    """Format a priority-2 nudge payload for async job completion."""
+    result_line = ""
+    if job.result_artifact_id:
+        result_line = f"RESULT:       artifact {job.result_artifact_id}\n"
+    return (
+        f"{_NUDGE_SEP}\n"
+        f"[SYSTEM NUDGE] Async Task Completed\n"
+        f"{_NUDGE_SEP}\n"
+        f"JOB_ID:       {job.job_id}\n"
+        f"AGENT:        {job.target_agent_id or 'unknown'}\n"
+        f"STATUS:       {status_label}\n"
+        f"{result_line}\n"
+        f"ACTION REQUIRED: Please consume the result and determine your next step."
+    )
+
+
+def _enqueue_nudge(
+    db: Session,
+    *,
+    target_agent_id: str,
+    priority: int,
+    source: str,
+    payload: str,
+    job_id: str | None = None,
+) -> Nudge:
+    nudge = Nudge(
+        nudge_id=_new_id("ndg"),
+        target_agent_id=target_agent_id,
+        priority=priority,
+        source=source,
+        payload=payload,
+        job_id=job_id,
+        status="pending",
+    )
+    db.add(nudge)
+    return nudge
 
 
 def _error_response(status_code: int, code: str, message: str, retryable: bool = False) -> JSONResponse:
@@ -1493,6 +1538,12 @@ def list_agents(
     )
 
 
+@router.get("/agents/{agent_id}", response_model=dict)
+def get_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    agent = _require_agent(db, agent_id)
+    return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref", "created_at", "updated_at", "last_seen_at")))
+
+
 @router.post("/agents/up", response_model=dict)
 def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     _require_capability(db, request.capability_id)
@@ -1518,6 +1569,15 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 
+@router.patch("/agents/{agent_id}", response_model=dict)
+def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends(get_db)) -> dict:
+    agent = _require_agent(db, agent_id)
+    if request.workspace_ref is not None:
+        agent.workspace_ref = request.workspace_ref
+    db.commit()
+    return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
+
+
 @router.post("/agents/{agent_id}/down", response_model=dict)
 def agent_down(agent_id: str, request: AgentDownRequest, db: Session = Depends(get_db)) -> dict:
     agent = _require_agent(db, agent_id)
@@ -1539,6 +1599,15 @@ def agent_down(agent_id: str, request: AgentDownRequest, db: Session = Depends(g
     _create_event(db, agent_id=agent.agent_id, event_type=event_type, body={"mode": request.mode})
     db.commit()
     return _ok({"agent_id": agent.agent_id, "status": agent.status, "mode": request.mode})
+
+
+@router.get("/capabilities/{capability_id}", response_model=dict)
+def get_capability(capability_id: str, db: Session = Depends(get_db)) -> dict:
+    cap = _require_capability(db, capability_id)
+    return _ok(_serialize(cap, (
+        "capability_id", "name", "version", "image_ref", "model_ref",
+        "resource_tier", "permission_profile", "queue_mode", "runtime_requirements_json",
+    )))
 
 
 @router.get("/capabilities", response_model=dict)
@@ -2084,6 +2153,18 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
         body={"summary": request.summary, "artifact_ids": [artifact.artifact_id for artifact in db.scalars(select(Artifact).where(Artifact.run_id == run.run_id)).all()]},
     )
     _create_event(db, job_id=job.job_id, event_type="job.completed", body={"status": job.status})
+    # Auto-nudge: notify the dispatching orchestrator if configured
+    message = db.get(Message, job.message_id)
+    nudge_target = (message.metadata_json or {}).get("nudge_target") if message else None
+    if nudge_target:
+        _enqueue_nudge(
+            db,
+            target_agent_id=nudge_target,
+            priority=2,
+            source="job_completion",
+            payload=_format_job_nudge(job, "SUCCESS"),
+            job_id=job.job_id,
+        )
     db.commit()
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status, "result_artifact_id": result_artifact_id})
 
@@ -2137,6 +2218,18 @@ def fail_run(run_id: str, request: FailRunRequest, db: Session = Depends(get_db)
         body={"error": request.error, "summary": request.summary, "artifact_ids": [artifact.artifact_id for artifact in db.scalars(select(Artifact).where(Artifact.run_id == run.run_id)).all()]},
     )
     _create_event(db, job_id=job.job_id, event_type="job.failed", body={"status": job.status})
+    # Auto-nudge: notify the dispatching orchestrator if configured
+    message = db.get(Message, job.message_id)
+    nudge_target = (message.metadata_json or {}).get("nudge_target") if message else None
+    if nudge_target:
+        _enqueue_nudge(
+            db,
+            target_agent_id=nudge_target,
+            priority=2,
+            source="job_completion",
+            payload=_format_job_nudge(job, "FAILED"),
+            job_id=job.job_id,
+        )
     db.commit()
     return _ok(
         {
@@ -2843,6 +2936,64 @@ def list_capability_pools(db: Session = Depends(get_db)) -> dict:
             }
             for pool in pools
         ],
+    })
+
+
+# ── Nudge endpoints ──────────────────────────────────────────────────
+
+
+@router.post("/nudges", response_model=dict)
+def create_nudge(request: CreateNudgeRequest, db: Session = Depends(get_db)) -> dict:
+    nudge = _enqueue_nudge(
+        db,
+        target_agent_id=request.target_agent_id,
+        priority=request.priority,
+        source=request.source,
+        payload=request.payload,
+        job_id=request.job_id,
+    )
+    db.commit()
+    return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "status", "created_at")))
+
+
+@router.get("/nudges/next", response_model=dict)
+def next_nudge(
+    target_agent_id: str = Query(...),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Pop the highest-priority pending nudge for an agent (marks it delivered)."""
+    nudge = db.scalars(
+        select(Nudge)
+        .where(Nudge.target_agent_id == target_agent_id, Nudge.status == "pending")
+        .order_by(Nudge.priority.asc(), Nudge.created_at.asc())
+        .limit(1)
+    ).first()
+    if nudge is None:
+        return _ok(None)
+    nudge.status = "delivered"
+    nudge.delivered_at = utc_now()
+    db.commit()
+    return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "payload", "job_id", "status", "created_at", "delivered_at")))
+
+
+@router.get("/nudges", response_model=dict)
+def list_nudges(
+    target_agent_id: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=100),
+    db: Session = Depends(get_db),
+) -> dict:
+    query = select(Nudge)
+    if target_agent_id is not None:
+        query = query.where(Nudge.target_agent_id == target_agent_id)
+    if status is not None:
+        query = query.where(Nudge.status == status)
+    nudges = db.scalars(query.order_by(Nudge.priority.asc(), Nudge.created_at.asc()).limit(limit)).all()
+    return _ok({
+        "items": [
+            _serialize(n, ("nudge_id", "target_agent_id", "priority", "source", "status", "job_id", "created_at", "delivered_at"))
+            for n in nudges
+        ]
     })
 
 

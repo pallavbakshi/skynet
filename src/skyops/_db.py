@@ -63,11 +63,24 @@ def db_seed() -> None:
         # Seed agents via SDK
         for agent_id, agent_data in cfg.agents.items():
             cap_id = agent_data.get("capability_id", "")
+            workspace = agent_data.get("workspace_ref")
             agents = client.list_agents(capability_id=cap_id, limit=200)
-            if any(item["agent_id"] == agent_id for item in agents["items"]):
-                typer.echo(f"  Agent already exists: {agent_id}")
+            existing = next(
+                (item for item in agents["items"] if item["agent_id"] == agent_id),
+                None,
+            )
+            if existing is not None:
+                # Patch workspace_ref if changed
+                if workspace and existing.get("workspace_ref") != workspace:
+                    client.patch_agent(agent_id, workspace_ref=workspace)
+                    typer.echo(f"  Updated agent: {agent_id} (workspace_ref)")
+                else:
+                    typer.echo(f"  Agent already exists: {agent_id}")
                 continue
-            client.register_agent(agent_id, cap_id)
+            client.register_agent(
+                agent_id, cap_id,
+                workspace_ref=workspace,
+            )
             typer.echo(f"  Seeded agent: {agent_id}")
 
     typer.echo("Seeding complete.")

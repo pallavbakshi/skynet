@@ -1,18 +1,25 @@
 # ── AGP / Skynet Makefile ─────────────────────────────────────────────
-# Three install targets for three roles:
-#   make install-server   — CP + infra on Ubuntu/Debian
-#   make install-mac      — Runtime + SDK on macOS
-#   make install-runtime  — Runtime only on any Linux
+# Two install targets:
+#   make install-server   — CP + infra + runtime deps (any OS)
+#   make install-runtime  — Runtime only, no infra (any OS)
 #
 # Service targets (after install):
 #   make serve            — Start CP + sweepers (bare-metal)
+#   make runtime          — Start a runtime (tmux + codex)
 #   make stop             — Stop everything
 #   make status           — Show what's running
-#   make test             — Run test suite
 # ──────────────────────────────────────────────────────────────────────
 
 SHELL := /bin/bash
 ROOT  := $(shell pwd)
+
+# Prefer uv run, fall back to direct command
+UV := $(shell command -v uv 2>/dev/null)
+ifdef UV
+  RUN := uv run
+else
+  RUN :=
+endif
 
 # ── Env defaults (override with env vars or .env file) ────────────────
 export AGP_HOST            ?= 0.0.0.0
@@ -36,33 +43,42 @@ install-runtime: ## Install runtime only — no infra (any OS)
 
 # ── Service targets (bare-metal, no docker) ───────────────────────────
 
-.PHONY: serve stop status initdb seed
+.PHONY: serve stop stop-cp stop-runtime status initdb seed
 
 initdb: ## Initialize database schema
-	agp initdb
+	$(RUN) agp initdb
 
 seed: ## Seed capabilities and agents from skyops.toml
-	skyops db seed
+	$(RUN) skyops db seed
 
 serve: ## Start CP + sweepers in background (bare-metal)
 	@mkdir -p .skyops-pids .agp-logs .agp-artifacts
 	@echo "Starting control plane..."
-	@agp serve &
+	@$(RUN) agp serve &
 	@sleep 2
 	@echo "Starting lease sweeper..."
-	@agp sweep-loop --interval-seconds 5 &
+	@$(RUN) agp sweep-loop --interval-seconds 5 &
 	@echo "Starting runtime sweeper..."
-	@agp sweep-runtimes-loop --interval-seconds 10 &
+	@$(RUN) agp sweep-runtimes-loop --interval-seconds 10 &
 	@echo ""
 	@echo "CP running at http://$${AGP_HOST}:$${AGP_PORT}"
 	@echo "Use 'make stop' to shut down."
 
-stop: ## Stop all AGP processes
+nudge-loop: ## Start nudge delivery daemon for orc
+	$(RUN) agp nudge-loop agt_orc --session agp-agt_orc
+
+stop: stop-cp stop-runtime ## Stop everything
+
+stop-cp: ## Stop control plane + sweepers + nudge daemon
 	@-pkill -f "agp serve" 2>/dev/null
 	@-pkill -f "agp sweep-loop" 2>/dev/null
 	@-pkill -f "agp sweep-runtimes-loop" 2>/dev/null
+	@-pkill -f "agp nudge-loop" 2>/dev/null
+	@echo "CP stopped."
+
+stop-runtime: ## Stop runtime worker
 	@-pkill -f "agp runtime-work-loop" 2>/dev/null
-	@echo "Stopped."
+	@echo "Runtime stopped."
 
 status: ## Show running services
 	@echo "=== AGP Processes ==="
@@ -90,24 +106,33 @@ ps: ## Show docker compose status
 .PHONY: runtime runtime-deploy
 
 runtime: ## Start a local runtime (tmux + codex)
-	AGP_ARTIFACT_BACKEND=http agp runtime-work-loop rtm_local \
+	OPENROUTER_API_KEY="$${OPENROUTER_API_KEY}" \
+	AGP_ARTIFACT_BACKEND=http \
+	AGP_CODEX_TUI_MODE=true \
+	AGP_CODEX_CLI_COMMAND="ncodex -m openai/gpt-5.3-codex -a never -s danger-full-access" \
+	AGP_CODEX_MAX_POLLS=240 \
+	AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
+	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
+	AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
+	AGP_CODEX_IDLE_AFTER=5 \
+	$(RUN) agp runtime-work-loop rtm_local \
 		--server-url http://127.0.0.1:$${AGP_PORT} \
 		--host-kind tmux \
 		--adapter-kind codex \
 		--agent-id agt_local
 
 runtime-deploy: ## Generate deploy command for a remote runtime
-	@skyops runtime deploy rtm_remote --format script
+	@$(RUN) skyops runtime deploy rtm_remote --format script
 
 # ── Dev/test targets ─────────────────────────────────────────────────
 
 .PHONY: test lint
 
 test: ## Run test suite
-	uv run python -m pytest tests/ -x -q
+	$(RUN) python -m pytest tests/ -x -q
 
 lint: ## Run linter
-	uv run python -m ruff check src/ tests/
+	$(RUN) python -m ruff check src/ tests/
 
 # ── Help ─────────────────────────────────────────────────────────────
 

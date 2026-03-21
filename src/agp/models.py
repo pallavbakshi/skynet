@@ -244,6 +244,20 @@ class CapabilityPool(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class Nudge(Base):
+    __tablename__ = "nudges"
+
+    nudge_id: Mapped[str] = mapped_column(String, primary_key=True)
+    target_agent_id: Mapped[str] = mapped_column(String)
+    priority: Mapped[int] = mapped_column(Integer)  # 1=highest, 4=lowest
+    source: Mapped[str] = mapped_column(String)  # human, job_completion, agenda_setter, system
+    payload: Mapped[str] = mapped_column(Text)
+    job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.job_id"), nullable=True)
+    status: Mapped[str] = mapped_column(String, default="pending")  # pending, delivered, expired
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class SystemMetadata(Base):
     __tablename__ = "system_metadata"
 

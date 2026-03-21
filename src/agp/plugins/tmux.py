@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from time import monotonic, sleep
@@ -98,6 +99,16 @@ class TmuxHost(TerminalHost):
         if cwd:
             args.extend(["-c", cwd])
         self._run(args)
+        # Forward environment variables that agent adapters may need
+        # (tmux new-session does not inherit the parent's full env).
+        for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+                     "ANTHROPIC_API_KEY", "AGP_SERVER_URL"):
+            val = os.environ.get(key)
+            if val:
+                try:
+                    self._run(["set-environment", "-t", name, key, val], allow_failure=True)
+                except Exception:
+                    pass  # best-effort; test mocks may not support set-environment
         return TerminalSession(
             session_id=name,
             agent_id=agent_id,

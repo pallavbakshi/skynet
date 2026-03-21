@@ -141,29 +141,34 @@ fi
 echo ""
 echo "=== Installing AGP ==="
 
-if command -v agp >/dev/null 2>&1; then
-  ok "AGP already installed"
-else
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd 2>/dev/null || echo ".")"
-  cd "${ROOT}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd 2>/dev/null || echo ".")"
+cd "${ROOT}"
 
-  if [[ -f pyproject.toml ]]; then
-    # Install with [server] extras so runtime-work-loop works
-    # (it needs agp.config, agp.runtime, agp.plugins)
-    uv pip install -e ".[server]" 2>/dev/null || pip install -e ".[server]"
+if [[ -f pyproject.toml ]]; then
+  if command -v uv >/dev/null 2>&1; then
+    uv sync --extra server 2>/dev/null || uv pip install -e ".[server]"
+    ok "AGP installed (use 'uv run agp' or 'make' targets)"
+  else
+    pip install -e ".[server]"
     ok "AGP installed from source"
+  fi
+else
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install "agp[server]"
   else
     pip install "agp[server]"
-    ok "AGP installed from PyPI"
   fi
+  ok "AGP installed from PyPI"
 fi
 
 # ── Verify ────────────────────────────────────────────────────────────
 echo ""
 echo "=== Verification ==="
 
-agp --help >/dev/null 2>&1              && ok "agp CLI"   || warn "agp not in PATH"
-python3 -c "from agp.client import AgpClient" 2>/dev/null && ok "agp SDK"   || warn "agp SDK import failed"
+(command -v agp >/dev/null 2>&1 && agp --help >/dev/null 2>&1) || \
+  (command -v uv >/dev/null 2>&1 && uv run agp --help >/dev/null 2>&1) && ok "agp CLI" || warn "agp not available"
+(python3 -c "from agp.client import AgpClient" 2>/dev/null) || \
+  (command -v uv >/dev/null 2>&1 && uv run python -c "from agp.client import AgpClient" 2>/dev/null) && ok "agp SDK" || warn "agp SDK import failed"
 tmux -V >/dev/null 2>&1                 && ok "tmux"      || warn "tmux not in PATH"
 command -v codex >/dev/null 2>&1         && ok "codex"    || warn "codex not in PATH"
 

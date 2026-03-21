@@ -240,27 +240,37 @@ fi
 echo ""
 echo "=== Installing AGP ==="
 
-if command -v agp >/dev/null 2>&1 && command -v skyops >/dev/null 2>&1; then
-  ok "AGP already installed"
-else
-  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-  cd "${ROOT}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT}"
 
-  if [[ -f pyproject.toml ]]; then
-    uv pip install -e ".[server]" 2>/dev/null || pip install -e ".[server]"
+if [[ -f pyproject.toml ]]; then
+  if command -v uv >/dev/null 2>&1; then
+    # uv sync creates/updates .venv and installs the project + extras.
+    # Commands are then available via `uv run agp`, `uv run skyops`.
+    uv sync --extra server 2>/dev/null || uv pip install -e ".[server]"
+    ok "AGP installed (use 'uv run agp' or 'make' targets)"
+  else
+    pip install -e ".[server]"
     ok "AGP installed from source with [server] extras"
+  fi
+else
+  if command -v uv >/dev/null 2>&1; then
+    uv pip install "agp[server]"
   else
     pip install "agp[server]"
-    ok "AGP installed from PyPI"
   fi
+  ok "AGP installed from PyPI"
 fi
 
 # ── Verify ────────────────────────────────────────────────────────────
 echo ""
 echo "=== Verification ==="
 
-agp --help >/dev/null 2>&1      && ok "agp CLI"         || warn "agp not in PATH"
-skyops --help >/dev/null 2>&1   && ok "skyops CLI"       || warn "skyops not in PATH"
+# Check direct PATH first, then uv run
+(command -v agp >/dev/null 2>&1 && agp --help >/dev/null 2>&1) || \
+  (command -v uv >/dev/null 2>&1 && uv run agp --help >/dev/null 2>&1) && ok "agp CLI" || warn "agp not available"
+(command -v skyops >/dev/null 2>&1 && skyops --help >/dev/null 2>&1) || \
+  (command -v uv >/dev/null 2>&1 && uv run skyops --help >/dev/null 2>&1) && ok "skyops CLI" || warn "skyops not available"
 tmux -V >/dev/null 2>&1         && ok "tmux"             || warn "tmux not in PATH"
 command -v codex >/dev/null 2>&1 && ok "codex"           || warn "codex not in PATH"
 redis-cli ping >/dev/null 2>&1  && ok "redis reachable"  || warn "redis not reachable"

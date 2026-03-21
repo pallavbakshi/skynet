@@ -41,6 +41,18 @@ class AgentUpRequest(BaseModel):
     assigned_runtime_id: str | None = None
 
 
+class AgentPatchRequest(BaseModel):
+    workspace_ref: str | None = None
+
+
+class CreateNudgeRequest(BaseModel):
+    target_agent_id: str
+    priority: int = 2  # 1=human, 2=job_completion, 3=agenda_setter, 4=system
+    source: str = "human"
+    payload: str
+    job_id: str | None = None
+
+
 class AgentDownRequest(BaseModel):
     mode: Literal["drain", "terminate", "force"] = "drain"
 
