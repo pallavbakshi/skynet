@@ -18,7 +18,7 @@ spec:
           command:
             - sh
             - -lc
-            - python -m agp initdb && python -m agp serve --host 0.0.0.0 --port 7860
+            - python /app/scripts/wait_for_tcp.py postgres 5432 --timeout 180 && python -m agp initdb && python -m agp serve --host 0.0.0.0 --port 7860
           envFrom:
             - configMapRef:
                 name: agp-config
@@ -26,18 +26,29 @@ spec:
                 name: agp-secrets
           ports:
             - containerPort: 7860
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 7860
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 36
           readinessProbe:
             httpGet:
               path: /health
               port: 7860
             initialDelaySeconds: 5
             periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 6
           livenessProbe:
             httpGet:
               path: /health
               port: 7860
-            initialDelaySeconds: 10
+            initialDelaySeconds: 20
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /data

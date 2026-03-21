@@ -31,6 +31,15 @@ It is not an HA deployment.
 
 ## Apply
 
+First generate a real dev secret manifest instead of applying the placeholder values in [secret.yaml](/home/user/projects/skynet/k8s/secret.yaml):
+
+```bash
+./scripts/generate_k8s_dev_secret.sh /tmp/agp-k8s-secret.dev.yaml
+kubectl apply -f /tmp/agp-k8s-secret.dev.yaml
+```
+
+Then apply the base manifests:
+
 ```bash
 kubectl apply -k k8s
 ```
@@ -44,10 +53,25 @@ python scripts/validate_phase3_assets.py
 Reusable local setup helpers for Linux hosts:
 
 ```bash
-./scripts/install_infra_tools_ubuntu.sh
+./scripts/install_infra_tools.sh
 ./scripts/phase3_stack_up.sh
 ./scripts/phase3_stack_smoke.sh
 ./scripts/phase3_stack_down.sh
+```
+
+Local Kubernetes smoke for the single-node kind overlay:
+
+```bash
+./scripts/k8s_smoke.sh
+```
+
+The kind smoke uses [k8s/overlays/kind](/home/user/projects/skynet/k8s/overlays/kind) to force local-image usage and replace persistent volumes with `emptyDir` so the stack can be validated on a disposable single-node cluster.
+
+Phase 3 backup and restore helpers:
+
+```bash
+uv run python scripts/phase3_backup_create.py /tmp/agp-phase3-backup
+uv run python scripts/phase3_backup_restore.py /tmp/agp-phase3-backup
 ```
 
 ## Recommended next step

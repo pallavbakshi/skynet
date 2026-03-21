@@ -16,12 +16,9 @@ spec:
         - name: lease-sweeper
           image: agp:latest
           command:
-            - python
-            - -m
-            - agp
-            - sweep-loop
-            - --interval-seconds
-            - "5"
+            - sh
+            - -lc
+            - python /app/scripts/wait_for_http.py http://control-plane:7860/health --timeout 180 && python -m agp sweep-loop --interval-seconds 5
           envFrom:
             - configMapRef:
                 name: agp-config

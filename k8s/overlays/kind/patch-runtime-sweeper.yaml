@@ -1,0 +1,18 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runtime-sweeper
+spec:
+  template:
+    spec:
+      containers:
+        - name: runtime-sweeper
+          imagePullPolicy: IfNotPresent
+      volumes:
+        - $patch: replace
+        - name: data
+          emptyDir: {}
+        - name: artifacts
+          emptyDir: {}
+        - name: logs
+          emptyDir: {}

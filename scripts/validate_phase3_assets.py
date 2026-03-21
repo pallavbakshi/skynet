@@ -47,8 +47,12 @@ def main() -> int:
     kubectl = shutil.which("kubectl")
     if kubectl:
         checks["k8s_kustomize"] = _run(kubectl, "kustomize", "k8s")
+        checks["k8s_kind_overlay_kustomize"] = _run(
+            kubectl, "kustomize", "k8s/overlays/kind", "--load-restrictor=LoadRestrictionsNone"
+        )
     else:
         checks["k8s_kustomize"] = {"skipped": True, "reason": "kubectl not installed"}
+        checks["k8s_kind_overlay_kustomize"] = {"skipped": True, "reason": "kubectl not installed"}
 
     ok = True
     for item in checks.values():

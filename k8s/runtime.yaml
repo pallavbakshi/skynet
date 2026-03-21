@@ -16,21 +16,9 @@ spec:
         - name: runtime
           image: agp:latest
           command:
-            - python
-            - -m
-            - agp
-            - runtime-work-loop
-            - rtm_local
-            - --server-url
-            - http://control-plane:7860
-            - --hostname
-            - runtime-1
-            - --agent-id
-            - agt_local
-            - --artifact-root
-            - /artifacts
-            - --idle-sleep-seconds
-            - "1"
+            - sh
+            - -lc
+            - python /app/scripts/wait_for_http.py http://control-plane:7860/health --timeout 180 && python -m agp runtime-work-loop rtm_local --server-url http://control-plane:7860 --hostname runtime-1 --agent-id agt_local --artifact-root /artifacts --idle-sleep-seconds 1
           envFrom:
             - configMapRef:
                 name: agp-config

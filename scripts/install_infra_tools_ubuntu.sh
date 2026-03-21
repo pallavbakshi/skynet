@@ -25,11 +25,28 @@ if ! command -v kubectl >/dev/null 2>&1; then
   sudo snap install kubectl --classic
 fi
 
+if ! command -v kind >/dev/null 2>&1; then
+  ARCH="$(uname -m)"
+  case "${ARCH}" in
+    x86_64) KIND_ARCH="amd64" ;;
+    aarch64|arm64) KIND_ARCH="arm64" ;;
+    *)
+      echo "Unsupported architecture for kind install: ${ARCH}" >&2
+      exit 1
+      ;;
+  esac
+  TMP_KIND="$(mktemp)"
+  curl -fsSL "https://kind.sigs.k8s.io/dl/v0.29.0/kind-linux-${KIND_ARCH}" -o "${TMP_KIND}"
+  chmod +x "${TMP_KIND}"
+  sudo mv "${TMP_KIND}" /usr/local/bin/kind
+fi
+
 sudo usermod -aG docker "${USER}" || true
 
 echo "Installed:"
 docker --version
 docker compose version
 kubectl version --client
+kind version
 echo
 echo "If this is your first Docker install, start a new shell before using docker without sudo."

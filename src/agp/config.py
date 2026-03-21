@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -65,6 +66,24 @@ class Settings(BaseSettings):
     tmux_default_cwd: str = ""
     tmux_session_prefix: str = "agp"
     output_checkpoint_dir: Path = Path(".agp-checkpoints")
+
+    @model_validator(mode="after")
+    def _validate_backend_requirements(self) -> "Settings":
+        if self.artifact_backend == "s3":
+            missing: list[str] = []
+            if not self.s3_endpoint_url:
+                missing.append("AGP_S3_ENDPOINT_URL")
+            if not self.s3_bucket:
+                missing.append("AGP_S3_BUCKET")
+            if not self.s3_access_key_id:
+                missing.append("AGP_S3_ACCESS_KEY_ID")
+            if not self.s3_secret_access_key:
+                missing.append("AGP_S3_SECRET_ACCESS_KEY")
+            if missing:
+                raise ValueError(
+                    "artifact backend 's3' requires: " + ", ".join(missing)
+                )
+        return self
 
 
 settings = Settings()

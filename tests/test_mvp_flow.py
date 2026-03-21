@@ -18,7 +18,7 @@ from typer.testing import CliRunner
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, func, select
 
-from agp.config import settings
+from agp.config import Settings, settings
 import agp.control_plane as control_plane_module
 from agp.artifact_store import S3ArtifactStore, reset_artifact_store_state
 from agp.control_plane import build_app
@@ -938,6 +938,16 @@ class MvpFlowTest(unittest.TestCase):
             self.assertTrue(store.exists(storage_ref=stored.storage_ref))
             self.assertEqual(store.read_text(storage_ref=stored.storage_ref), "hello s3")
             self.assertEqual(stored.checksum, fake_client.objects[("agp-artifacts", stored.storage_ref.split("/", 3)[3])]["Metadata"]["checksum"])
+
+    def test_s3_backend_requires_endpoint_configuration(self) -> None:
+        with self.assertRaises(ValueError):
+            Settings(
+                artifact_backend="s3",
+                s3_endpoint_url=None,
+                s3_bucket="agp-artifacts",
+                s3_access_key_id="key",
+                s3_secret_access_key="secret",
+            )
 
     def test_localfs_artifact_backend_populates_checksum(self) -> None:
         settings.artifact_backend = "localfs"
