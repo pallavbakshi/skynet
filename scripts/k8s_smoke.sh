@@ -119,11 +119,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-KCTL=(sudo -n docker exec "${KIND_NODE_CONTAINER}" kubectl)
+KCTL=("${DOCKER[@]}" exec "${KIND_NODE_CONTAINER}" kubectl)
 
 "${KCTL[@]}" delete namespace agp --ignore-not-found --wait=true
 KUBECONFIG="${SMOKE_KUBECONFIG}" kubectl kustomize "${TMP_OVERLAY_DIR}" --load-restrictor=LoadRestrictionsNone > "${TMP_RENDERED_MANIFEST}"
-sudo -n docker exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_RENDERED_MANIFEST}'" < "${TMP_RENDERED_MANIFEST}"
+"${DOCKER[@]}" exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_RENDERED_MANIFEST}'" < "${TMP_RENDERED_MANIFEST}"
 "${KCTL[@]}" apply -f "${NODE_RENDERED_MANIFEST}"
 
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/postgres --timeout=180s
@@ -164,6 +164,7 @@ spec:
       containers:
         - name: smoke
           image: agp:latest
+          imagePullPolicy: Never
           command:
             - python
             - /app/scripts/smoke_local_stack.py
@@ -175,7 +176,7 @@ spec:
 EOF
 
 "${KCTL[@]}" delete job agp-smoke --namespace agp --ignore-not-found --wait=true
-sudo -n docker exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_SMOKE_JOB_MANIFEST}'" < "${TMP_SMOKE_JOB_MANIFEST}"
+"${DOCKER[@]}" exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_SMOKE_JOB_MANIFEST}'" < "${TMP_SMOKE_JOB_MANIFEST}"
 "${KCTL[@]}" apply -f "${NODE_SMOKE_JOB_MANIFEST}"
 
 for _ in $(seq 1 180); do

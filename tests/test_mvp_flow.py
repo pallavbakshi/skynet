@@ -122,6 +122,12 @@ class FakeRedisClient:
     def sadd(self, name: str, value: str) -> None:
         self.sets.setdefault(name, set()).add(value)
 
+    def srem(self, name: str, value: str) -> None:
+        self.sets.setdefault(name, set()).discard(value)
+
+    def sismember(self, name: str, value: str) -> bool:
+        return value in self.sets.setdefault(name, set())
+
 
 class _FakeWebhookResponse:
     def raise_for_status(self) -> None:
@@ -141,12 +147,6 @@ class _FakeWebhookClient:
     def post(self, url: str, json: dict) -> _FakeWebhookResponse:
         self.sink.append({"url": url, "json": json})
         return _FakeWebhookResponse()
-
-    def srem(self, name: str, value: str) -> None:
-        self.sets.setdefault(name, set()).discard(value)
-
-    def sismember(self, name: str, value: str) -> bool:
-        return value in self.sets.setdefault(name, set())
 
 
 class MvpFlowTest(unittest.TestCase):
