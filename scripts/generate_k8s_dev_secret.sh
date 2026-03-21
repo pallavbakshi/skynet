@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DEPRECATED: Use `skyops secrets generate-k8s` (future) instead.
+# DEPRECATED: Use `skyops secrets generate-k8s` instead.
 set -euo pipefail
 
 OUT_PATH="${1:-/tmp/agp-k8s-secret.dev.yaml}"

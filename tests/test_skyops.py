@@ -704,5 +704,65 @@ class TestPsCommand(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
 
 
+class TestFirstBootDetection(unittest.TestCase):
+    def test_up_marks_first_boot(self):
+        """skyops up sets .skyops-initialized marker on first boot."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            marker = Path(td) / ".skyops-initialized"
+            self.assertFalse(marker.exists())
+
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["up"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(marker.exists(), "First boot marker not created")
+
+    def test_second_boot_skips_init(self):
+        """skyops up does not re-init on subsequent boots."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            # Pre-create the marker
+            (Path(td) / ".skyops-initialized").write_text("initialized\n")
+
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["up"])
+            self.assertEqual(result.exit_code, 0, result.output)
+
+
+class TestStatusUptime(unittest.TestCase):
+    def test_status_table_has_uptime_column(self):
+        """skyops status output includes an UPTIME column."""
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text(textwrap.dedent("""\
+                [stack]
+                mode = "bare-metal"
+                [server]
+                port = 7860
+            """))
+            cfg = load_config(toml_path)
+            with patch("skyops._status.load_config", return_value=cfg):
+                with patch("skyops._status._probe_tcp", return_value=False):
+                    with patch("skyops._status._process_running", return_value=False):
+                        with patch("skyops._status._platform_summary", return_value=[]):
+                            result = runner.invoke(app, ["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("UPTIME", result.output)
+
+
 if __name__ == "__main__":
     unittest.main()

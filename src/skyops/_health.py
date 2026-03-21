@@ -7,6 +7,7 @@ from urllib.parse import urlparse
 import typer
 
 from skyops.config import load_config
+from skyops._client import resolve_server_url, resolve_host_for_url
 from skyops._status import _probe_tcp, _probe_http_health
 
 health_app = typer.Typer(help="Deep health check.")
@@ -20,38 +21,41 @@ def health(ctx: typer.Context) -> None:
 
     cfg = load_config()
     all_ok = True
-
     checks: list[tuple[str, bool, str]] = []
 
     # ── Database ──────────────────────────────────────────────────
+    db_host = resolve_host_for_url(cfg.database.url)
     db_port = _port_from_url(cfg.database.url) or 5432
-    db_ok = _probe_tcp("127.0.0.1", db_port)
-    checks.append(("postgres", db_ok, f":{db_port}"))
+    db_ok = _probe_tcp(db_host, db_port)
+    checks.append(("postgres", db_ok, f"{db_host}:{db_port}"))
 
     # ── Redis ─────────────────────────────────────────────────────
+    redis_host = resolve_host_for_url(cfg.redis.url)
     redis_port = _port_from_url(cfg.redis.url) or 6379
-    redis_tcp = _probe_tcp("127.0.0.1", redis_port)
+    redis_tcp = _probe_tcp(redis_host, redis_port)
     if redis_tcp:
         redis_ok = _redis_ping(cfg.redis.url)
-        checks.append(("redis", redis_ok, f":{redis_port} PING"))
+        checks.append(("redis", redis_ok, f"{redis_host}:{redis_port} PING"))
     else:
-        checks.append(("redis", False, f":{redis_port}"))
+        checks.append(("redis", False, f"{redis_host}:{redis_port}"))
 
     # ── MinIO ─────────────────────────────────────────────────────
+    minio_host = resolve_host_for_url(cfg.s3.endpoint_url)
     minio_port = _port_from_url(cfg.s3.endpoint_url) or 9000
-    minio_tcp = _probe_tcp("127.0.0.1", minio_port)
+    minio_tcp = _probe_tcp(minio_host, minio_port)
     if minio_tcp:
         minio_ok = _minio_bucket_access(cfg)
-        detail = f":{minio_port} bucket={cfg.s3.bucket}"
-        checks.append(("minio", minio_ok, detail))
+        checks.append(("minio", minio_ok, f"{minio_host}:{minio_port} bucket={cfg.s3.bucket}"))
     else:
-        checks.append(("minio", False, f":{minio_port}"))
+        checks.append(("minio", False, f"{minio_host}:{minio_port}"))
 
     # ── Control plane ─────────────────────────────────────────────
+    cp_url = resolve_server_url(cfg)
+    cp_host = resolve_host_for_url(cp_url)
     cp_port = cfg.server.port
-    cp_tcp = _probe_tcp("127.0.0.1", cp_port)
-    cp_health = _probe_http_health(f"http://127.0.0.1:{cp_port}/health") if cp_tcp else False
-    checks.append(("control-plane", cp_health, f":{cp_port} /health"))
+    cp_tcp = _probe_tcp(cp_host, cp_port)
+    cp_health = _probe_http_health(f"{cp_url}/health") if cp_tcp else False
+    checks.append(("control-plane", cp_health, f"{cp_host}:{cp_port} /health"))
 
     # ── API + runtime heartbeats ──────────────────────────────────
     if cp_health:
@@ -64,7 +68,6 @@ def health(ctx: typer.Context) -> None:
                 agents_active = summary.get("active_agents", "?")
                 checks.append(("  api", True, f"jobs={jobs_total} agents={agents_active}"))
 
-                # Check runtime heartbeat freshness
                 agents = client.list_agents(limit=200)
                 stale_runtimes: list[str] = []
                 for agent in agents.get("items", []):
@@ -100,10 +103,8 @@ def _port_from_url(url: str) -> int | None:
 
 
 def _redis_ping(redis_url: str) -> bool:
-    """Attempt a Redis PING command."""
     try:
         import redis
-
         r = redis.from_url(redis_url, socket_timeout=2.0)
         return r.ping()
     except Exception:
@@ -111,11 +112,9 @@ def _redis_ping(redis_url: str) -> bool:
 
 
 def _minio_bucket_access(cfg) -> bool:
-    """Check MinIO bucket exists and is accessible with configured credentials."""
     try:
         import boto3
         from botocore.config import Config as BotoConfig
-
         s3 = boto3.client(
             "s3",
             endpoint_url=cfg.s3.endpoint_url,

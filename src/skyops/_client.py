@@ -7,6 +7,25 @@ from agp.client import AgpClient, AgpProfile
 from skyops.config import SkyopsConfig, load_config
 
 
+def _connectable_host(host: str) -> str:
+    """Map 0.0.0.0 (listen-on-all) to 127.0.0.1 for client connections."""
+    return "127.0.0.1" if host == "0.0.0.0" else host
+
+
+def resolve_server_url(cfg: SkyopsConfig) -> str:
+    """Return the HTTP URL to reach the control plane from this host."""
+    return f"http://{_connectable_host(cfg.server.host)}:{cfg.server.port}"
+
+
+def resolve_host_for_url(url: str) -> str:
+    """Extract the host from a URL, mapping 0.0.0.0 → 127.0.0.1."""
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    host = parsed.hostname or "127.0.0.1"
+    return _connectable_host(host)
+
+
 def build_profile(cfg: SkyopsConfig | None = None) -> AgpProfile:
     """Build an AgpProfile from skyops config, respecting the configured host.
 
@@ -18,13 +37,7 @@ def build_profile(cfg: SkyopsConfig | None = None) -> AgpProfile:
         except FileNotFoundError:
             return AgpProfile.load()
 
-    host = cfg.server.host
-    port = cfg.server.port
-    # Use the configured host, not hardcoded localhost
-    server_url = f"http://{host}:{port}"
-    # But for 0.0.0.0 (listen-on-all), connect to localhost
-    if host == "0.0.0.0":
-        server_url = f"http://127.0.0.1:{port}"
+    server_url = resolve_server_url(cfg)
 
     return AgpProfile(
         server_url=server_url,

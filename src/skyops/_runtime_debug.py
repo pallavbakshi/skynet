@@ -8,6 +8,7 @@ import socket
 import typer
 
 from skyops.config import load_config
+from skyops._client import resolve_server_url
 
 runtime_debug_app = typer.Typer(help="Runtime debugging commands.")
 
@@ -29,7 +30,7 @@ def runtime_register(
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
+        server_url=resolve_server_url(cfg),
     )
     client = RuntimeClient(identity)
     try:
@@ -54,7 +55,7 @@ def runtime_claim(
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
+        server_url=resolve_server_url(cfg),
     )
     client = RuntimeClient(identity)
     try:
@@ -69,7 +70,7 @@ def runtime_work_once(
     runtime_id: str = typer.Argument(help="Runtime ID."),
     agent_id: str | None = typer.Option(None, "--agent-id", help="Agent ID."),
     capability_id: str | None = typer.Option(None, "--capability-id", help="Capability ID."),
-    server_url: str = typer.Option("http://127.0.0.1:7860", "--server-url", help="Server URL."),
+    server_url: str | None = typer.Option(None, "--server-url", help="Server URL (defaults to config)."),
     hostname: str | None = typer.Option(None, "--hostname", help="Hostname."),
     artifact_root: str = typer.Option(".agp-artifacts", "--artifact-root", help="Artifact root."),
     host_kind: str = typer.Option("inprocess", "--host-kind", help="Terminal host kind."),
@@ -80,12 +81,14 @@ def runtime_work_once(
     from agp.plugins import build_terminal_host, build_agent_adapter
     from agp.runtime import RuntimeSupervisor
 
+    cfg = load_config()
+    resolved_url = server_url or resolve_server_url(cfg)
     actual_hostname = hostname or socket.gethostname()
     client = RuntimeClient(
         RuntimeIdentity(
             runtime_id=runtime_id,
             hostname=actual_hostname,
-            server_url=server_url,
+            server_url=resolved_url,
         )
     )
     worker = RuntimeSupervisor(

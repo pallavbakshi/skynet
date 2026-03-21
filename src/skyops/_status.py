@@ -102,30 +102,37 @@ def _docker_compose_services(cfg: SkyopsConfig) -> list[ServiceInfo]:
 
 def _bare_metal_services(cfg: SkyopsConfig) -> list[ServiceInfo]:
     """Detect services by probing known ports."""
-    checks: list[tuple[str, int | None]] = [
-        ("postgres", _parse_port(cfg.database.url) or 5432),
-        ("redis", _parse_port(cfg.redis.url) or 6379),
-        ("minio", _parse_port(cfg.s3.endpoint_url) or 9000),
-        ("control-plane", cfg.server.port),
-        ("lease-sweeper", None),
-        ("runtime-sweeper", None),
-        ("runtime", None),
+    from skyops._client import resolve_host_for_url, resolve_server_url
+
+    db_host = resolve_host_for_url(cfg.database.url)
+    redis_host = resolve_host_for_url(cfg.redis.url)
+    minio_host = resolve_host_for_url(cfg.s3.endpoint_url)
+    cp_url = resolve_server_url(cfg)
+    cp_host = resolve_host_for_url(cp_url)
+
+    checks: list[tuple[str, str, int | None]] = [
+        ("postgres", db_host, _parse_port(cfg.database.url) or 5432),
+        ("redis", redis_host, _parse_port(cfg.redis.url) or 6379),
+        ("minio", minio_host, _parse_port(cfg.s3.endpoint_url) or 9000),
+        ("control-plane", cp_host, cfg.server.port),
+        ("lease-sweeper", "", None),
+        ("runtime-sweeper", "", None),
+        ("runtime", "", None),
     ]
     if cfg.monitoring.prometheus:
-        checks.append(("prometheus", 9090))
+        checks.append(("prometheus", "127.0.0.1", 9090))
     if cfg.monitoring.grafana:
-        checks.append(("grafana", 3000))
+        checks.append(("grafana", "127.0.0.1", 3000))
 
     services: list[ServiceInfo] = []
-    for name, port in checks:
+    for name, host, port in checks:
         if port is None:
-            # No port to probe — check if process exists
             running = _process_running(name)
             services.append(ServiceInfo(name=name, port=None, running=running, health="n/a" if running else "stopped"))
             continue
-        running = _probe_tcp("127.0.0.1", port)
+        running = _probe_tcp(host, port)
         if running and name == "control-plane":
-            healthy = _probe_http_health(f"http://127.0.0.1:{port}/health")
+            healthy = _probe_http_health(f"{cp_url}/health")
             health = "healthy" if healthy else "unhealthy"
         else:
             health = "healthy" if running else "stopped"
