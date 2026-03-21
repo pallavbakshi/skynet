@@ -21,6 +21,9 @@ from skyops._plugins import host_app, adapter_app, plugin_app
 from skyops._queue import queue_app, job_app, sweep_app
 from skyops._validate import validate_app
 from skyops._runtime_debug import runtime_debug_app
+from skyops._runtime_deploy import register_deploy_command
+
+register_deploy_command(runtime_debug_app)
 
 app = typer.Typer(
     name="skyops",
