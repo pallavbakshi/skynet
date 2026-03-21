@@ -399,5 +399,174 @@ class TestWriteProfile(unittest.TestCase):
             self.assertIn("tok123", content)
 
 
+# ── Phase D: dispatch, monitor, backup, security, upgrade, drill, queue ──
+
+
+def _mock_agp_client(**method_returns):
+    """Create a mock AgpClient with context manager support."""
+    mock_client = unittest.mock.MagicMock()
+    for method, retval in method_returns.items():
+        getattr(mock_client, method).return_value = retval
+    mock_client.__enter__ = lambda s: mock_client
+    mock_client.__exit__ = lambda s, *a: None
+    return mock_client
+
+
+def _dispatch_patches(cfg, mock_client):
+    """Return stacked patches for dispatch module."""
+    return [
+        patch("skyops._dispatch.load_config", return_value=cfg),
+        patch("skyops._dispatch._client", return_value=mock_client),
+    ]
+
+
+class TestDispatchSend(unittest.TestCase):
+    def test_send_command(self):
+        import tempfile
+
+        mock_client = _mock_agp_client(send={"job_id": "job_123", "status": "queued"})
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._dispatch.load_config", return_value=cfg):
+                with patch("skyops._dispatch._client", return_value=mock_client):
+                    result = runner.invoke(app, ["send", "agt_local", "hello world"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("job_123", result.output)
+        mock_client.send.assert_called_once()
+
+
+class TestDispatchJobs(unittest.TestCase):
+    def test_list_jobs_command(self):
+        import tempfile
+
+        mock_client = _mock_agp_client(list_jobs={"items": [], "total": 0})
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._dispatch.load_config", return_value=cfg):
+                with patch("skyops._dispatch._client", return_value=mock_client):
+                    result = runner.invoke(app, ["jobs"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_client.list_jobs.assert_called_once()
+
+
+class TestDispatchAgents(unittest.TestCase):
+    def test_list_agents_command(self):
+        import tempfile
+
+        mock_client = _mock_agp_client(list_agents={"items": [{"agent_id": "agt_local"}]})
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._dispatch.load_config", return_value=cfg):
+                with patch("skyops._dispatch._client", return_value=mock_client):
+                    result = runner.invoke(app, ["agents"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("agt_local", result.output)
+
+
+class TestMonitorMetrics(unittest.TestCase):
+    def test_metrics_summary(self):
+        import tempfile
+
+        mock_client = _mock_agp_client(observability_summary={"total_jobs": 10})
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._monitor.load_config", return_value=cfg):
+                with patch("skyops._monitor._client", return_value=mock_client):
+                    result = runner.invoke(app, ["metrics"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("total_jobs", result.output)
+
+
+class TestMonitorAlerts(unittest.TestCase):
+    def test_alerts_command(self):
+        import tempfile
+
+        mock_client = _mock_agp_client(observability_alerts={"items": []})
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._monitor.load_config", return_value=cfg):
+                with patch("skyops._monitor._client", return_value=mock_client):
+                    result = runner.invoke(app, ["alerts"])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+
+class TestUpgradeStatus(unittest.TestCase):
+    def test_upgrade_status(self):
+        with patch("agp._ops_helpers.get_upgrade_status", return_value={
+            "release_version": "0.1.0",
+            "schema_version": "0001_initial",
+        }):
+            result = runner.invoke(app, ["upgrade", "status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("0.1.0", result.output)
+
+
+class TestDrillList(unittest.TestCase):
+    def test_drill_list(self):
+        result = runner.invoke(app, ["drill", "list"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("lease_expiry_requeue", result.output)
+        self.assertIn("control_plane_restart_active_work", result.output)
+
+
+class TestSecretsShow(unittest.TestCase):
+    def test_secrets_show(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[security]\noperator_token = 'tok123'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._security.load_config", return_value=cfg):
+                # Don't try to connect to control plane
+                with patch("skyops._security._client", side_effect=Exception("no server")):
+                    result = runner.invoke(app, ["secrets", "show"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("operator_token", result.output)
+
+
+class TestSecretsGenerate(unittest.TestCase):
+    def test_secrets_generate(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[security]\n")
+            with patch("skyops.config.find_config", return_value=toml_path):
+                result = runner.invoke(app, ["secrets", "generate"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            local_path = Path(td) / "skyops.local.toml"
+            self.assertTrue(local_path.exists())
+            content = local_path.read_text()
+            self.assertIn("operator_token", content)
+            self.assertIn("secret_access_key", content)
+
+
+class TestCLIHelp(unittest.TestCase):
+    """Verify all command groups appear in --help."""
+
+    def test_all_commands_registered(self):
+        result = runner.invoke(app, ["--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for cmd in [
+            "init", "config", "status", "up", "down", "restart",
+            "db", "health", "send", "watch", "jobs", "agents",
+            "interrupt", "fetch", "deliveries", "metrics", "alerts",
+            "trace", "logs", "backup", "secrets", "upgrade", "drill",
+            "host", "adapter", "plugin", "queue", "sweep",
+        ]:
+            self.assertIn(cmd, result.output, f"Command '{cmd}' not found in --help output")
+
+
 if __name__ == "__main__":
     unittest.main()
