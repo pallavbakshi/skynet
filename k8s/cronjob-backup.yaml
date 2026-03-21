@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: agp-backup
+spec:
+  schedule: "0 2 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        spec:
+          restartPolicy: OnFailure
+          initContainers:
+            - name: pg-dump
+              image: postgres:16-alpine
+              command:
+                - sh
+                - -c
+                - pg_dump -h postgres -U agp -d agp > /pgdump/postgres.sql
+              env:
+                - name: PGPASSWORD
+                  valueFrom:
+                    secretKeyRef:
+                      name: agp-secret-postgres
+                      key: POSTGRES_PASSWORD
+              volumeMounts:
+                - name: pgdump
+                  mountPath: /pgdump
+          containers:
+            - name: upload
+              image: agp:latest
+              command:
+                - python
+                - /app/scripts/k8s_backup_create.py
+              envFrom:
+                - configMapRef:
+                    name: agp-config
+                - secretRef:
+                    name: agp-secrets
+              volumeMounts:
+                - name: pgdump
+                  mountPath: /tmp/pgdump
+                - name: backups
+                  mountPath: /backups
+          volumes:
+            - name: pgdump
+              emptyDir: {}
+            - name: backups
+              persistentVolumeClaim:
+                claimName: agp-backups

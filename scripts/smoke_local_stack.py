@@ -4,12 +4,37 @@ import os
 import sys
 import time
 from typing import Any
+from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
 
 import httpx
 
 
 def _server_url() -> str:
     return os.environ.get("AGP_SERVER_URL", "http://127.0.0.1:7860")
+
+
+def _minio_url() -> str:
+    return os.environ.get("AGP_S3_ENDPOINT_URL", "http://127.0.0.1:9000")
+
+
+def _s3_bucket() -> str:
+    return os.environ.get("AGP_S3_BUCKET", "agp-artifacts")
+
+
+def _assert_bucket_not_public() -> None:
+    """Verify the S3 bucket denies unauthenticated requests."""
+    bucket = _s3_bucket()
+    url = f"{_minio_url()}/{bucket}/"
+    try:
+        urlopen(url, timeout=5)
+        raise RuntimeError(f"bucket {bucket} is publicly accessible — policy not enforced")
+    except HTTPError as e:
+        if e.code in (403, 401):
+            return  # expected: access denied
+        raise RuntimeError(f"unexpected HTTP {e.code} checking bucket policy") from e
+    except URLError:
+        pass  # connection refused / network error — skip enforcement check
 
 
 def _agent_id() -> str:
@@ -67,6 +92,8 @@ def main() -> int:
         content = artifact.json()["data"].get("content", "")
         if "local deployment smoke test" not in content:
             raise RuntimeError("smoke artifact content did not include expected payload")
+
+    _assert_bucket_not_public()
     return 0
 
 

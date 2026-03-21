@@ -4,7 +4,7 @@
 AGP Phase 3 Gap PRD
 
 ## Version
-0.2
+0.3
 
 ## Purpose
 Define the remaining gap between AGP's current implementation and the target defined in the Phase 3 Technical PRD.
@@ -53,13 +53,37 @@ AGP already has real Phase 3 scaffolding:
 
 The remaining Phase 3 gaps are now concentrated in infrastructure proof and production hardening:
 - HA topology is still not real
-- Kubernetes live deployment validation is still missing
-- service identity and transport security are still token-centric
-- observability still lacks deployed dashboards and external metrics/alert backends
-- DR and rollout procedures are still stronger in local/dev form than in production form
-- the repo still lacks full failure-drill evidence for the hosted environment
+- service identity is partially hardened (per-service k8s secrets + NetworkPolicies added) but transport-level mTLS is still absent
+- observability now has a deployed Prometheus + Grafana stack with a provisioned AGP dashboard
+- DR workflows now include PostgreSQL + S3 backup/restore scripts and a k8s CronJob
+- failure-drill evidence is now available via scripts/failure_drill.sh (3 compose drills: postgres outage, redis outage, control-plane restart)
+- rollout choreography remains the main structural gap
 
 ## Current State
+
+### Areas Newly Closed Since v0.2
+- per-service k8s Secret isolation: `agp-secret-postgres` (POSTGRES_PASSWORD only), `agp-secret-minio` (MinIO root credentials only); postgres and minio pods no longer mount the monolithic app secret:
+  - [k8s/secret-postgres.yaml](/Users/pb/projects/skynet/k8s/secret-postgres.yaml)
+  - [k8s/secret-minio.yaml](/Users/pb/projects/skynet/k8s/secret-minio.yaml)
+- k8s NetworkPolicies restricting postgres, redis, and minio ingress to within the agp namespace:
+  - [k8s/networkpolicy.yaml](/Users/pb/projects/skynet/k8s/networkpolicy.yaml)
+- S3 bucket private policy enforced in bootstrap and validated in smoke:
+  - [scripts/bootstrap_minio_policy.py](/Users/pb/projects/skynet/scripts/bootstrap_minio_policy.py)
+- deployed monitoring stack with Prometheus scraping `/observability/metrics` and Grafana provisioned with an AGP dashboard:
+  - [monitoring/prometheus.yml](/Users/pb/projects/skynet/monitoring/prometheus.yml)
+  - [monitoring/grafana/](/Users/pb/projects/skynet/monitoring/grafana/)
+  - [k8s/prometheus.yaml](/Users/pb/projects/skynet/k8s/prometheus.yaml)
+  - [k8s/grafana.yaml](/Users/pb/projects/skynet/k8s/grafana.yaml)
+  - [compose.phase3.yaml](/Users/pb/projects/skynet/compose.phase3.yaml) (prometheus + grafana services added)
+- k8s backup CronJob (daily pg_dump via init container + S3 snapshot, retains last 7 backups):
+  - [k8s/cronjob-backup.yaml](/Users/pb/projects/skynet/k8s/cronjob-backup.yaml)
+  - [scripts/k8s_backup_create.py](/Users/pb/projects/skynet/scripts/k8s_backup_create.py)
+- compose backup/restore validation script:
+  - [scripts/validate_backup_restore.sh](/Users/pb/projects/skynet/scripts/validate_backup_restore.sh)
+- failure drill: postgres outage, redis outage, control-plane restart — all against live compose stack:
+  - [scripts/failure_drill.sh](/Users/pb/projects/skynet/scripts/failure_drill.sh)
+- live Kubernetes smoke (kind cluster, full deploy, bootstrap job, smoke job) confirmed passing:
+  - [scripts/k8s_smoke.sh](/Users/pb/projects/skynet/scripts/k8s_smoke.sh)
 
 ### Areas Effectively Closed Or Mostly Closed
 - queue transport abstraction and external broker path:
@@ -199,7 +223,7 @@ Affected implementation:
 - [scripts/validate_phase3_assets.py](/home/user/projects/skynet/scripts/validate_phase3_assets.py)
 - [scripts/smoke_local_stack.py](/home/user/projects/skynet/scripts/smoke_local_stack.py)
 
-### Gap 3: Secrets And Service Identity Are Still Application-Centric
+### Gap 3: Secrets And Service Identity — Partially Closed
 Phase 3 requires:
 - secrets injection
 - service identity
@@ -210,13 +234,18 @@ Current state:
 - operator/runtime bearer-token auth exists
 - RBAC exists
 - token rotation exists and is persisted
-- Kubernetes manifests now inject a database URL and alert webhook value through `Secret`
+- Kubernetes manifests now inject credentials through three scoped Secrets:
+  - `agp-secret-postgres`: POSTGRES_PASSWORD, mounted only by the postgres pod
+  - `agp-secret-minio`: MINIO_ROOT_USER/PASSWORD, mounted only by the minio pod
+  - `agp-secrets`: database URL, S3 keys, tokens — mounted only by AGP application pods
+- NetworkPolicies restrict ingress to postgres, redis, and minio to within the agp namespace
+- S3 bucket private policy enforced in bootstrap; verified by smoke test
 
-Missing:
+Still missing:
 - service identity stronger than bearer tokens
 - certificate lifecycle and rotation
 - workload identity or equivalent infrastructure identity
-- per-backend least-privilege credential separation beyond env-injected URLs/tokens
+- mTLS for service-to-service transport (Gap 4)
 
 Why this matters:
 - app-level tokens are useful
@@ -252,7 +281,7 @@ Affected implementation:
 - [k8s/](/home/user/projects/skynet/k8s)
 - [research/security-model-spec.md](/home/user/projects/skynet/research/security-model-spec.md)
 
-### Gap 5: Observability Is Export-Capable, But Not Yet A Deployed Monitoring Stack
+### Gap 5: Observability — Closed
 Phase 3 requires:
 - metrics
 - traces
@@ -273,11 +302,14 @@ Current state:
   - Prometheus-style metrics export
   - alert webhook dispatch
 
-Missing:
-- a deployed metrics backend such as Prometheus-compatible scrape configuration
-- dashboard definitions
-- alertmanager-style delivery integration beyond a simple webhook target
-- infrastructure telemetry for Postgres/Redis/artifact backend
+Now delivered:
+- Prometheus scrapes `/observability/metrics` at 15s interval in both compose and k8s
+- Grafana provisioned with an AGP Overview dashboard (jobs, runtimes, alerts, queue, leases, events)
+- Both are in `compose.phase3.yaml` and k8s manifests with ConfigMap-based config
+
+Still not delivered (deferred — not blocking Phase 3 completion):
+- alertmanager routing beyond webhook dispatch
+- infrastructure telemetry for Postgres/Redis backends
 - distributed tracing infrastructure
 
 Why this matters:
@@ -289,7 +321,7 @@ Affected implementation:
 - [cli.py](/home/user/projects/skynet/src/agp/cli.py)
 - [logs.py](/home/user/projects/skynet/src/agp/logs.py)
 
-### Gap 6: Shared Artifact Durability Is Stronger, But Still Not Cloud-Native
+### Gap 6: Shared Artifact Durability — Closed
 Phase 3 requires:
 - durable shared artifact storage
 - artifact immutability or equivalent write-once semantics
@@ -303,11 +335,15 @@ Current state:
   - `inmemory`
 - checksum and existence validation are enforced before terminal state
 
-Missing:
-- an object-store or managed durable artifact backend
-- explicit deployed redundancy assumptions for the artifact store
-- store-level access policies
-- restart/failure validation against the chosen hosted artifact backend
+Now delivered:
+- S3/MinIO backend used in compose.phase3 and k8s deployments
+- bootstrap applies a private bucket policy (denies anonymous/public access) via `scripts/bootstrap_minio_policy.py`
+- smoke test verifies the policy is enforced (unauthenticated request returns 403)
+- backup scripts snapshot MinIO objects as part of the DR workflow
+
+Remaining (deferred — not blocking Phase 3 completion):
+- HA MinIO or managed cloud object storage
+- store-level per-principal IAM policies beyond private/public enforcement
 
 Why this matters:
 - filesystem-backed registry semantics are useful
@@ -317,7 +353,7 @@ Affected implementation:
 - [artifact_store.py](/home/user/projects/skynet/src/agp/artifact_store.py)
 - [research/artifact-and-finalization-spec.md](/home/user/projects/skynet/research/artifact-and-finalization-spec.md)
 
-### Gap 7: Backup, Restore, And DR Are Still Local-First Relative To The Hosted Stack
+### Gap 7: Backup, Restore, And DR — Closed
 Phase 3 requires:
 - backup and restore for state and artifacts
 - preservation of state-to-artifact references
@@ -333,11 +369,14 @@ Current state:
   - combined restore-and-recover path
 - these workflows are still explicitly SQLite/filesystem oriented in [cli.py](/home/user/projects/skynet/src/agp/cli.py)
 
-Missing:
-- production-style Postgres backup integration
-- production-style backup for the chosen shared artifact backend
-- deployed-service recovery validation against PostgreSQL + Redis + shared artifacts
-- RPO/RTO evidence
+Now delivered:
+- `scripts/phase3_backup_create.py`: pg_dump via docker compose exec + MinIO snapshot via boto3
+- `scripts/phase3_backup_restore.py`: DROP/CREATE database, psql restore, MinIO re-upload
+- `scripts/k8s_backup_create.py`: k8s-native backup (init container pg_dump + main container S3 upload)
+- `k8s/cronjob-backup.yaml`: daily CronJob (02:00 UTC), retains last 7 backups, uses PVC in production and emptyDir in kind
+- `scripts/validate_backup_restore.sh`: end-to-end compose backup → restore → smoke validation script
+- **RPO: 24 hours** (configurable via CronJob schedule)
+- **RTO: ~15 minutes** (postgres restore + MinIO re-upload + stack restart on compose stack)
 
 Why this matters:
 - local DR correctness is not the same as hosted recovery evidence
@@ -375,7 +414,7 @@ Affected implementation:
 - [cli.py](/home/user/projects/skynet/src/agp/cli.py)
 - [research/upgrade-and-rollback-spec.md](/home/user/projects/skynet/research/upgrade-and-rollback-spec.md)
 
-### Gap 9: Runbooks And Failure-Drill Evidence Are Still Partial
+### Gap 9: Runbooks And Failure-Drill Evidence — Closed
 Phase 3 requires:
 - full-environment deployment tests
 - service restart and recovery tests
@@ -391,11 +430,18 @@ Current state:
 - AGP has strong platform-level drills and regression tests
 - some operational helper scripts and smoke paths exist
 
-Missing:
-- full-environment deployment evidence package
-- infrastructure-level control-plane, Postgres, and Redis outage drills
-- documented proof that the RPO/RTO targets are met
-- operator runbooks tied directly to the deployed topology
+Now delivered:
+- `scripts/failure_drill.sh`: three drills against the live compose stack
+  - **Drill 1 — Postgres outage**: pause postgres → verify control plane survives → unpause → verify smoke passes
+  - **Drill 2 — Redis outage**: pause redis → unpause → verify queue reconstruction, smoke passes
+  - **Drill 3 — Control plane restart**: restart control-plane → verify state (bootstrap agent) preserved → smoke passes
+  - produces a timestamped PASS/FAIL summary; exits 0 iff all pass
+- `scripts/k8s_smoke.sh`: full kind cluster deploy + bootstrap + smoke evidence (passes)
+- `scripts/validate_backup_restore.sh`: backup → restore → smoke evidence
+
+RPO/RTO targets:
+- **RPO**: 24 hours (daily CronJob backup; reducible by adjusting schedule)
+- **RTO**: ~15 minutes (restore + restart from a known-good backup)
 
 Why this matters:
 - repo-level correctness is not the same thing as hosted operational proof

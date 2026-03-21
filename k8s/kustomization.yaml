@@ -5,6 +5,9 @@ resources:
   - namespace.yaml
   - configmap.yaml
   - secret.yaml
+  - secret-postgres.yaml
+  - secret-minio.yaml
+  - networkpolicy.yaml
   - pvc-data.yaml
   - pvc-postgres.yaml
   - pvc-minio.yaml
@@ -18,3 +21,8 @@ resources:
   - runtime.yaml
   - lease-sweeper.yaml
   - runtime-sweeper.yaml
+  - configmap-monitoring.yaml
+  - prometheus.yaml
+  - grafana.yaml
+  - pvc-backups.yaml
+  - cronjob-backup.yaml

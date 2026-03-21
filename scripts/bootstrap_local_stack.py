@@ -7,6 +7,7 @@ import httpx
 
 from agp.db import SessionLocal, init_db
 from agp.models import Capability, CapabilityPool, utc_now
+from bootstrap_minio_policy import apply_bucket_policy
 
 
 def _server_url() -> str:
@@ -111,6 +112,7 @@ def ensure_agent() -> None:
 def main() -> None:
     init_db()
     wait_for_health()
+    apply_bucket_policy()
     ensure_capability()
     ensure_agent()
 

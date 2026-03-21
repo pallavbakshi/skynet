@@ -21,7 +21,10 @@ spec:
             - name: POSTGRES_USER
               value: agp
             - name: POSTGRES_PASSWORD
-              value: agp
+              valueFrom:
+                secretKeyRef:
+                  name: agp-secret-postgres
+                  key: POSTGRES_PASSWORD
           ports:
             - containerPort: 5432
           readinessProbe:

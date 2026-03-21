@@ -22,9 +22,15 @@ spec:
             - :9001
           env:
             - name: MINIO_ROOT_USER
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: agp-secret-minio
+                  key: MINIO_ROOT_USER
             - name: MINIO_ROOT_PASSWORD
-              value: minioadmin
+              valueFrom:
+                secretKeyRef:
+                  name: agp-secret-minio
+                  key: MINIO_ROOT_PASSWORD
           ports:
             - containerPort: 9000
             - containerPort: 9001
