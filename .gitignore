@@ -16,3 +16,4 @@ agp.db-wal
 logs/
 *.sqlite3
 .env
+skyops.local.toml

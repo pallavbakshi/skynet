@@ -23,6 +23,7 @@ dependencies = [
 
 [project.scripts]
 agp = "agp.cli:app"
+skyops = "skyops.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agp"]
+packages = ["src/agp", "src/skyops"]
