@@ -44,8 +44,10 @@ class AgpProfile:
         env_url = os.environ.get("AGP_SERVER_URL")
         env_token = os.environ.get("AGP_OPERATOR_TOKEN")
 
-        # If any env var is set, start from env (fill gaps from profile/defaults)
-        if env_url or env_token:
+        # If any env var is set (even empty string), start from env.
+        # Use `is not None` so that AGP_OPERATOR_TOKEN="" is honored
+        # as "no token" rather than falling through to the profile file.
+        if env_url is not None or env_token is not None:
             # Load profile as baseline for any missing values
             base_url = "http://127.0.0.1:7860"
             base_token: str | None = None
@@ -56,8 +58,8 @@ class AgpProfile:
                 base_url = data.get("server_url", base_url)
                 base_token = data.get("token")
             return cls(
-                server_url=env_url or base_url,
-                token=env_token or base_token,
+                server_url=env_url if env_url is not None else base_url,
+                token=env_token if env_token is not None else base_token,
                 name=name,
             )
 

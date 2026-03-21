@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops deps install` instead.
 set -euo pipefail
 
 if [[ "${EUID}" -eq 0 ]]; then

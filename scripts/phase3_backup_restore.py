@@ -1,3 +1,4 @@
+# DEPRECATED: Use `skyops backup restore` instead.
 from __future__ import annotations
 
 import argparse

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops deps install` instead.
 set -euo pipefail
 
 if ! command -v brew >/dev/null 2>&1; then

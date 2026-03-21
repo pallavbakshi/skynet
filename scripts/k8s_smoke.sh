@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops k8s-smoke` instead.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

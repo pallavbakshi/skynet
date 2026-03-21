@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops deps install` instead.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

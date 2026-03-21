@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops backup validate` instead.
 # Validates the full backup → restore → smoke cycle against the compose.phase3 stack.
 # Prerequisites: compose stack must be up (run scripts/phase3_stack_up.sh first).
 set -euo pipefail
