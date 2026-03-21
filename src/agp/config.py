@@ -20,6 +20,12 @@ class Settings(BaseSettings):
     observability_control_plane_log_retention_days: int = 30
     observability_runtime_log_retention_days: int = 30
     artifact_backend: str = "localfs"
+    s3_endpoint_url: str | None = None
+    s3_access_key_id: str = "minioadmin"
+    s3_secret_access_key: str = "minioadmin"
+    s3_bucket: str = "agp-artifacts"
+    s3_region: str = "us-east-1"
+    s3_force_path_style: bool = True
     queue_backend: str = "delivery_table"
     redis_url: str = "redis://127.0.0.1:6379/0"
     redis_queue_key_prefix: str = "agp"

@@ -36,7 +36,7 @@ AGP already has real Phase 3 scaffolding:
 - networked-state deployment assets for PostgreSQL in:
   - [compose.phase3.yaml](/home/user/projects/skynet/compose.phase3.yaml)
   - [k8s/postgres.yaml](/home/user/projects/skynet/k8s/postgres.yaml)
-- registry-backed and shared-filesystem-backed artifact modes in [artifact_store.py](/home/user/projects/skynet/src/agp/artifact_store.py)
+- S3-compatible object storage via MinIO plus registry-backed and shared-filesystem-backed artifact modes in [artifact_store.py](/home/user/projects/skynet/src/agp/artifact_store.py)
 - operator observability APIs for:
   - summaries
   - alerts
@@ -52,7 +52,7 @@ AGP already has real Phase 3 scaffolding:
 
 The remaining Phase 3 gaps are now concentrated in infrastructure proof and production hardening:
 - HA topology is still not real
-- live deployment validation on actual Docker/Kubernetes infrastructure is still missing
+- Kubernetes live deployment validation is still missing
 - service identity and transport security are still token-centric
 - observability still lacks deployed dashboards and external metrics/alert backends
 - DR and rollout procedures are still stronger in local/dev form than in production form
@@ -77,6 +77,14 @@ The remaining Phase 3 gaps are now concentrated in infrastructure proof and prod
   - [cli.py](/home/user/projects/skynet/src/agp/cli.py)
 - executable deployment-asset validation helper:
   - [scripts/validate_phase3_assets.py](/home/user/projects/skynet/scripts/validate_phase3_assets.py)
+- reusable host setup and stack lifecycle scripts:
+  - [scripts/install_infra_tools_ubuntu.sh](/home/user/projects/skynet/scripts/install_infra_tools_ubuntu.sh)
+  - [scripts/phase3_stack_up.sh](/home/user/projects/skynet/scripts/phase3_stack_up.sh)
+  - [scripts/phase3_stack_smoke.sh](/home/user/projects/skynet/scripts/phase3_stack_smoke.sh)
+  - [scripts/phase3_stack_down.sh](/home/user/projects/skynet/scripts/phase3_stack_down.sh)
+- live Docker Compose validation on this host:
+  - `compose.phase3.yaml` brought up successfully with PostgreSQL, Redis, MinIO, control-plane, bootstrap, runtime, and sweepers
+  - [scripts/smoke_local_stack.py](/home/user/projects/skynet/scripts/smoke_local_stack.py) completed successfully against that live stack
 
 ### Areas That Exist But Are Still Weaker Than The Phase 3 PRD
 - PostgreSQL-backed deployment assets now exist, but HA database topology is still absent
@@ -155,17 +163,27 @@ Current state:
 - deployment assets exist for local and Phase 3 stack shapes
 - [scripts/bootstrap_local_stack.py](/home/user/projects/skynet/scripts/bootstrap_local_stack.py) and [scripts/smoke_local_stack.py](/home/user/projects/skynet/scripts/smoke_local_stack.py) exist
 - [scripts/validate_phase3_assets.py](/home/user/projects/skynet/scripts/validate_phase3_assets.py) now validates Compose/Kustomize assets when the host has the needed tools
-- this environment still does not have `docker` or `kubectl`, so no checked-in live validation evidence was produced here
+- this host now has `docker` and `kubectl`
+- the Phase 3 Compose stack has been brought up successfully on this host with:
+  - PostgreSQL
+  - Redis
+  - MinIO
+  - control-plane
+  - bootstrap
+  - runtime
+  - lease-sweeper
+  - runtime-sweeper
+- the smoke workflow completed successfully against the live Compose stack
+- Kubernetes manifests are still only statically validated through `kubectl kustomize`; they have not been applied to a live cluster here
 
 Missing:
-- real `docker compose -f compose.phase3.yaml up` evidence
 - real `kubectl apply -k k8s` evidence
 - multi-computer deployment test evidence
 - automated deployment smoke as part of CI or an ops verification workflow
 
 Why this matters:
-- manifests and scripts are necessary
-- Phase 3 requires proof that they work together on real infrastructure
+- Docker proof is now real on this host
+- Kubernetes and multi-machine proof are still required for full Phase 3 closure
 
 Affected implementation:
 - [compose.phase3.yaml](/home/user/projects/skynet/compose.phase3.yaml)

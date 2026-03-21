@@ -20,12 +20,27 @@ def _run(*args: str) -> dict:
     }
 
 
+def _docker_cmd() -> list[str] | None:
+    docker = shutil.which("docker")
+    if not docker:
+        return None
+    direct = subprocess.run([docker, "info"], cwd=ROOT, capture_output=True, text=True)
+    if direct.returncode == 0:
+        return [docker]
+    sudo = shutil.which("sudo")
+    if sudo:
+        elevated = subprocess.run([sudo, "-n", docker, "info"], cwd=ROOT, capture_output=True, text=True)
+        if elevated.returncode == 0:
+            return [sudo, docker]
+    return [docker]
+
+
 def main() -> int:
     checks: dict[str, dict] = {}
 
-    docker = shutil.which("docker")
+    docker = _docker_cmd()
     if docker:
-        checks["compose_phase3"] = _run(docker, "compose", "-f", "compose.phase3.yaml", "config")
+        checks["compose_phase3"] = _run(*docker, "compose", "-f", "compose.phase3.yaml", "config")
     else:
         checks["compose_phase3"] = {"skipped": True, "reason": "docker not installed"}
 

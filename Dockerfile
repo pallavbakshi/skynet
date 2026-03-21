@@ -5,7 +5,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml master-prd.md /app/
+COPY pyproject.toml /app/
+COPY research/master-prd.md /app/research/master-prd.md
 COPY src /app/src
 COPY migrations /app/migrations
 COPY scripts /app/scripts

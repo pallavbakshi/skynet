@@ -17,6 +17,23 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
+  minio:
+    image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - agp_minio:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   control-plane:
     build:
       context: .
@@ -31,11 +48,16 @@ services:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
       AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_BACKEND: s3
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_S3_ENDPOINT_URL: http://minio:9000
+      AGP_S3_ACCESS_KEY_ID: minioadmin
+      AGP_S3_SECRET_ACCESS_KEY: minioadmin
+      AGP_S3_BUCKET: agp-artifacts
+      AGP_S3_REGION: us-east-1
+      AGP_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - agp_artifacts:/artifacts
       - agp_logs:/logs
     ports:
       - "7860:7860"
@@ -44,6 +66,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_started
+      minio:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/health', timeout=2).read()"]
       interval: 5s
@@ -59,15 +83,20 @@ services:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
       AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_BACKEND: s3
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
       AGP_SERVER_URL: http://control-plane:7860
       AGP_BOOTSTRAP_CAPABILITY_ID: cap_python
       AGP_BOOTSTRAP_AGENT_ID: agt_local
       AGP_BOOTSTRAP_RUNTIME_ID: rtm_local
+      AGP_S3_ENDPOINT_URL: http://minio:9000
+      AGP_S3_ACCESS_KEY_ID: minioadmin
+      AGP_S3_SECRET_ACCESS_KEY: minioadmin
+      AGP_S3_BUCKET: agp-artifacts
+      AGP_S3_REGION: us-east-1
+      AGP_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - agp_artifacts:/artifacts
       - agp_logs:/logs
     depends_on:
       control-plane:
@@ -98,11 +127,16 @@ services:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
       AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_BACKEND: s3
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_S3_ENDPOINT_URL: http://minio:9000
+      AGP_S3_ACCESS_KEY_ID: minioadmin
+      AGP_S3_SECRET_ACCESS_KEY: minioadmin
+      AGP_S3_BUCKET: agp-artifacts
+      AGP_S3_REGION: us-east-1
+      AGP_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - agp_artifacts:/artifacts
       - agp_logs:/logs
     depends_on:
       control-plane:
@@ -119,11 +153,16 @@ services:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
       AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_BACKEND: s3
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_S3_ENDPOINT_URL: http://minio:9000
+      AGP_S3_ACCESS_KEY_ID: minioadmin
+      AGP_S3_SECRET_ACCESS_KEY: minioadmin
+      AGP_S3_BUCKET: agp-artifacts
+      AGP_S3_REGION: us-east-1
+      AGP_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - agp_artifacts:/artifacts
       - agp_logs:/logs
     depends_on:
       control-plane:
@@ -138,11 +177,16 @@ services:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
       AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: registryfs
+      AGP_ARTIFACT_BACKEND: s3
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_S3_ENDPOINT_URL: http://minio:9000
+      AGP_S3_ACCESS_KEY_ID: minioadmin
+      AGP_S3_SECRET_ACCESS_KEY: minioadmin
+      AGP_S3_BUCKET: agp-artifacts
+      AGP_S3_REGION: us-east-1
+      AGP_S3_FORCE_PATH_STYLE: "true"
     volumes:
-      - agp_artifacts:/artifacts
       - agp_logs:/logs
     depends_on:
       control-plane:
@@ -150,5 +194,5 @@ services:
 
 volumes:
   agp_pgdata:
-  agp_artifacts:
+  agp_minio:
   agp_logs:

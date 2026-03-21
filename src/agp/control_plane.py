@@ -1607,6 +1607,7 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
             last_heartbeat_at=utc_now(),
         )
         db.add(runtime)
+        db.flush()
         _record_health_transition(
             db, entity_type="runtime", entity_id=runtime_id,
             health_status=HealthStatus.HEALTHY.value, reason="registered",

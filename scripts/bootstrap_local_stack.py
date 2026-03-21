@@ -75,21 +75,37 @@ def ensure_capability() -> None:
 
 
 def ensure_agent() -> None:
+    deadline = time.monotonic() + 60.0
+    last_error: str | None = None
     with httpx.Client(base_url=_server_url(), timeout=5.0) as client:
-        agents = client.get("/agents", params={"capability_id": _bootstrap_capability_id(), "limit": 200})
-        agents.raise_for_status()
-        items = agents.json()["data"]["items"]
-        if any(item["agent_id"] == _bootstrap_agent_id() for item in items):
-            return
-        response = client.post(
-            "/agents/up",
-            json={
-                "agent_id": _bootstrap_agent_id(),
-                "capability_id": _bootstrap_capability_id(),
-                "assigned_runtime_id": _bootstrap_runtime_id(),
-            },
-        )
-        response.raise_for_status()
+        while time.monotonic() < deadline:
+            try:
+                agents = client.get("/agents", params={"capability_id": _bootstrap_capability_id(), "limit": 200})
+                agents.raise_for_status()
+                items = agents.json()["data"]["items"]
+                if any(item["agent_id"] == _bootstrap_agent_id() for item in items):
+                    return
+                assigned_runtime_id = _bootstrap_runtime_id()
+                if assigned_runtime_id:
+                    runtime = client.get(f"/runtimes/{assigned_runtime_id}")
+                    if runtime.status_code == 404:
+                        assigned_runtime_id = None
+                    else:
+                        runtime.raise_for_status()
+                response = client.post(
+                    "/agents/up",
+                    json={
+                        "agent_id": _bootstrap_agent_id(),
+                        "capability_id": _bootstrap_capability_id(),
+                        "assigned_runtime_id": assigned_runtime_id,
+                    },
+                )
+                response.raise_for_status()
+                return
+            except httpx.HTTPError as exc:
+                last_error = str(exc)
+                time.sleep(1.0)
+    raise RuntimeError(last_error or "timed out ensuring bootstrap agent")
 
 
 def main() -> None:

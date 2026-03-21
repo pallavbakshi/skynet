@@ -20,7 +20,7 @@ from sqlalchemy import delete, func, select
 
 from agp.config import settings
 import agp.control_plane as control_plane_module
-from agp.artifact_store import reset_artifact_store_state
+from agp.artifact_store import S3ArtifactStore, reset_artifact_store_state
 from agp.control_plane import build_app
 from agp.db import Base, SessionLocal, engine, init_db
 from agp.models import Agent, Capability, Event, QueueDeliveryRecord, Runtime, utc_now
@@ -879,6 +879,65 @@ class MvpFlowTest(unittest.TestCase):
         content = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertEqual(content["storage_ref"], artifact["storage_ref"])
         self.assertIn("inline result", content["content"])
+
+    def test_s3_artifact_store_round_trip_uses_bucket_objects(self) -> None:
+        class FakeS3Client:
+            def __init__(self) -> None:
+                self.buckets: set[str] = set()
+                self.objects: dict[tuple[str, str], dict[str, object]] = {}
+
+            def head_bucket(self, *, Bucket: str) -> None:
+                if Bucket not in self.buckets:
+                    raise RuntimeError("missing bucket")
+
+            def create_bucket(self, **kwargs) -> None:
+                self.buckets.add(str(kwargs["Bucket"]))
+
+            def put_object(self, *, Bucket: str, Key: str, Body: bytes, ContentType: str, Metadata: dict[str, str]) -> None:
+                self.buckets.add(Bucket)
+                self.objects[(Bucket, Key)] = {
+                    "Body": Body,
+                    "ContentType": ContentType,
+                    "Metadata": Metadata,
+                }
+
+            def get_object(self, *, Bucket: str, Key: str) -> dict[str, object]:
+                item = self.objects[(Bucket, Key)]
+
+                class BodyStream:
+                    def __init__(self, payload: bytes) -> None:
+                        self.payload = payload
+
+                    def read(self) -> bytes:
+                        return self.payload
+
+                return {"Body": BodyStream(item["Body"])}
+
+            def head_object(self, *, Bucket: str, Key: str) -> None:
+                if (Bucket, Key) not in self.objects:
+                    raise RuntimeError("missing object")
+
+        fake_client = FakeS3Client()
+        with patch.object(S3ArtifactStore, "_make_client", return_value=fake_client):
+            store = S3ArtifactStore(
+                bucket="agp-artifacts",
+                endpoint_url="http://minio:9000",
+                access_key_id="minioadmin",
+                secret_access_key="minioadmin",
+                region="us-east-1",
+                force_path_style=True,
+            )
+            stored = store.write_text(
+                namespace="rtm_test",
+                job_id="job_test",
+                name="result.txt",
+                content="hello s3",
+                role="result",
+            )
+            self.assertTrue(stored.storage_ref.startswith("s3://agp-artifacts/"))
+            self.assertTrue(store.exists(storage_ref=stored.storage_ref))
+            self.assertEqual(store.read_text(storage_ref=stored.storage_ref), "hello s3")
+            self.assertEqual(stored.checksum, fake_client.objects[("agp-artifacts", stored.storage_ref.split("/", 3)[3])]["Metadata"]["checksum"])
 
     def test_localfs_artifact_backend_populates_checksum(self) -> None:
         settings.artifact_backend = "localfs"

@@ -11,6 +11,22 @@ from uuid import uuid4
 from typing import Protocol
 
 
+def _load_boto3():
+    try:
+        import boto3
+    except ImportError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError("s3 artifact backend requires the 'boto3' package") from exc
+    return boto3
+
+
+def _load_botocore_config():
+    try:
+        from botocore.config import Config
+    except ImportError as exc:  # pragma: no cover - dependency error path
+        raise RuntimeError("s3 artifact backend requires botocore") from exc
+    return Config
+
+
 def _checksum_text(content: str) -> tuple[str, int]:
     payload = content.encode("utf-8")
     return hashlib.sha256(payload).hexdigest(), len(payload)
@@ -270,6 +286,121 @@ class RegistryFsArtifactStore:
         return metadata_path.exists() and object_path.exists() and object_path.is_file()
 
 
+class S3ArtifactStore:
+    """S3-compatible artifact store suitable for MinIO/local object-store testing."""
+
+    name = "s3"
+    _scheme = "s3://"
+
+    def __init__(
+        self,
+        *,
+        bucket: str,
+        endpoint_url: str | None,
+        access_key_id: str,
+        secret_access_key: str,
+        region: str,
+        force_path_style: bool,
+    ) -> None:
+        self.bucket = bucket
+        self.endpoint_url = endpoint_url
+        self.access_key_id = access_key_id
+        self.secret_access_key = secret_access_key
+        self.region = region
+        self.force_path_style = force_path_style
+        self._client = self._make_client()
+
+    def _make_client(self):
+        boto3 = _load_boto3()
+        Config = _load_botocore_config()
+        session = boto3.session.Session()
+        return session.client(
+            "s3",
+            endpoint_url=self.endpoint_url,
+            aws_access_key_id=self.access_key_id,
+            aws_secret_access_key=self.secret_access_key,
+            region_name=self.region,
+            use_ssl=bool(self.endpoint_url and self.endpoint_url.startswith("https://")),
+            config=Config(s3={"addressing_style": "path" if self.force_path_style else "auto"}),
+        )
+
+    def _ensure_bucket(self) -> None:
+        try:
+            self._client.head_bucket(Bucket=self.bucket)
+            return
+        except Exception:
+            pass
+        kwargs: dict[str, object] = {"Bucket": self.bucket}
+        if self.region and self.region != "us-east-1":
+            kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
+        self._client.create_bucket(**kwargs)
+
+    def _key_for(self, *, namespace: str, job_id: str, name: str) -> str:
+        return f"{namespace}/{job_id}/{uuid4().hex[:12]}/{name}"
+
+    def _parse_ref(self, storage_ref: str) -> tuple[str, str] | None:
+        if not storage_ref.startswith(self._scheme):
+            return None
+        bucket_and_key = storage_ref.removeprefix(self._scheme)
+        if "/" not in bucket_and_key:
+            return None
+        bucket, key = bucket_and_key.split("/", 1)
+        if not bucket or not key:
+            return None
+        return bucket, key
+
+    def write_text(
+        self,
+        *,
+        namespace: str,
+        job_id: str,
+        name: str,
+        content: str,
+        role: str,
+        content_type: str = "text/plain",
+    ) -> StoredArtifact:
+        self._ensure_bucket()
+        key = self._key_for(namespace=namespace, job_id=job_id, name=name)
+        checksum, size_bytes = _checksum_text(content)
+        self._client.put_object(
+            Bucket=self.bucket,
+            Key=key,
+            Body=content.encode("utf-8"),
+            ContentType=content_type,
+            Metadata={"role": role, "checksum": checksum},
+        )
+        return StoredArtifact(
+            role=role,
+            storage_ref=f"{self._scheme}{self.bucket}/{key}",
+            content_type=content_type,
+            checksum=checksum,
+            size_bytes=size_bytes,
+        )
+
+    def read_text(self, *, storage_ref: str) -> str | None:
+        parsed = self._parse_ref(storage_ref)
+        if parsed is None:
+            return None
+        bucket, key = parsed
+        try:
+            response = self._client.get_object(Bucket=bucket, Key=key)
+        except Exception:
+            return None
+        body = response["Body"].read()
+        return body.decode("utf-8")
+
+    def exists(self, *, storage_ref: str) -> bool:
+        parsed = self._parse_ref(storage_ref)
+        if parsed is None:
+            return False
+        bucket, key = parsed
+        try:
+            self._client.head_object(Bucket=bucket, Key=key)
+            return True
+        except Exception:
+            return False
+
+
 _INMEMORY_ARTIFACT_STORE = InMemoryArtifactStore()
 
 
@@ -285,6 +416,17 @@ def get_artifact_store(name: str, root: str | Path) -> ArtifactStore:
         return SharedFsArtifactStore(root)
     if name == "registryfs":
         return RegistryFsArtifactStore(root)
+    if name == "s3":
+        from agp.config import settings
+
+        return S3ArtifactStore(
+            bucket=settings.s3_bucket,
+            endpoint_url=settings.s3_endpoint_url,
+            access_key_id=settings.s3_access_key_id,
+            secret_access_key=settings.s3_secret_access_key,
+            region=settings.s3_region,
+            force_path_style=settings.s3_force_path_style,
+        )
     if name == "inmemory":
         return _INMEMORY_ARTIFACT_STORE
     raise ValueError(f"unsupported artifact backend: {name}")

@@ -7,9 +7,11 @@ resources:
   - secret.yaml
   - pvc-data.yaml
   - pvc-postgres.yaml
+  - pvc-minio.yaml
   - pvc-artifacts.yaml
   - pvc-logs.yaml
   - postgres.yaml
+  - minio.yaml
   - redis.yaml
   - control-plane.yaml
   - bootstrap-job.yaml
