@@ -155,13 +155,9 @@ def _platform_summary(cfg: SkyopsConfig) -> list[str]:
     """Try to get platform summary (jobs, agents) from the control plane."""
     lines: list[str] = []
     try:
-        from agp.client import AgpClient, AgpProfile
+        from skyops._client import build_client
 
-        profile = AgpProfile(
-            server_url=f"http://127.0.0.1:{cfg.server.port}",
-            token=cfg.security.operator_token or None,
-        )
-        with AgpClient(profile=profile) as client:
+        with build_client(cfg) as client:
             summary = client.observability_summary()
             total = summary.get("total_jobs", 0)
             active_runs = summary.get("active_runs", 0)

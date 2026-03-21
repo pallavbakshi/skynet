@@ -8,19 +8,13 @@ import secrets
 import typer
 
 from skyops.config import load_config
+from skyops._client import build_client
 
 security_app = typer.Typer(help="Secret and credential management.")
 
 
 def _client():
-    from agp.client import AgpClient, AgpProfile
-
-    cfg = load_config()
-    profile = AgpProfile(
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
-        token=cfg.security.operator_token or None,
-    )
-    return AgpClient(profile=profile)
+    return build_client()
 
 
 def _emit(data: object) -> None:

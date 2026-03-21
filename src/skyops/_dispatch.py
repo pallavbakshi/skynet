@@ -7,21 +7,13 @@ import time
 
 import typer
 
-from skyops.config import load_config
+from skyops._client import build_client
 
 dispatch_app = typer.Typer(help="Work dispatch and job management.")
 
 
 def _client():
-    """Build an AgpClient from skyops config."""
-    from agp.client import AgpClient, AgpProfile
-
-    cfg = load_config()
-    profile = AgpProfile(
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
-        token=cfg.security.operator_token or None,
-    )
-    return AgpClient(profile=profile)
+    return build_client()
 
 
 def _emit(data: object) -> None:

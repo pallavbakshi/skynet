@@ -371,7 +371,7 @@ class TestHealth(unittest.TestCase):
                         }
                         mock_client.__enter__ = lambda s: mock_client
                         mock_client.__exit__ = lambda s, *a: None
-                        with patch("agp.client.AgpClient", return_value=mock_client):
+                        with patch("skyops._client.build_client", return_value=mock_client):
                             result = runner.invoke(app, ["health"])
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("PASS", result.output)
@@ -429,8 +429,7 @@ class TestDispatchSend(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._dispatch.load_config", return_value=cfg):
-                with patch("skyops._dispatch._client", return_value=mock_client):
+            with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["send", "agt_local", "hello world"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("job_123", result.output)
@@ -446,8 +445,7 @@ class TestDispatchJobs(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._dispatch.load_config", return_value=cfg):
-                with patch("skyops._dispatch._client", return_value=mock_client):
+            with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["jobs"])
         self.assertEqual(result.exit_code, 0, result.output)
         mock_client.list_jobs.assert_called_once()
@@ -462,8 +460,7 @@ class TestDispatchAgents(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._dispatch.load_config", return_value=cfg):
-                with patch("skyops._dispatch._client", return_value=mock_client):
+            with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["agents"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("agt_local", result.output)
@@ -478,8 +475,7 @@ class TestMonitorMetrics(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._monitor.load_config", return_value=cfg):
-                with patch("skyops._monitor._client", return_value=mock_client):
+            with patch("skyops._monitor._client", return_value=mock_client):
                     result = runner.invoke(app, ["metrics"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("total_jobs", result.output)
@@ -494,8 +490,7 @@ class TestMonitorAlerts(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._monitor.load_config", return_value=cfg):
-                with patch("skyops._monitor._client", return_value=mock_client):
+            with patch("skyops._monitor._client", return_value=mock_client):
                     result = runner.invoke(app, ["alerts"])
         self.assertEqual(result.exit_code, 0, result.output)
 

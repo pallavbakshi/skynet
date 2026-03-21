@@ -27,6 +27,7 @@ from agp.models import Agent, Capability, Event, QueueDeliveryRecord, Runtime, u
 from agp.enums import HealthStatus, RuntimeStatus
 from agp.cli import app
 from agp.client import AgpClient
+from skyops.cli import app as skyops_app
 from agp._ops_helpers import (
     create_backup_snapshot,
     get_upgrade_status,
@@ -4022,30 +4023,30 @@ class MvpFlowTest(unittest.TestCase):
                         )
 
                 with patch("agp._plugin_cli.build_terminal_host", side_effect=factory):
-                    created = self.cli_runner.invoke(app, ["host", "create", host_kind, "agt_host", "--workspace-ref", "/tmp"])
+                    created = self.cli_runner.invoke(skyops_app, ["host", "create", host_kind, "agt_host", "--workspace-ref", "/tmp"])
                     self.assertEqual(created.exit_code, 0, created.output)
                     created_payload = json.loads(created.stdout)
                     session_id = created_payload["session_id"]
 
-                    sent = self.cli_runner.invoke(app, ["host", "send", host_kind, session_id, "agt_host", "hello"])
+                    sent = self.cli_runner.invoke(skyops_app, ["host", "send", host_kind, session_id, "agt_host", "hello"])
                     self.assertEqual(sent.exit_code, 0, sent.output)
 
-                    read = self.cli_runner.invoke(app, ["host", "read", host_kind, session_id, "agt_host"])
+                    read = self.cli_runner.invoke(skyops_app, ["host", "read", host_kind, session_id, "agt_host"])
                     self.assertEqual(read.exit_code, 0, read.output)
                     read_payload = json.loads(read.stdout)
                     self.assertIn("hello", read_payload["full_text"])
 
-                    health = self.cli_runner.invoke(app, ["host", "health", host_kind, session_id, "agt_host"])
+                    health = self.cli_runner.invoke(skyops_app, ["host", "health", host_kind, session_id, "agt_host"])
                     self.assertEqual(health.exit_code, 0, health.output)
                     self.assertTrue(json.loads(health.stdout)["healthy"])
 
-                    interrupted = self.cli_runner.invoke(app, ["host", "interrupt", host_kind, session_id, "agt_host"])
+                    interrupted = self.cli_runner.invoke(skyops_app, ["host", "interrupt", host_kind, session_id, "agt_host"])
                     self.assertEqual(interrupted.exit_code, 0, interrupted.output)
 
-                    snap = self.cli_runner.invoke(app, ["host", "snapshot", host_kind, session_id, "agt_host"])
+                    snap = self.cli_runner.invoke(skyops_app, ["host", "snapshot", host_kind, session_id, "agt_host"])
                     self.assertEqual(snap.exit_code, 0, snap.output)
 
-                    terminated = self.cli_runner.invoke(app, ["host", "terminate", host_kind, session_id, "agt_host"])
+                    terminated = self.cli_runner.invoke(skyops_app, ["host", "terminate", host_kind, session_id, "agt_host"])
                     self.assertEqual(terminated.exit_code, 0, terminated.output)
             finally:
                 shutil.rmtree(tmp)
@@ -4067,7 +4068,7 @@ class MvpFlowTest(unittest.TestCase):
                 patch("agp._plugin_cli.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
             ):
                 result = self.cli_runner.invoke(
-                    app,
+                    skyops_app,
                     [
                         "adapter", "run-once", "codex", "inprocess", "agt_codex",
                         "--task", "summarize",
@@ -4116,7 +4117,7 @@ class MvpFlowTest(unittest.TestCase):
                 ),
             ):
                 result = self.cli_runner.invoke(
-                    app,
+                    skyops_app,
                     [
                         "adapter", "run-once", "codex", "inprocess", "agt_tui",
                         "--task", "answer the task",
@@ -4135,7 +4136,7 @@ class MvpFlowTest(unittest.TestCase):
         tmp = Path(mkdtemp())
         try:
             result = self.cli_runner.invoke(
-                app,
+                skyops_app,
                 [
                     "plugin", "run", "inprocess", "default", "agt_plugin",
                     "--task", "hello plugin",
@@ -4188,7 +4189,7 @@ class MvpFlowTest(unittest.TestCase):
 
             with patch("agp._plugin_cli.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
                 result = self.cli_runner.invoke(
-                    app,
+                    skyops_app,
                     [
                         "plugin", "run", "tmux", "codex", "agt_tmux_plugin",
                         "--task", "tmux task",

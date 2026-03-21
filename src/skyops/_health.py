@@ -48,13 +48,9 @@ def health(ctx: typer.Context) -> None:
     # Control plane API (deeper check via AgpClient)
     if cp_health:
         try:
-            from agp.client import AgpClient, AgpProfile
+            from skyops._client import build_client
 
-            profile = AgpProfile(
-                server_url=f"http://127.0.0.1:{cp_port}",
-                token=cfg.security.operator_token or None,
-            )
-            with AgpClient(profile=profile) as client:
+            with build_client(cfg) as client:
                 summary = client.observability_summary()
                 jobs_total = summary.get("total_jobs", "?")
                 agents_active = summary.get("active_agents", "?")

@@ -35,11 +35,31 @@ class AgpProfile:
 
     @classmethod
     def load(cls, name: str = "default") -> AgpProfile:
-        """Load a profile by name, checking env vars then profile files."""
+        """Load a profile by name, checking env vars then profile files.
+
+        Env vars are checked first and override independently:
+        AGP_SERVER_URL overrides the server URL, AGP_OPERATOR_TOKEN
+        overrides the token.  Either or both can be set.
+        """
         env_url = os.environ.get("AGP_SERVER_URL")
         env_token = os.environ.get("AGP_OPERATOR_TOKEN")
-        if env_url:
-            return cls(server_url=env_url, token=env_token, name=name)
+
+        # If any env var is set, start from env (fill gaps from profile/defaults)
+        if env_url or env_token:
+            # Load profile as baseline for any missing values
+            base_url = "http://127.0.0.1:7860"
+            base_token: str | None = None
+            profile_path = _PROFILES_DIR / f"{name}.toml"
+            if profile_path.exists():
+                with open(profile_path, "rb") as f:
+                    data = tomllib.load(f)
+                base_url = data.get("server_url", base_url)
+                base_token = data.get("token")
+            return cls(
+                server_url=env_url or base_url,
+                token=env_token or base_token,
+                name=name,
+            )
 
         profile_path = _PROFILES_DIR / f"{name}.toml"
         if profile_path.exists():

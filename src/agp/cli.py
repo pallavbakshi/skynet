@@ -24,13 +24,6 @@ from agp.sweeper import LeaseSweeperService, SweeperService
 
 app = typer.Typer(help="AGP control plane scaffold")
 
-# Plugin CLI sub-commands (will move to skyops in a future phase)
-from agp._plugin_cli import host_app, adapter_app, plugin_app  # noqa: E402
-
-app.add_typer(host_app, name="host")
-app.add_typer(adapter_app, name="adapter")
-app.add_typer(plugin_app, name="plugin")
-
 
 @app.command()
 def initdb() -> None:

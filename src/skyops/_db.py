@@ -33,14 +33,9 @@ def db_seed() -> None:
     """
     cfg = load_config()
 
-    from agp.client import AgpClient, AgpProfile
+    from skyops._client import build_client
 
-    profile = AgpProfile(
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
-        token=cfg.security.operator_token or None,
-    )
-
-    with AgpClient(profile=profile) as client:
+    with build_client(cfg) as client:
         # Wait for health
         import time
 
@@ -92,21 +87,14 @@ def db_seed() -> None:
         finally:
             session.close()
 
-        # Seed agents via API
+        # Seed agents via SDK
         for agent_id, agent_data in cfg.agents.items():
             cap_id = agent_data.get("capability_id", "")
             agents = client.list_agents(capability_id=cap_id, limit=200)
             if any(item["agent_id"] == agent_id for item in agents["items"]):
                 typer.echo(f"  Agent already exists: {agent_id}")
                 continue
-            response = client._client.post(
-                "/agents/up",
-                json={
-                    "agent_id": agent_id,
-                    "capability_id": cap_id,
-                },
-            )
-            response.raise_for_status()
+            client.register_agent(agent_id, cap_id)
             typer.echo(f"  Seeded agent: {agent_id}")
 
     typer.echo("Seeding complete.")

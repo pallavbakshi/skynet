@@ -83,23 +83,18 @@ def ensure_agent() -> None:
                 agents = client.list_agents(capability_id=_bootstrap_capability_id(), limit=200)
                 if any(item["agent_id"] == _bootstrap_agent_id() for item in agents["items"]):
                     return
-                # Agent doesn't exist yet — create via raw HTTP since /agents/up
-                # is not in the SDK (it's a runtime registration endpoint)
+                # Agent doesn't exist yet — register via SDK
                 assigned_runtime_id = _bootstrap_runtime_id()
                 if assigned_runtime_id:
                     try:
                         client._client.get(f"/runtimes/{assigned_runtime_id}").raise_for_status()
                     except httpx.HTTPStatusError:
                         assigned_runtime_id = None
-                response = client._client.post(
-                    "/agents/up",
-                    json={
-                        "agent_id": _bootstrap_agent_id(),
-                        "capability_id": _bootstrap_capability_id(),
-                        "assigned_runtime_id": assigned_runtime_id,
-                    },
+                client.register_agent(
+                    _bootstrap_agent_id(),
+                    _bootstrap_capability_id(),
+                    assigned_runtime_id=assigned_runtime_id,
                 )
-                response.raise_for_status()
                 return
             except Exception as exc:
                 last_error = str(exc)

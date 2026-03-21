@@ -79,16 +79,11 @@ def smoke() -> None:
     Sends a test job, watches it complete, and verifies the artifact.
     """
     cfg = load_config()
-    from agp.client import AgpClient, AgpProfile
-
-    profile = AgpProfile(
-        server_url=f"http://127.0.0.1:{cfg.server.port}",
-        token=cfg.security.operator_token or None,
-    )
+    from skyops._client import build_client
 
     import time
 
-    with AgpClient(profile=profile) as client:
+    with build_client(cfg) as client:
         # Wait for health
         deadline = time.monotonic() + 60.0
         while time.monotonic() < deadline:

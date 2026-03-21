@@ -114,6 +114,24 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def register_agent(
+        self,
+        agent_id: str,
+        capability_id: str,
+        *,
+        assigned_runtime_id: str | None = None,
+    ) -> dict:
+        """Register (bring up) an agent with the control plane."""
+        payload: dict[str, Any] = {
+            "agent_id": agent_id,
+            "capability_id": capability_id,
+        }
+        if assigned_runtime_id is not None:
+            payload["assigned_runtime_id"] = assigned_runtime_id
+        response = self._client.post("/agents/up", json=payload)
+        response.raise_for_status()
+        return response.json()
+
     def list_agents(
         self,
         *,
