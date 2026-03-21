@@ -1,0 +1,43 @@
+# SkyOps configuration for the AGP stack.
+# Override any value in skyops.local.toml (gitignored, never committed).
+
+[stack]
+mode = "docker"
+compose_file = "compose.phase3.yaml"
+project_name = "agp"
+
+[server]
+host = "0.0.0.0"
+port = 7860
+
+[database]
+url = "postgresql+psycopg://agp:agp@localhost:5432/agp"
+
+[redis]
+url = "redis://localhost:6379/0"
+
+[s3]
+endpoint_url = "http://localhost:9000"
+access_key_id = "minioadmin"
+secret_access_key = "minioadmin"
+bucket = "agp-artifacts"
+
+[security]
+operator_token = ""
+runtime_token = ""
+
+[agents.agt_local]
+capability_id = "cap_python"
+
+[capabilities.cap_python]
+name = "python"
+image_ref = "local/agp:dev"
+model_ref = "local"
+
+[runtime]
+host_kind = "tmux"
+adapter_kind = "codex"
+
+[monitoring]
+prometheus = true
+grafana = true

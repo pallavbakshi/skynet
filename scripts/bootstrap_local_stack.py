@@ -1,3 +1,4 @@
+# DEPRECATED: Use `skyops db seed` instead.
 from __future__ import annotations
 
 import os

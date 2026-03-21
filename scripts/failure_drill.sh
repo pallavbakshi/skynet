@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# DEPRECATED: Use `skyops drill full` instead.
 # Failure drill: runs three service-outage scenarios against the compose.phase3 stack.
 # Prerequisites: compose stack must already be up (run scripts/phase3_stack_up.sh first).
 #

@@ -1,3 +1,4 @@
+# DEPRECATED: Use `skyops backup validate` instead.
 from __future__ import annotations
 
 import json

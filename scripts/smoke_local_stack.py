@@ -1,3 +1,4 @@
+# DEPRECATED: Use `skyops smoke` (future) or `skyops health` instead.
 from __future__ import annotations
 
 import os
