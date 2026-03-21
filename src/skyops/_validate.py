@@ -126,19 +126,22 @@ def smoke() -> None:
             typer.echo("Smoke artifact content mismatch.", err=True)
             raise typer.Exit(1)
 
-    # Check bucket is not public
+    # Check bucket is not public — must get 403/401 to pass
     from urllib.request import urlopen
     from urllib.error import HTTPError, URLError
 
     bucket_url = f"{cfg.s3.endpoint_url}/{cfg.s3.bucket}/"
     try:
         urlopen(bucket_url, timeout=5)
-        typer.echo(f"WARNING: bucket {cfg.s3.bucket} is publicly accessible.", err=True)
+        typer.echo(f"FAIL: bucket {cfg.s3.bucket} is publicly accessible.", err=True)
+        raise typer.Exit(1)
     except HTTPError as e:
         if e.code not in (403, 401):
-            typer.echo(f"Unexpected HTTP {e.code} checking bucket.", err=True)
-    except URLError:
-        pass  # Connection refused — skip
+            typer.echo(f"FAIL: unexpected HTTP {e.code} checking bucket policy.", err=True)
+            raise typer.Exit(1)
+    except URLError as e:
+        typer.echo(f"FAIL: S3 endpoint unreachable at {bucket_url} — cannot verify bucket policy: {e}", err=True)
+        raise typer.Exit(1)
 
     typer.echo("Smoke test passed.")
 

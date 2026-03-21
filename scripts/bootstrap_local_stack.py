@@ -1,4 +1,5 @@
-# DEPRECATED: Use `skyops db seed` instead.
+# Bootstrap script for compose & k8s containers.
+# For interactive use prefer `skyops db seed`.
 from __future__ import annotations
 
 import os

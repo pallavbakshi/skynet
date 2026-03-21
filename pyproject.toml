@@ -28,6 +28,7 @@ all = ["agp[server]"]
 
 [project.scripts]
 agp = "agp.cli:app"
+agp-server = "agp.cli:app"
 skyops = "skyops.cli:app"
 
 [tool.hatch.build.targets.wheel]

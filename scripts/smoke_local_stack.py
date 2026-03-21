@@ -1,4 +1,5 @@
-# DEPRECATED: Use `skyops smoke` instead.
+# Smoke test script used by compose, k8s, and CI.
+# For interactive use prefer `skyops smoke`.
 from __future__ import annotations
 
 import os
