@@ -56,6 +56,39 @@ class AgpClient:
         response.raise_for_status()
         return response.json()
 
+    # ── Capability seeding ──────────────────────────────────────────
+
+    def seed_capability(
+        self,
+        capability_id: str,
+        name: str,
+        *,
+        version: str = "v1",
+        image_ref: str = "",
+        model_ref: str = "",
+        resource_tier: str = "small",
+        permission_profile: str = "default",
+        queue_mode: str = "agent",
+        runtime_requirements: dict | None = None,
+    ) -> dict:
+        """Seed (create or update) a capability via the admin API."""
+        response = self._client.post(
+            "/capabilities/seed",
+            json={
+                "capability_id": capability_id,
+                "name": name,
+                "version": version,
+                "image_ref": image_ref,
+                "model_ref": model_ref,
+                "resource_tier": resource_tier,
+                "permission_profile": permission_profile,
+                "queue_mode": queue_mode,
+                "runtime_requirements": runtime_requirements or {},
+            },
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
     # ── Work dispatch ─────────────────────────────────────────────
 
     def send(

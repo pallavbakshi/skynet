@@ -49,43 +49,16 @@ def db_seed() -> None:
         else:
             raise RuntimeError("Control plane did not become healthy before seed timeout")
 
-        # Seed capabilities via direct DB (same as bootstrap_local_stack.py)
-        from agp.db import SessionLocal, init_db
-        from agp.models import Capability, CapabilityPool, utc_now
-
-        session = SessionLocal()
-        try:
-            for cap_id, cap_data in cfg.capabilities.items():
-                if session.get(Capability, cap_id) is None:
-                    now = utc_now()
-                    session.add(
-                        Capability(
-                            capability_id=cap_id,
-                            name=cap_data.get("name", cap_id),
-                            version="v1",
-                            image_ref=cap_data.get("image_ref", ""),
-                            model_ref=cap_data.get("model_ref", ""),
-                            resource_tier="small",
-                            permission_profile="default",
-                            queue_mode="agent",
-                            runtime_requirements_json={},
-                            created_at=now,
-                            updated_at=now,
-                        )
-                    )
-                    session.flush()
-                    if session.get(CapabilityPool, cap_id) is None:
-                        session.add(
-                            CapabilityPool(
-                                capability_id=cap_id,
-                                queue_id=f"capability:{cap_id}:v1",
-                                routing_policy="least_recent",
-                            )
-                        )
-                    typer.echo(f"  Seeded capability: {cap_id}")
-            session.commit()
-        finally:
-            session.close()
+        # Seed capabilities via the control-plane admin API.
+        for cap_id, cap_data in cfg.capabilities.items():
+            client.seed_capability(
+                cap_id,
+                cap_data.get("name", cap_id),
+                version=cap_data.get("version", "v1"),
+                image_ref=cap_data.get("image_ref", ""),
+                model_ref=cap_data.get("model_ref", ""),
+            )
+            typer.echo(f"  Seeded capability: {cap_id}")
 
         # Seed agents via SDK
         for agent_id, agent_data in cfg.agents.items():

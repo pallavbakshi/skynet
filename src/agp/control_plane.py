@@ -52,6 +52,7 @@ from agp.schemas import (
     AgentDownRequest,
     AgentUpRequest,
     CancelRunRequest,
+    CapabilitySeedRequest,
     ClaimRunRequest,
     CompleteRunRequest,
     FailRunRequest,
@@ -2746,13 +2747,26 @@ def list_health_records(
 
 
 @router.post("/capabilities/seed", response_model=dict)
-def seed_capability(request: dict, db: Session = Depends(get_db)) -> dict:
-    """Seed a capability and auto-create its capability pool."""
-    capability_id = request.get("capability_id")
-    if not capability_id:
-        raise HTTPException(status_code=400, detail="capability_id is required")
+def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db)) -> dict:
+    """Seed a capability and auto-create its capability pool.
+
+    Idempotent: if the capability already exists it is updated with the
+    incoming fields and the pool is ensured.
+    """
+    capability_id = request.capability_id
     existing = db.get(Capability, capability_id)
     if existing is not None:
+        # Update mutable fields so re-seeds converge
+        existing.name = request.name
+        existing.version = request.version
+        existing.image_ref = request.image_ref
+        existing.model_ref = request.model_ref
+        existing.resource_tier = request.resource_tier
+        existing.permission_profile = request.permission_profile
+        existing.queue_mode = request.queue_mode
+        existing.runtime_requirements_json = request.runtime_requirements
+        existing.updated_at = utc_now()
+        db.flush()
         pool = _ensure_capability_pool(db, capability_id)
         db.commit()
         return _ok({
@@ -2763,14 +2777,14 @@ def seed_capability(request: dict, db: Session = Depends(get_db)) -> dict:
         })
     capability = Capability(
         capability_id=capability_id,
-        name=request.get("name", capability_id),
-        version=request.get("version", "v1"),
-        image_ref=request.get("image_ref", ""),
-        model_ref=request.get("model_ref", ""),
-        resource_tier=request.get("resource_tier", "default"),
-        permission_profile=request.get("permission_profile", "default"),
-        queue_mode=request.get("queue_mode", "agent"),
-        runtime_requirements_json=request.get("runtime_requirements", {}),
+        name=request.name,
+        version=request.version,
+        image_ref=request.image_ref,
+        model_ref=request.model_ref,
+        resource_tier=request.resource_tier,
+        permission_profile=request.permission_profile,
+        queue_mode=request.queue_mode,
+        runtime_requirements_json=request.runtime_requirements,
     )
     db.add(capability)
     db.flush()

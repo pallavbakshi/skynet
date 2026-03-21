@@ -138,9 +138,9 @@ class CapabilitySeedRequest(BaseModel):
     capability_id: str
     name: str
     version: str = "v1"
-    image_ref: str
-    model_ref: str
-    resource_tier: str = "default"
+    image_ref: str = ""
+    model_ref: str = ""
+    resource_tier: str = "small"
     permission_profile: str = "default"
     queue_mode: Literal["agent", "capability_pool"] = "agent"
     runtime_requirements: dict[str, Any] = Field(default_factory=dict)
