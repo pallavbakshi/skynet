@@ -18,3 +18,4 @@ logs/
 .env
 skyops.local.toml
 .skyops-initialized
+.skyops-pids/

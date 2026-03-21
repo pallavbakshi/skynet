@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import signal
 import subprocess
 import time
 from pathlib import Path
@@ -13,6 +11,7 @@ import typer
 from skyops.config import SkyopsConfig, load_config
 from skyops._client import resolve_server_url, _connectable_host
 from skyops._status import _probe_tcp, _probe_http_health
+from skyops._pidfile import pid_dir, write_pidfile, list_pidfiles, signal_and_wait
 
 lifecycle_app = typer.Typer(help="Manage AGP stack services.")
 
@@ -62,17 +61,29 @@ def _docker_down(cfg: SkyopsConfig, service: str | None, volumes: bool) -> None:
 
 # ── Bare-metal mode helpers ────────────────────────────────────────
 
-_BG_PIDS: list[subprocess.Popen] = []
+def _pid_directory(cfg: SkyopsConfig) -> Path:
+    """Return the PID directory derived from the config file location."""
+    base = cfg._config_path.parent if cfg._config_path else Path.cwd()
+    return pid_dir(base)
 
 
-def _start_bg(cmd: list[str], label: str) -> subprocess.Popen:
+def _start_bg(cmd: list[str], label: str, pid_directory: Path | None = None) -> subprocess.Popen:
     typer.echo(f"Starting {label}: {' '.join(cmd)}")
+    log_path = None
+    stdout = subprocess.DEVNULL
+    stderr = subprocess.DEVNULL
+    if pid_directory is not None:
+        log_path = pid_directory / f"{label}.log"
+        stdout = open(log_path, "a")  # noqa: SIM115
+        stderr = subprocess.STDOUT
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stdout,
+        stderr=stderr,
+        start_new_session=True,
     )
-    _BG_PIDS.append(proc)
+    if pid_directory is not None:
+        write_pidfile(pid_directory, label, proc.pid)
     return proc
 
 
@@ -99,16 +110,17 @@ def _wait_http(url: str, label: str, timeout: float = 30.0) -> None:
 def _bare_metal_start_service(cfg: SkyopsConfig, service: str, host: str, port: int) -> None:
     """Start a single bare-metal service by name."""
     server_url = resolve_server_url(cfg)
+    pdir = _pid_directory(cfg)
     service_map = {
         "control-plane": lambda: (
-            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane"),
+            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir),
             _wait_http(f"{server_url}/health", "control-plane"),
         ),
         "lease-sweeper": lambda: _start_bg(
-            ["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper",
+            ["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir,
         ),
         "runtime-sweeper": lambda: _start_bg(
-            ["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper",
+            ["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir,
         ),
         "runtime": lambda: _start_bg(
             ["agp", "runtime-work-loop", "rtm_local",
@@ -116,7 +128,7 @@ def _bare_metal_start_service(cfg: SkyopsConfig, service: str, host: str, port: 
              "--agent-id", next(iter(cfg.agents), "agt_local"),
              "--host-kind", cfg.runtime.host_kind,
              "--adapter-kind", cfg.runtime.adapter_kind],
-            "runtime",
+            "runtime", pdir,
         ),
         "postgres": lambda: typer.echo("postgres must be started externally in bare-metal mode"),
         "redis": lambda: typer.echo("redis must be started externally in bare-metal mode"),
@@ -146,6 +158,7 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
     # Full stack startup
     from skyops._client import resolve_host_for_url
 
+    pdir = _pid_directory(cfg)
     server_url = resolve_server_url(cfg)
 
     # Derive hosts from config URLs (not hardcoded)
@@ -171,7 +184,7 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
         subprocess.run(["agp", "initdb"], check=True)
 
     # Start control plane
-    _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane")
+    _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir)
     _wait_http(f"{server_url}/health", "control-plane")
 
     # Seed on first boot
@@ -185,8 +198,8 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
         _mark_initialized(cfg)
 
     # Start sweepers
-    _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper")
-    _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper")
+    _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir)
+    _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir)
 
     # Start runtime work loop if agents are configured
     if cfg.agents:
@@ -198,31 +211,28 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
              "--agent-id", agent_id,
              "--host-kind", cfg.runtime.host_kind,
              "--adapter-kind", cfg.runtime.adapter_kind],
-            "runtime",
+            "runtime", pdir,
         )
 
     typer.echo("Stack is up.")
 
 
-def _bare_metal_down(service: str | None) -> None:
-    """Stop bare-metal services by signalling background processes."""
-    # In bare-metal mode we rely on finding agp processes
-    # For processes we started, signal them directly
-    for proc in _BG_PIDS:
-        try:
-            proc.terminate()
-            proc.wait(timeout=5)
-        except Exception:
-            proc.kill()
-    _BG_PIDS.clear()
-
-    # Also try to find and kill agp processes via pkill
-    if not service:
-        for pattern in ["agp serve", "agp sweep-loop", "agp sweep-runtimes-loop"]:
-            subprocess.run(["pkill", "-f", pattern], capture_output=True)
+def _bare_metal_down(cfg: SkyopsConfig, service: str | None) -> None:
+    """Stop bare-metal services by signalling PID-tracked processes."""
+    pdir = _pid_directory(cfg)
+    if service:
+        if signal_and_wait(pdir, service):
+            typer.echo(f"Stopped {service}.")
+        else:
+            typer.echo(f"{service} was not running.")
     else:
-        subprocess.run(["pkill", "-f", f"agp {service}"], capture_output=True)
-    typer.echo("Stopped." if not service else f"Stopped {service}.")
+        services = list_pidfiles(pdir)
+        if not services:
+            typer.echo("No tracked services running.")
+            return
+        for label in services:
+            signal_and_wait(pdir, label)
+        typer.echo("Stopped.")
 
 
 # ── Profile generation ─────────────────────────────────────────────
@@ -279,8 +289,14 @@ def ps() -> None:
         cmd = _compose_cmd(cfg) + ["ps", "-a"]
         subprocess.run(cmd)
     else:
-        typer.echo("AGP processes:")
-        subprocess.run("ps aux | head -1; ps aux | grep '[a]gp'", shell=True)
+        pdir = _pid_directory(cfg)
+        services = list_pidfiles(pdir)
+        if not services:
+            typer.echo("No tracked bare-metal services running.")
+            return
+        typer.echo(f"{'SERVICE':<25} {'PID':<10} {'STATUS'}")
+        for label, p in sorted(services.items()):
+            typer.echo(f"{label:<25} {p:<10} {'alive'}")
 
 
 @lifecycle_app.command("down")
@@ -293,7 +309,7 @@ def down(
     if cfg.stack.mode == "docker":
         _docker_down(cfg, service, volumes)
     else:
-        _bare_metal_down(service)
+        _bare_metal_down(cfg, service)
 
 
 @lifecycle_app.command("restart")
@@ -307,7 +323,7 @@ def restart(
         _docker_down(cfg, service, volumes=False)
         _docker_up(cfg, service, build)
     else:
-        _bare_metal_down(service)
+        _bare_metal_down(cfg, service)
         _bare_metal_up(cfg, service)
 
     if not service:
