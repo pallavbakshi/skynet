@@ -5,13 +5,10 @@ import time
 
 import httpx
 
+from agp.client import AgpClient, AgpProfile
 from agp.db import SessionLocal, init_db
 from agp.models import Capability, CapabilityPool, utc_now
 from bootstrap_minio_policy import apply_bucket_policy
-
-
-def _server_url() -> str:
-    return os.environ.get("AGP_SERVER_URL", "http://127.0.0.1:7860")
 
 
 def _bootstrap_capability_id() -> str:
@@ -27,14 +24,14 @@ def _bootstrap_runtime_id() -> str | None:
 
 
 def wait_for_health(timeout_seconds: float = 60.0) -> None:
+    profile = AgpProfile.load()
     deadline = time.monotonic() + timeout_seconds
-    with httpx.Client(base_url=_server_url(), timeout=2.0) as client:
+    with AgpClient(profile=profile) as client:
         while time.monotonic() < deadline:
             try:
-                response = client.get("/health")
-                if response.status_code == 200:
-                    return
-            except httpx.HTTPError:
+                client.health()
+                return
+            except Exception:
                 pass
             time.sleep(1.0)
     raise RuntimeError("control plane did not become healthy before bootstrap timeout")
@@ -76,24 +73,24 @@ def ensure_capability() -> None:
 
 
 def ensure_agent() -> None:
+    profile = AgpProfile.load()
     deadline = time.monotonic() + 60.0
     last_error: str | None = None
-    with httpx.Client(base_url=_server_url(), timeout=5.0) as client:
+    with AgpClient(profile=profile) as client:
         while time.monotonic() < deadline:
             try:
-                agents = client.get("/agents", params={"capability_id": _bootstrap_capability_id(), "limit": 200})
-                agents.raise_for_status()
-                items = agents.json()["data"]["items"]
-                if any(item["agent_id"] == _bootstrap_agent_id() for item in items):
+                agents = client.list_agents(capability_id=_bootstrap_capability_id(), limit=200)
+                if any(item["agent_id"] == _bootstrap_agent_id() for item in agents["items"]):
                     return
+                # Agent doesn't exist yet — create via raw HTTP since /agents/up
+                # is not in the SDK (it's a runtime registration endpoint)
                 assigned_runtime_id = _bootstrap_runtime_id()
                 if assigned_runtime_id:
-                    runtime = client.get(f"/runtimes/{assigned_runtime_id}")
-                    if runtime.status_code == 404:
+                    try:
+                        client._client.get(f"/runtimes/{assigned_runtime_id}").raise_for_status()
+                    except httpx.HTTPStatusError:
                         assigned_runtime_id = None
-                    else:
-                        runtime.raise_for_status()
-                response = client.post(
+                response = client._client.post(
                     "/agents/up",
                     json={
                         "agent_id": _bootstrap_agent_id(),
@@ -103,7 +100,7 @@ def ensure_agent() -> None:
                 )
                 response.raise_for_status()
                 return
-            except httpx.HTTPError as exc:
+            except Exception as exc:
                 last_error = str(exc)
                 time.sleep(1.0)
     raise RuntimeError(last_error or "timed out ensuring bootstrap agent")

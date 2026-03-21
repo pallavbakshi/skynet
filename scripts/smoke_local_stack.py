@@ -3,15 +3,10 @@ from __future__ import annotations
 import os
 import sys
 import time
-from typing import Any
 from urllib.request import urlopen
 from urllib.error import HTTPError, URLError
 
-import httpx
-
-
-def _server_url() -> str:
-    return os.environ.get("AGP_SERVER_URL", "http://127.0.0.1:7860")
+from agp.client import AgpClient, AgpProfile
 
 
 def _minio_url() -> str:
@@ -41,55 +36,44 @@ def _agent_id() -> str:
     return os.environ.get("AGP_SMOKE_AGENT_ID", "agt_local")
 
 
-def _wait_for_health(client: httpx.Client, timeout_seconds: float = 60.0) -> None:
+def _wait_for_health(client: AgpClient, timeout_seconds: float = 60.0) -> None:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
-            response = client.get("/health")
-            if response.status_code == 200:
-                return
-        except httpx.HTTPError:
+            client.health()
+            return
+        except Exception:
             pass
         time.sleep(1.0)
     raise RuntimeError("control plane did not become healthy in time")
 
 
-def _poll_job_terminal(client: httpx.Client, job_id: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        response = client.get(f"/jobs/{job_id}")
-        response.raise_for_status()
-        payload = response.json()["data"]
-        if payload["status"] in {"completed", "failed", "cancelled"}:
-            return payload
-        time.sleep(1.0)
-    raise RuntimeError(f"job {job_id} did not reach terminal state before timeout")
-
-
 def main() -> int:
-    with httpx.Client(base_url=_server_url(), timeout=10.0) as client:
+    profile = AgpProfile.load()
+    with AgpClient(profile=profile) as client:
         _wait_for_health(client)
-        response = client.post(
-            "/messages/send",
-            headers={"Idempotency-Key": f"smoke-{int(time.time())}"},
-            json={
-                "target": {"type": "agent", "id": _agent_id()},
-                "message": {"text": "local deployment smoke test", "metadata": {"kind": "smoke"}},
-            },
+        payload = client.send(
+            "agent",
+            _agent_id(),
+            "local deployment smoke test",
+            metadata={"kind": "smoke"},
+            idempotency_key=f"smoke-{int(time.time())}",
         )
-        response.raise_for_status()
-        payload = response.json()["data"]
         if payload.get("kind") == "inline_result":
             artifact_id = payload["result_artifact_id"]
         else:
-            job = _poll_job_terminal(client, payload["job_id"])
+            snapshots = client.watch_job(
+                payload["job_id"],
+                poll_interval=1.0,
+                max_polls=60,
+            )
+            job = snapshots[-1]["job"]
             if job["status"] != "completed":
                 raise RuntimeError(f"smoke job finished in unexpected state: {job['status']}")
             artifact_id = job["result_artifact_id"]
 
-        artifact = client.get(f"/artifacts/{artifact_id}/content")
-        artifact.raise_for_status()
-        content = artifact.json()["data"].get("content", "")
+        artifact = client.fetch_artifact(artifact_id, content=True)
+        content = artifact.get("content", "")
         if "local deployment smoke test" not in content:
             raise RuntimeError("smoke artifact content did not include expected payload")
 

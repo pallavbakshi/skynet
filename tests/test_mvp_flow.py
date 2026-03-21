@@ -25,27 +25,9 @@ from agp.control_plane import build_app
 from agp.db import Base, SessionLocal, engine, init_db
 from agp.models import Agent, Capability, Event, QueueDeliveryRecord, Runtime, utc_now
 from agp.enums import HealthStatus, RuntimeStatus
-from agp.cli import (
-    app,
-    fetch_artifact_via_api,
-    interrupt_job_via_api,
-    list_agents_via_api,
-    list_job_artifacts_via_api,
-    list_jobs_via_api,
-    list_queue_deliveries_via_api,
-    list_run_artifacts_via_api,
-    observability_alerts_via_api,
-    observability_control_plane_logs_via_api,
-    observability_dispatch_alerts_via_api,
-    observability_job_trace_via_api,
-    observability_metrics_via_api,
-    observability_runtime_logs_via_api,
-    observability_summary_via_api,
-    rotate_operator_tokens_via_api,
-    rotate_runtime_tokens_via_api,
-    send_message_via_api,
-    system_auth_status_via_api,
-    watch_job_until_terminal,
+from agp.cli import app
+from agp.client import AgpClient
+from agp._ops_helpers import (
     create_backup_snapshot,
     get_upgrade_status,
     mark_upgrade,
@@ -216,6 +198,7 @@ class MvpFlowTest(unittest.TestCase):
             shutil.rmtree(settings.artifact_root)
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
         self.client = TestClient(build_app())
+        self.agp = AgpClient(http_client=self.client)
 
     def tearDown(self) -> None:
         self.client.close()
@@ -767,10 +750,9 @@ class MvpFlowTest(unittest.TestCase):
             headers={"Idempotency-Key": "watch-flow-1"},
         ).json()
 
-        snapshots = watch_job_until_terminal(
-            self.client,
-            job_id=sent["data"]["job_id"],
-            poll_interval_seconds=0.0,
+        snapshots = self.agp.watch_job(
+            sent["data"]["job_id"],
+            poll_interval=0.0,
             max_polls=2,
         )
         self.assertGreaterEqual(len(snapshots), 1)
@@ -786,8 +768,7 @@ class MvpFlowTest(unittest.TestCase):
     def test_orchestration_helpers_cover_send_list_interrupt_and_fetch(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_orc", "capability_id": "cap_python"})
 
-        sent = send_message_via_api(
-            self.client,
+        sent = self.agp.send(
             target_type="agent",
             target_id="agt_orc",
             text="orchestrate me",
@@ -795,26 +776,25 @@ class MvpFlowTest(unittest.TestCase):
         )
         job_id = sent["job_id"]
 
-        jobs = list_jobs_via_api(self.client, target_agent_id="agt_orc")
+        jobs = self.agp.list_jobs( target_agent_id="agt_orc")
         self.assertTrue(any(item["job_id"] == job_id for item in jobs["items"]))
 
-        agents = list_agents_via_api(self.client, capability_id="cap_python")
+        agents = self.agp.list_agents( capability_id="cap_python")
         self.assertTrue(any(item["agent_id"] == "agt_orc" for item in agents["items"]))
 
-        interrupted = interrupt_job_via_api(self.client, job_id=job_id)
+        interrupted = self.agp.interrupt( job_id=job_id)
         self.assertEqual(interrupted["status"], "cancelled")
 
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_orc",
             text="inline artifact",
             detach_mode="inline",
             idempotency_key="orc-helper-2",
         )
-        artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"])
+        artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"])
         self.assertEqual(artifact["kind"], "result")
-        content = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        content = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertIn("content", content)
         self.assertIn("inline result", content["content"])
         self.assertIn("storage_ref", content)
@@ -824,19 +804,18 @@ class MvpFlowTest(unittest.TestCase):
         reset_artifact_store_state("inmemory")
         self.client.post("/agents/up", json={"agent_id": "agt_memart", "capability_id": "cap_python"})
 
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_memart",
             text="inline artifact in memory",
             detach_mode="inline",
             idempotency_key="mem-art-1",
         )
-        artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"])
+        artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"])
         self.assertEqual(artifact["kind"], "result")
         self.assertTrue(artifact["storage_ref"].startswith("mem://"))
         self.assertNotEqual(artifact["checksum"], "")
-        content = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        content = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertEqual(content["storage_ref"], artifact["storage_ref"])
         self.assertIn("inline result", content["content"])
 
@@ -844,19 +823,18 @@ class MvpFlowTest(unittest.TestCase):
         settings.artifact_backend = "sharedfs"
         self.client.post("/agents/up", json={"agent_id": "agt_sharedart", "capability_id": "cap_python"})
 
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_sharedart",
             text="inline artifact in shared fs",
             detach_mode="inline",
             idempotency_key="shared-art-1",
         )
-        artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"])
+        artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"])
         self.assertEqual(artifact["kind"], "result")
         self.assertTrue(artifact["storage_ref"].startswith("agpfs://"))
         self.assertNotEqual(artifact["checksum"], "")
-        content = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        content = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertEqual(content["storage_ref"], artifact["storage_ref"])
         self.assertIn("inline result", content["content"])
 
@@ -864,19 +842,18 @@ class MvpFlowTest(unittest.TestCase):
         settings.artifact_backend = "registryfs"
         self.client.post("/agents/up", json={"agent_id": "agt_registryart", "capability_id": "cap_python"})
 
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_registryart",
             text="inline artifact in registry fs",
             detach_mode="inline",
             idempotency_key="registry-art-1",
         )
-        artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"])
+        artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"])
         self.assertEqual(artifact["kind"], "result")
         self.assertTrue(artifact["storage_ref"].startswith("agpr://"))
         self.assertNotEqual(artifact["checksum"], "")
-        content = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        content = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertEqual(content["storage_ref"], artifact["storage_ref"])
         self.assertIn("inline result", content["content"])
 
@@ -952,15 +929,14 @@ class MvpFlowTest(unittest.TestCase):
     def test_localfs_artifact_backend_populates_checksum(self) -> None:
         settings.artifact_backend = "localfs"
         self.client.post("/agents/up", json={"agent_id": "agt_localart", "capability_id": "cap_python"})
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_localart",
             text="inline artifact in local fs",
             detach_mode="inline",
             idempotency_key="local-art-1",
         )
-        artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"])
+        artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"])
         self.assertEqual(artifact["kind"], "result")
         self.assertTrue(artifact["storage_ref"].startswith("file://"))
         self.assertNotEqual(artifact["checksum"], "")
@@ -1000,8 +976,8 @@ class MvpFlowTest(unittest.TestCase):
         )
         self.assertEqual(complete.status_code, 200)
 
-        job_artifacts = list_job_artifacts_via_api(self.client, job_id=sent["job_id"])
-        run_artifacts = list_run_artifacts_via_api(self.client, run_id=run_id)
+        job_artifacts = self.agp.list_job_artifacts( job_id=sent["job_id"])
+        run_artifacts = self.agp.list_run_artifacts( run_id=run_id)
         job_roles = {item["role"] for item in job_artifacts["items"]}
         run_roles = {item["role"] for item in run_artifacts["items"]}
         self.assertIn("transcript_log", job_roles)
@@ -1009,11 +985,10 @@ class MvpFlowTest(unittest.TestCase):
         self.assertIn("transcript_log", run_roles)
         self.assertIn("exec_log", run_roles)
 
-        transcript_only = list_job_artifacts_via_api(self.client, job_id=sent["job_id"], role="transcript_log")
+        transcript_only = self.agp.list_job_artifacts( job_id=sent["job_id"], role="transcript_log")
         self.assertEqual(len(transcript_only["items"]), 1)
         self.assertEqual(transcript_only["items"][0]["role"], "transcript_log")
-        transcript_content = fetch_artifact_via_api(
-            self.client,
+        transcript_content = self.agp.fetch_artifact(
             artifact_id=transcript_only["items"][0]["artifact_id"],
             content=True,
         )
@@ -1039,7 +1014,7 @@ class MvpFlowTest(unittest.TestCase):
             headers={"Idempotency-Key": "obs-inline-1"},
         )
 
-        summary = observability_summary_via_api(self.client)
+        summary = self.agp.observability_summary()
         self.assertGreaterEqual(summary["jobs"]["queued"], 1)
         self.assertGreaterEqual(summary["jobs"]["completed"], 1)
         self.assertGreaterEqual(summary["agents"]["idle"], 1)
@@ -1056,7 +1031,7 @@ class MvpFlowTest(unittest.TestCase):
             },
             headers={"Idempotency-Key": "metrics-export-1"},
         )
-        metrics = observability_metrics_via_api(self.client)
+        metrics = self.agp.observability_metrics()
         self.assertIn("# HELP agp_jobs_total", metrics)
         self.assertIn('agp_jobs_total{status="queued"}', metrics)
         self.assertIn("# HELP agp_queue_deliveries_total", metrics)
@@ -1088,7 +1063,7 @@ class MvpFlowTest(unittest.TestCase):
             runtime_client.close()
 
         job_id = payload["claim"]["job"]["job_id"]
-        trace = observability_job_trace_via_api(self.client, job_id=job_id)
+        trace = self.agp.job_trace( job_id=job_id)
         event_seqs = [item["event_seq"] for item in trace["timeline"]]
         event_types = [item["event_type"] for item in trace["timeline"]]
         self.assertEqual(event_seqs, sorted(event_seqs))
@@ -1125,7 +1100,7 @@ class MvpFlowTest(unittest.TestCase):
             runtime_client.close()
 
         job_id = payload["claim"]["job"]["job_id"]
-        logs = observability_control_plane_logs_via_api(self.client, limit=200)
+        logs = self.agp.logs_control_plane( limit=200)
         self.assertTrue(Path(logs["source"]).name.endswith("control-plane.jsonl"))
         items = logs["items"]
         self.assertGreaterEqual(len(items), 1)
@@ -1148,7 +1123,7 @@ class MvpFlowTest(unittest.TestCase):
         rotated = list(settings.log_root.glob("control-plane.*.jsonl"))
         self.assertGreaterEqual(len(rotated), 1)
 
-        logs = observability_control_plane_logs_via_api(self.client, limit=200)
+        logs = self.agp.logs_control_plane( limit=200)
         event_types = {item["event_type"] for item in logs["items"] if item.get("kind") == "control_plane_event"}
         self.assertIn("agent.provisioning", event_types)
         self.assertIn("agent.idle", event_types)
@@ -1180,7 +1155,7 @@ class MvpFlowTest(unittest.TestCase):
             runtime_client.close()
 
         self.assertTrue(payload["claimed"])
-        logs = observability_runtime_logs_via_api(self.client, runtime_id="rtm_logs_api", limit=200)
+        logs = self.agp.logs_runtime( runtime_id="rtm_logs_api", limit=200)
         self.assertEqual(logs["runtime_id"], "rtm_logs_api")
         self.assertTrue(Path(logs["source"]).name.endswith("runtime-rtm_logs_api.jsonl"))
         items = logs["items"]
@@ -1284,7 +1259,7 @@ class MvpFlowTest(unittest.TestCase):
         finally:
             session.close()
 
-        alerts = observability_alerts_via_api(self.client)
+        alerts = self.agp.observability_alerts()
         codes = {item["code"] for item in alerts["items"]}
         self.assertIn("queue_dead_lettering", codes)
         self.assertIn("rising_terminal_failure_rate", codes)
@@ -1337,7 +1312,7 @@ class MvpFlowTest(unittest.TestCase):
         finally:
             session.close()
 
-        alerts = observability_alerts_via_api(self.client)
+        alerts = self.agp.observability_alerts()
         codes = {item["code"] for item in alerts["items"]}
         self.assertNotIn("runtime_unreachable", codes)
         self.assertNotIn("heartbeat_loss_spike", codes)
@@ -1360,7 +1335,7 @@ class MvpFlowTest(unittest.TestCase):
 
             sink: list[dict] = []
             with patch.object(control_plane_module.httpx, "Client", return_value=_FakeWebhookClient(sink)):
-                payload = observability_dispatch_alerts_via_api(self.client)
+                payload = self.agp.observability_dispatch_alerts()
 
             self.assertTrue(payload["delivered"])
             self.assertEqual(payload["target"], settings.observability_alert_webhook_url)
@@ -1374,15 +1349,14 @@ class MvpFlowTest(unittest.TestCase):
 
     def test_backup_and_restore_snapshot_preserves_state_and_artifacts(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_backup", "capability_id": "cap_python"})
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_backup",
             text="backup this artifact",
             detach_mode="inline",
             idempotency_key="backup-1",
         )
-        artifact_before = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        artifact_before = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertIn("inline result", artifact_before["content"])
 
         backup_dir = Path(mkdtemp(prefix="agp-backup-"))
@@ -1404,22 +1378,20 @@ class MvpFlowTest(unittest.TestCase):
         restored_job = self.client.get(f"/jobs/{inline_sent['job_id']}")
         self.assertEqual(restored_job.status_code, 200)
         self.assertEqual(restored_job.json()["data"]["status"], "completed")
-        restored_artifact = fetch_artifact_via_api(self.client, artifact_id=inline_sent["result_artifact_id"], content=True)
+        restored_artifact = self.agp.fetch_artifact( artifact_id=inline_sent["result_artifact_id"], content=True)
         self.assertEqual(restored_artifact["storage_ref"], artifact_before["storage_ref"])
         self.assertIn("inline result", restored_artifact["content"])
 
     def test_validate_restored_state_reports_missing_artifacts(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_validate", "capability_id": "cap_python"})
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_validate",
             text="validate restored artifact",
             detach_mode="inline",
             idempotency_key="validate-restore-1",
         )
-        artifact_before = fetch_artifact_via_api(
-            self.client,
+        artifact_before = self.agp.fetch_artifact(
             artifact_id=inline_sent["result_artifact_id"],
             content=True,
         )
@@ -1440,8 +1412,7 @@ class MvpFlowTest(unittest.TestCase):
     def test_reconstruct_queue_from_state_rebuilds_pending_delivery_and_dedupes_stale_rows(self) -> None:
         settings.queue_backend = "delivery_table"
         self.client.post("/agents/up", json={"agent_id": "agt_reconstruct", "capability_id": "cap_python"})
-        sent = send_message_via_api(
-            self.client,
+        sent = self.agp.send(
             target_type="agent",
             target_id="agt_reconstruct",
             text="reconstruct this queue",
@@ -1500,16 +1471,14 @@ class MvpFlowTest(unittest.TestCase):
     def test_restore_and_recover_snapshot_rebuilds_queue_and_validates_artifacts(self) -> None:
         settings.queue_backend = "delivery_table"
         self.client.post("/agents/up", json={"agent_id": "agt_dr", "capability_id": "cap_python"})
-        inline_sent = send_message_via_api(
-            self.client,
+        inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_dr",
             text="dr inline artifact",
             detach_mode="inline",
             idempotency_key="dr-inline-1",
         )
-        queued_sent = send_message_via_api(
-            self.client,
+        queued_sent = self.agp.send(
             target_type="agent",
             target_id="agt_dr",
             text="dr queued work",
@@ -1533,8 +1502,7 @@ class MvpFlowTest(unittest.TestCase):
         self.assertEqual(recovered["validation"]["missing_artifacts"], 0)
         self.assertGreaterEqual(recovered["queue_reconstruction"]["reconstructed_jobs"], 1)
 
-        restored_artifact = fetch_artifact_via_api(
-            self.client,
+        restored_artifact = self.agp.fetch_artifact(
             artifact_id=inline_sent["result_artifact_id"],
             content=True,
         )
@@ -1648,7 +1616,7 @@ class MvpFlowTest(unittest.TestCase):
         self.assertEqual(rolled_back["previous_schema_version"], "0002_queue_backends")
 
     def test_upgrade_rollback_rejects_when_no_previous_target_exists(self) -> None:
-        with self.assertRaises(typer.BadParameter):
+        with self.assertRaises(ValueError):
             rollback_to_previous_version()
 
     def test_upgrade_status_is_exposed_over_operator_api(self) -> None:
@@ -1854,7 +1822,7 @@ class MvpFlowTest(unittest.TestCase):
         finally:
             session.close()
 
-        deliveries = list_queue_deliveries_via_api(self.client, state="dead_lettered", job_id=sent["job_id"])
+        deliveries = self.agp.list_deliveries( state="dead_lettered", job_id=sent["job_id"])
         self.assertEqual(len(deliveries["items"]), 1)
         self.assertEqual(deliveries["items"][0]["job_id"], sent["job_id"])
         self.assertEqual(deliveries["items"][0]["state"], "dead_lettered")
@@ -2135,12 +2103,12 @@ class MvpFlowTest(unittest.TestCase):
             self.assertEqual(denied.json()["error"]["code"], "forbidden")
 
             protected_client.headers.update(admin_headers)
-            status_before = system_auth_status_via_api(protected_client)
+            agp_protected = AgpClient(http_client=protected_client)
+            status_before = agp_protected.auth_status()
             self.assertEqual(status_before["operator"]["managed_token_count"], 2)
             self.assertEqual(status_before["runtime"]["active_token_count"], 1)
 
-            rotated_operator = rotate_operator_tokens_via_api(
-                protected_client,
+            rotated_operator = agp_protected.rotate_operator_tokens(
                 operator_bearer_token=None,
                 operator_token_roles_json={
                     "viewer2": "read_only",
@@ -2151,8 +2119,7 @@ class MvpFlowTest(unittest.TestCase):
             self.assertEqual(rotated_operator["managed_token_count"], 3)
             protected_client.headers.update({"Authorization": "Bearer admin2"})
 
-            rotated_runtime = rotate_runtime_tokens_via_api(
-                protected_client,
+            rotated_runtime = agp_protected.rotate_runtime_tokens(
                 runtime_bearer_token=None,
                 runtime_active_tokens_json=["rt-new-1", "rt-new-2"],
             )
@@ -2430,7 +2397,7 @@ class MvpFlowTest(unittest.TestCase):
             session.close()
 
         self.assertEqual(result["terminated_agents"], 1)
-        agents = list_agents_via_api(self.client, status="terminated")
+        agents = self.agp.list_agents( status="terminated")
         self.assertTrue(any(item["agent_id"] == "agt_idle" for item in agents["items"]))
 
     def test_idle_timeout_does_not_terminate_agent_with_queued_work(self) -> None:
@@ -2503,7 +2470,7 @@ class MvpFlowTest(unittest.TestCase):
             session.close()
 
         self.assertEqual(result["terminated_agents"], 1)
-        agents = list_agents_via_api(self.client, status="terminated")
+        agents = self.agp.list_agents( status="terminated")
         self.assertTrue(any(item["agent_id"] == "agt_drain_done" for item in agents["items"]))
 
         session = SessionLocal()
@@ -2533,7 +2500,7 @@ class MvpFlowTest(unittest.TestCase):
             session.close()
 
         self.assertEqual(result["terminated_agents"], 0)
-        agents = list_agents_via_api(self.client, status="draining")
+        agents = self.agp.list_agents( status="draining")
         self.assertTrue(any(item["agent_id"] == "agt_drain_queue" for item in agents["items"]))
 
     def test_draining_runtime_returns_to_idle_when_leases_clear(self) -> None:
@@ -4054,7 +4021,7 @@ class MvpFlowTest(unittest.TestCase):
                             default_cwd="/tmp",
                         )
 
-                with patch("agp.cli.build_terminal_host", side_effect=factory):
+                with patch("agp._plugin_cli.build_terminal_host", side_effect=factory):
                     created = self.cli_runner.invoke(app, ["host", "create", host_kind, "agt_host", "--workspace-ref", "/tmp"])
                     self.assertEqual(created.exit_code, 0, created.output)
                     created_payload = json.loads(created.stdout)
@@ -4096,8 +4063,8 @@ class MvpFlowTest(unittest.TestCase):
         tmp = Path(mkdtemp())
         try:
             with (
-                patch("agp.cli.build_terminal_host", return_value=CodexHost()),
-                patch("agp.cli.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
+                patch("agp._plugin_cli.build_terminal_host", return_value=CodexHost()),
+                patch("agp._plugin_cli.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
             ):
                 result = self.cli_runner.invoke(
                     app,
@@ -4137,9 +4104,9 @@ class MvpFlowTest(unittest.TestCase):
         tmp = Path(mkdtemp())
         try:
             with (
-                patch("agp.cli.build_terminal_host", return_value=TuiHost()),
+                patch("agp._plugin_cli.build_terminal_host", return_value=TuiHost()),
                 patch(
-                    "agp.cli.build_agent_adapter",
+                    "agp._plugin_cli.build_agent_adapter",
                     return_value=CodexAdapter(
                         tui_mode=True,
                         cli_command="codex",
@@ -4219,7 +4186,7 @@ class MvpFlowTest(unittest.TestCase):
         try:
             from agp.plugins.tmux import TmuxHost
 
-            with patch("agp.cli.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
+            with patch("agp._plugin_cli.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
                 result = self.cli_runner.invoke(
                     app,
                     [
@@ -4937,7 +4904,7 @@ class MvpFlowTest(unittest.TestCase):
             sweep_expired_leases(session, now=utc_now() + timedelta(seconds=5))
         finally:
             session.close()
-        from agp.cli import reconstruct_queue_from_state
+        from agp._ops_helpers import reconstruct_queue_from_state
         reconstruct_queue_from_state()
 
         # Re-register runtime and reclaim
@@ -4976,7 +4943,7 @@ class MvpFlowTest(unittest.TestCase):
             sweep_expired_leases(session, now=utc_now() + timedelta(seconds=5))
         finally:
             session.close()
-        from agp.cli import reconstruct_queue_from_state
+        from agp._ops_helpers import reconstruct_queue_from_state
         reconstruct_queue_from_state()
 
         # Runtime2 registers and claims the same agent
