@@ -1,4 +1,4 @@
-# DEPRECATED: Use `skyops smoke` (future) or `skyops health` instead.
+# DEPRECATED: Use `skyops smoke` instead.
 from __future__ import annotations
 
 import os
@@ -29,8 +29,10 @@ def _assert_bucket_not_public() -> None:
         if e.code in (403, 401):
             return  # expected: access denied
         raise RuntimeError(f"unexpected HTTP {e.code} checking bucket policy") from e
-    except URLError:
-        pass  # connection refused / network error — skip enforcement check
+    except URLError as e:
+        # Connection refused means MinIO is unreachable — warn instead of silently passing
+        import sys
+        print(f"WARNING: could not reach MinIO at {url} to verify bucket policy: {e}", file=sys.stderr)
 
 
 def _agent_id() -> str:

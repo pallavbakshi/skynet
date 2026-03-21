@@ -20,7 +20,7 @@ import sys
 import time
 from pathlib import Path
 
-import httpx
+from agp.client import AgpClient, AgpProfile
 
 # ---------------------------------------------------------------------------
 # Discovery helpers
@@ -77,15 +77,16 @@ RUNTIME_ID = "rtm_local"
 
 
 def wait_for_health(timeout: float = 30.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            r = httpx.get(f"{SERVER_URL}/health", timeout=2.0)
-            if r.status_code == 200:
+    profile = AgpProfile(server_url=SERVER_URL)
+    with AgpClient(profile=profile) as client:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                client.health()
                 return
-        except httpx.HTTPError:
-            pass
-        time.sleep(0.5)
+            except Exception:
+                pass
+            time.sleep(0.5)
     _die("control plane did not become healthy")
 
 
@@ -102,32 +103,45 @@ def init_and_serve() -> subprocess.Popen:
 
 
 def bootstrap() -> None:
-    """Seed capability and agent."""
-    subprocess.run(
-        [sys.executable, "-m", "agp", "add-capability",
-         CAPABILITY_ID, "codex", "local/agp:dev", "local"],
-        check=True, capture_output=True,
-    )
-    r = httpx.post(
-        f"{SERVER_URL}/agents/up",
-        json={"agent_id": AGENT_ID, "capability_id": CAPABILITY_ID},
-        timeout=5.0,
-    )
-    r.raise_for_status()
+    """Seed capability and agent via SDK + direct DB."""
+    from agp.db import SessionLocal
+    from agp.models import Capability, CapabilityPool, utc_now
+
+    session = SessionLocal()
+    try:
+        if session.get(Capability, CAPABILITY_ID) is None:
+            now = utc_now()
+            session.add(Capability(
+                capability_id=CAPABILITY_ID, name="codex", version="v1",
+                image_ref="local/agp:dev", model_ref="local",
+                resource_tier="small", permission_profile="default",
+                queue_mode="agent", runtime_requirements_json={},
+                created_at=now, updated_at=now,
+            ))
+            session.flush()
+            if session.get(CapabilityPool, CAPABILITY_ID) is None:
+                session.add(CapabilityPool(
+                    capability_id=CAPABILITY_ID,
+                    queue_id=f"capability:{CAPABILITY_ID}:v1",
+                    routing_policy="least_recent",
+                ))
+            session.commit()
+    finally:
+        session.close()
+
+    profile = AgpProfile(server_url=SERVER_URL)
+    with AgpClient(profile=profile) as client:
+        client.register_agent(AGENT_ID, CAPABILITY_ID)
 
 
 def send_job(prompt: str) -> str:
-    r = httpx.post(
-        f"{SERVER_URL}/messages/send",
-        json={
-            "target": {"type": "agent", "id": AGENT_ID},
-            "message": {"text": prompt, "metadata": {}},
-        },
-        headers={"Idempotency-Key": f"local-{int(time.time())}"},
-        timeout=5.0,
-    )
-    r.raise_for_status()
-    return r.json()["data"]["job_id"]
+    profile = AgpProfile(server_url=SERVER_URL)
+    with AgpClient(profile=profile) as client:
+        result = client.send(
+            "agent", AGENT_ID, prompt,
+            idempotency_key=f"local-{int(time.time())}",
+        )
+        return result["job_id"]
 
 
 def run_worker(socket: str, ncodex_cmd: str, timeout: int) -> dict:
@@ -146,8 +160,9 @@ def run_worker(socket: str, ncodex_cmd: str, timeout: int) -> dict:
         "AGP_WEZTERM_SCROLLBACK_LINES": "5000",
     }
     result = subprocess.run(
-        [sys.executable, "-m", "agp", "runtime-work-once",
-         RUNTIME_ID, "--agent-id", AGENT_ID, "--artifact-root", ".agp-artifacts"],
+        [sys.executable, "-m", "agp", "runtime-work-loop",
+         RUNTIME_ID, "--agent-id", AGENT_ID, "--artifact-root", ".agp-artifacts",
+         "--max-iterations", "1"],
         capture_output=True, text=True, env=env, timeout=timeout + 60,
     )
     if result.returncode != 0:
@@ -158,15 +173,14 @@ def run_worker(socket: str, ncodex_cmd: str, timeout: int) -> dict:
 
 
 def fetch_result(job_id: str) -> str | None:
-    r = httpx.get(f"{SERVER_URL}/jobs/{job_id}", timeout=5.0)
-    r.raise_for_status()
-    job = r.json()["data"]
-    art_id = job.get("result_artifact_id")
-    if not art_id:
-        return None
-    r = httpx.get(f"{SERVER_URL}/artifacts/{art_id}/content", timeout=5.0)
-    r.raise_for_status()
-    return r.json()["data"].get("content", "")
+    profile = AgpProfile(server_url=SERVER_URL)
+    with AgpClient(profile=profile) as client:
+        job = client.get_job(job_id)
+        art_id = job.get("result_artifact_id")
+        if not art_id:
+            return None
+        artifact = client.fetch_artifact(art_id, content=True)
+        return artifact.get("content", "")
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# DEPRECATED: Use `skyops health` instead.
+# DEPRECATED: Use `skyops smoke` instead (validates + sends test job + checks artifacts).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
