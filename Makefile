@@ -26,15 +26,12 @@ export AGP_LOG_ROOT        ?= $(ROOT)/.agp-logs
 
 # ── Install targets ──────────────────────────────────────────────────
 
-.PHONY: install-server install-mac install-runtime
+.PHONY: install-server install-runtime
 
-install-server: ## Install CP + postgres + redis + minio on Ubuntu/Debian
+install-server: ## Install CP + infra + runtime deps (any OS)
 	@bash scripts/install-server.sh
 
-install-mac: ## Install runtime + SDK + tmux + codex on macOS
-	@bash scripts/install-mac.sh
-
-install-runtime: ## Install runtime only (any Linux) — no infra
+install-runtime: ## Install runtime only — no infra (any OS)
 	@bash scripts/install-runtime.sh
 
 # ── Service targets (bare-metal, no docker) ───────────────────────────

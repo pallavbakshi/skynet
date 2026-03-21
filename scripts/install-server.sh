@@ -1,185 +1,281 @@
 #!/usr/bin/env bash
-# Install AGP control plane + infrastructure on a server (Ubuntu/Debian).
+# Install AGP control plane + runtime (orc) on this machine.
+# Installs: Python 3.12, PostgreSQL 16, Redis 7, MinIO, tmux, Node.js, codex, uv, agp[server]
+# Supports: macOS, Ubuntu/Debian, Fedora/RHEL/Rocky, Arch
 # Usage: bash scripts/install-server.sh
 set -euo pipefail
 
 # ── Versions ──────────────────────────────────────────────────────────
 PYTHON_MIN="3.12"
 POSTGRES_VERSION="16"
-REDIS_VERSION="7"
 MINIO_VERSION="RELEASE.2025-02-28T09-55-16Z"
 
 # ── Colors ────────────────────────────────────────────────────────────
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-RED='\033[0;31m'
-NC='\033[0m'
-
+GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; NC='\033[0m'
 ok()   { echo -e "${GREEN}[✓]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 fail() { echo -e "${RED}[✗]${NC} $*"; exit 1; }
 
 # ── OS detection ──────────────────────────────────────────────────────
-detect_os() {
-  if [[ -f /etc/os-release ]]; then
-    . /etc/os-release
-    OS_ID="${ID}"
-    OS_VERSION="${VERSION_ID}"
-  elif [[ "$(uname)" == "Darwin" ]]; then
-    OS_ID="macos"
-    OS_VERSION="$(sw_vers -productVersion)"
-  else
-    fail "Unsupported OS"
-  fi
+OS=""
+if [[ "$(uname)" == "Darwin" ]]; then
+  OS="macos"
+elif [[ -f /etc/os-release ]]; then
+  . /etc/os-release
+  case "${ID}" in
+    ubuntu|debian)           OS="debian" ;;
+    fedora|rhel|centos|rocky|alma) OS="fedora" ;;
+    arch|manjaro)            OS="arch" ;;
+    *)                       OS="debian" ; warn "Unknown distro '${ID}', trying Debian commands" ;;
+  esac
+else
+  fail "Cannot detect OS."
+fi
+echo "Detected: ${OS}"
+
+# ── Package install helpers ───────────────────────────────────────────
+pkg_install() {
+  case "${OS}" in
+    macos)  brew install "$@" ;;
+    debian) sudo apt-get install -y -qq "$@" ;;
+    fedora) sudo dnf install -y "$@" ;;
+    arch)   sudo pacman -Sy --noconfirm "$@" ;;
+  esac
 }
 
-detect_os
+pkg_update() {
+  case "${OS}" in
+    macos)  brew update ;;
+    debian) sudo apt-get update -qq ;;
+    fedora) sudo dnf check-update -q || true ;;
+    arch)   sudo pacman -Sy ;;
+  esac
+}
 
-if [[ "${OS_ID}" != "ubuntu" && "${OS_ID}" != "debian" ]]; then
-  fail "This script targets Ubuntu/Debian. Got: ${OS_ID}. Use install-mac.sh for macOS."
+# ── Homebrew (macOS only) ─────────────────────────────────────────────
+if [[ "${OS}" == "macos" ]]; then
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "Installing Homebrew..."
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  fi
+  ok "Homebrew"
 fi
 
-# ── System packages ───────────────────────────────────────────────────
 echo ""
-echo "=== Installing system packages ==="
+echo "=== Updating package index ==="
+pkg_update
 
-sudo apt-get update -qq
+# ── Python 3.12+ ─────────────────────────────────────────────────────
+echo ""
+echo "=== Python ==="
 
-# Python
+need_python=true
 if command -v python3 >/dev/null 2>&1; then
   PY_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
   if python3 -c "import sys; exit(0 if sys.version_info >= (3,12) else 1)"; then
-    ok "Python ${PY_VER} (>= ${PYTHON_MIN})"
+    ok "Python ${PY_VER}"
+    need_python=false
   else
-    warn "Python ${PY_VER} found but need >= ${PYTHON_MIN}"
-    sudo apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
+    warn "Python ${PY_VER} too old"
   fi
-else
-  sudo apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
 fi
 
-# pip / venv
-sudo apt-get install -y -qq python3-pip python3-venv
-
-# PostgreSQL
-if ! command -v psql >/dev/null 2>&1; then
-  echo "Installing PostgreSQL ${POSTGRES_VERSION}..."
-  sudo apt-get install -y -qq "postgresql-${POSTGRES_VERSION}" "postgresql-client-${POSTGRES_VERSION}" || \
-    sudo apt-get install -y -qq postgresql postgresql-client
-  ok "PostgreSQL installed"
-else
-  ok "PostgreSQL already installed: $(psql --version | head -1)"
+if $need_python; then
+  case "${OS}" in
+    macos)  brew install python@3.12 ;;
+    debian) pkg_install python3.12 python3.12-venv python3.12-dev || pkg_install python3 python3-venv python3-dev ;;
+    fedora) pkg_install python3.12 python3.12-devel || pkg_install python3 python3-devel ;;
+    arch)   pkg_install python ;;
+  esac
+  ok "Python installed"
 fi
 
-# Redis
-if ! command -v redis-server >/dev/null 2>&1; then
-  echo "Installing Redis..."
-  sudo apt-get install -y -qq redis-server
-  ok "Redis installed"
-else
-  ok "Redis already installed: $(redis-server --version | head -1)"
+# pip (non-mac)
+if [[ "${OS}" != "macos" ]] && ! command -v pip3 >/dev/null 2>&1; then
+  pkg_install python3-pip 2>/dev/null || true
 fi
 
-# ── Start services ────────────────────────────────────────────────────
+# ── PostgreSQL ────────────────────────────────────────────────────────
 echo ""
-echo "=== Starting services ==="
+echo "=== PostgreSQL ==="
 
-sudo systemctl enable --now postgresql 2>/dev/null || true
-sudo systemctl enable --now redis-server 2>/dev/null || true
+if command -v psql >/dev/null 2>&1; then
+  ok "PostgreSQL already installed: $(psql --version | head -1)"
+else
+  case "${OS}" in
+    macos)  brew install postgresql@${POSTGRES_VERSION} && brew services start postgresql@${POSTGRES_VERSION} ;;
+    debian) pkg_install "postgresql-${POSTGRES_VERSION}" "postgresql-client-${POSTGRES_VERSION}" || pkg_install postgresql postgresql-client ;;
+    fedora) pkg_install postgresql-server postgresql && sudo postgresql-setup --initdb 2>/dev/null || true ;;
+    arch)   pkg_install postgresql && sudo -u postgres initdb -D /var/lib/postgres/data 2>/dev/null || true ;;
+  esac
+  ok "PostgreSQL installed"
+fi
+
+# Start postgres
+case "${OS}" in
+  macos)  brew services start postgresql@${POSTGRES_VERSION} 2>/dev/null || true ;;
+  *)      sudo systemctl enable --now postgresql 2>/dev/null || true ;;
+esac
 
 # Wait for postgres
 for _ in {1..10}; do
-  if sudo -u postgres pg_isready -q 2>/dev/null; then break; fi
+  if [[ "${OS}" == "macos" ]]; then
+    pg_isready -q 2>/dev/null && break
+  else
+    sudo -u postgres pg_isready -q 2>/dev/null && break
+  fi
   sleep 1
 done
-sudo -u postgres pg_isready -q && ok "PostgreSQL running" || fail "PostgreSQL not ready"
 
-redis-cli ping >/dev/null 2>&1 && ok "Redis running" || fail "Redis not ready"
-
-# ── Create AGP database ──────────────────────────────────────────────
-echo ""
-echo "=== Setting up AGP database ==="
-
-if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='agp'" | grep -q 1; then
-  ok "User 'agp' exists"
+# Create agp user and database
+if [[ "${OS}" == "macos" ]]; then
+  createuser agp 2>/dev/null || true
+  createdb -O agp agp 2>/dev/null || true
+  psql -d agp -c "ALTER USER agp PASSWORD 'agp';" 2>/dev/null || true
 else
-  sudo -u postgres psql -c "CREATE USER agp WITH PASSWORD 'agp';"
-  ok "Created user 'agp'"
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='agp'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres psql -c "CREATE USER agp WITH PASSWORD 'agp';" 2>/dev/null
+  sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='agp'" 2>/dev/null | grep -q 1 || \
+    sudo -u postgres createdb -O agp agp
+  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE agp TO agp;" 2>/dev/null || true
+fi
+ok "Database 'agp' ready"
+
+# ── Redis ─────────────────────────────────────────────────────────────
+echo ""
+echo "=== Redis ==="
+
+if command -v redis-server >/dev/null 2>&1; then
+  ok "Redis already installed"
+else
+  case "${OS}" in
+    macos)  brew install redis ;;
+    debian) pkg_install redis-server ;;
+    fedora) pkg_install redis ;;
+    arch)   pkg_install redis ;;
+  esac
+  ok "Redis installed"
 fi
 
-if sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='agp'" | grep -q 1; then
-  ok "Database 'agp' exists"
+case "${OS}" in
+  macos)  brew services start redis 2>/dev/null || true ;;
+  *)      sudo systemctl enable --now redis-server 2>/dev/null || sudo systemctl enable --now redis 2>/dev/null || true ;;
+esac
+
+redis-cli ping >/dev/null 2>&1 && ok "Redis running" || warn "Redis not responding"
+
+# ── tmux ──────────────────────────────────────────────────────────────
+echo ""
+echo "=== tmux ==="
+
+if command -v tmux >/dev/null 2>&1; then
+  ok "tmux already installed: $(tmux -V)"
 else
-  sudo -u postgres createdb -O agp agp
-  ok "Created database 'agp'"
+  pkg_install tmux
+  ok "tmux installed"
 fi
 
-# Grant connect (idempotent)
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE agp TO agp;" 2>/dev/null || true
-
-# ── Install MinIO (optional, for S3 artifact backend) ────────────────
+# ── Node.js + Codex ──────────────────────────────────────────────────
 echo ""
-echo "=== MinIO (optional — for S3 artifact backend) ==="
+echo "=== Node.js + Codex ==="
+
+if command -v node >/dev/null 2>&1; then
+  ok "Node.js already installed: $(node --version)"
+else
+  case "${OS}" in
+    macos)  brew install node ;;
+    debian) curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - 2>/dev/null; pkg_install nodejs ;;
+    fedora) pkg_install nodejs ;;
+    arch)   pkg_install nodejs npm ;;
+  esac
+  ok "Node.js installed"
+fi
+
+if command -v codex >/dev/null 2>&1; then
+  ok "codex already installed"
+else
+  npm install -g @openai/codex 2>/dev/null && ok "codex installed" || \
+    sudo npm install -g @openai/codex 2>/dev/null && ok "codex installed" || \
+    warn "codex install failed — install manually: npm install -g @openai/codex"
+fi
+
+# ── MinIO ─────────────────────────────────────────────────────────────
+echo ""
+echo "=== MinIO (optional — S3 artifact backend) ==="
 
 if command -v minio >/dev/null 2>&1; then
   ok "MinIO already installed"
 else
-  ARCH="$(dpkg --print-architecture)"
-  MINIO_URL="https://dl.min.io/server/minio/release/linux-${ARCH}/archive/minio.${MINIO_VERSION}"
-  echo "Downloading MinIO ${MINIO_VERSION} (${ARCH})..."
-  sudo curl -fsSL "${MINIO_URL}" -o /usr/local/bin/minio
-  sudo chmod +x /usr/local/bin/minio
-  ok "MinIO ${MINIO_VERSION} installed"
+  case "${OS}" in
+    macos)
+      brew install minio/stable/minio && ok "MinIO installed" || warn "MinIO install failed"
+      ;;
+    debian|fedora|arch)
+      ARCH="$(uname -m)"
+      case "${ARCH}" in
+        x86_64)  MINIO_ARCH="amd64" ;;
+        aarch64) MINIO_ARCH="arm64" ;;
+        *)       MINIO_ARCH="${ARCH}" ;;
+      esac
+      MINIO_URL="https://dl.min.io/server/minio/release/linux-${MINIO_ARCH}/archive/minio.${MINIO_VERSION}"
+      echo "Downloading MinIO ${MINIO_VERSION} (${MINIO_ARCH})..."
+      sudo curl -fsSL "${MINIO_URL}" -o /usr/local/bin/minio && sudo chmod +x /usr/local/bin/minio && ok "MinIO installed" || warn "MinIO download failed"
+      ;;
+  esac
 fi
 
-# ── Install uv (Python package manager) ──────────────────────────────
+# ── uv ────────────────────────────────────────────────────────────────
 echo ""
-echo "=== Python tooling ==="
+echo "=== uv (Python package manager) ==="
 
 if command -v uv >/dev/null 2>&1; then
   ok "uv already installed: $(uv --version)"
 else
   curl -LsSf https://astral.sh/uv/install.sh | sh
   export PATH="$HOME/.local/bin:$PATH"
-  ok "uv installed: $(uv --version)"
+  ok "uv installed"
 fi
 
 # ── Install AGP ──────────────────────────────────────────────────────
 echo ""
 echo "=== Installing AGP ==="
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "${ROOT}"
-
-if [[ -f pyproject.toml ]]; then
-  uv pip install -e ".[server]" 2>/dev/null || pip install -e ".[server]"
-  ok "AGP installed from source with [server] extras"
+if command -v agp >/dev/null 2>&1 && command -v skyops >/dev/null 2>&1; then
+  ok "AGP already installed"
 else
-  pip install "agp[server]"
-  ok "AGP installed from PyPI"
+  ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  cd "${ROOT}"
+
+  if [[ -f pyproject.toml ]]; then
+    uv pip install -e ".[server]" 2>/dev/null || pip install -e ".[server]"
+    ok "AGP installed from source with [server] extras"
+  else
+    pip install "agp[server]"
+    ok "AGP installed from PyPI"
+  fi
 fi
 
 # ── Verify ────────────────────────────────────────────────────────────
 echo ""
 echo "=== Verification ==="
 
-agp --help >/dev/null 2>&1 && ok "agp CLI works" || warn "agp CLI not in PATH"
-skyops --help >/dev/null 2>&1 && ok "skyops CLI works" || warn "skyops CLI not in PATH"
+agp --help >/dev/null 2>&1      && ok "agp CLI"         || warn "agp not in PATH"
+skyops --help >/dev/null 2>&1   && ok "skyops CLI"       || warn "skyops not in PATH"
+tmux -V >/dev/null 2>&1         && ok "tmux"             || warn "tmux not in PATH"
+command -v codex >/dev/null 2>&1 && ok "codex"           || warn "codex not in PATH"
+redis-cli ping >/dev/null 2>&1  && ok "redis reachable"  || warn "redis not reachable"
+if [[ "${OS}" == "macos" ]]; then
+  pg_isready -q 2>/dev/null     && ok "postgres reachable" || warn "postgres not reachable"
+else
+  sudo -u postgres pg_isready -q 2>/dev/null && ok "postgres reachable" || warn "postgres not reachable"
+fi
 
 echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Server install complete."
 echo ""
-echo " Next: start the control plane:"
+echo " Next steps:"
 echo ""
-echo "   export AGP_HOST=0.0.0.0"
-echo "   export AGP_PORT=7860"
-echo "   export AGP_DATABASE_URL='postgresql+psycopg://agp:agp@localhost:5432/agp'"
-echo "   export AGP_QUEUE_BACKEND=redis"
-echo "   export AGP_REDIS_URL='redis://localhost:6379/0'"
-echo "   export AGP_ARTIFACT_BACKEND=localfs"
-echo "   export AGP_LOG_ROOT=/tmp/agp-logs"
-echo ""
-echo "   agp initdb"
-echo "   agp serve"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "   make initdb    # create database schema"
+echo "   make serve     # start CP + sweepers"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
