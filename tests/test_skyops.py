@@ -360,15 +360,18 @@ class TestHealth(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[stack]\nmode = 'bare-metal'\n[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._health.load_config", return_value=cfg):
-                with patch("skyops._health._probe_tcp", return_value=True):
-                    with patch("skyops._health._probe_http_health", return_value=True):
+            with patch("skyops._health.load_config", return_value=cfg), \
+                 patch("skyops._health._probe_tcp", return_value=True), \
+                 patch("skyops._health._probe_http_health", return_value=True), \
+                 patch("skyops._health._redis_ping", return_value=True), \
+                 patch("skyops._health._minio_bucket_access", return_value=True):
                         # Mock the AgpClient observability call
                         mock_client = unittest.mock.MagicMock()
                         mock_client.observability_summary.return_value = {
                             "total_jobs": 42,
                             "active_agents": 2,
                         }
+                        mock_client.list_agents.return_value = {"items": []}
                         mock_client.__enter__ = lambda s: mock_client
                         mock_client.__exit__ = lambda s, *a: None
                         with patch("skyops._client.build_client", return_value=mock_client):

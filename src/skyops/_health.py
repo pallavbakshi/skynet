@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import socket
 from urllib.parse import urlparse
 
 import typer
@@ -24,28 +23,37 @@ def health(ctx: typer.Context) -> None:
 
     checks: list[tuple[str, bool, str]] = []
 
-    # Database
+    # ── Database ──────────────────────────────────────────────────
     db_port = _port_from_url(cfg.database.url) or 5432
     db_ok = _probe_tcp("127.0.0.1", db_port)
     checks.append(("postgres", db_ok, f":{db_port}"))
 
-    # Redis
+    # ── Redis ─────────────────────────────────────────────────────
     redis_port = _port_from_url(cfg.redis.url) or 6379
-    redis_ok = _probe_tcp("127.0.0.1", redis_port)
-    checks.append(("redis", redis_ok, f":{redis_port}"))
+    redis_tcp = _probe_tcp("127.0.0.1", redis_port)
+    if redis_tcp:
+        redis_ok = _redis_ping(cfg.redis.url)
+        checks.append(("redis", redis_ok, f":{redis_port} PING"))
+    else:
+        checks.append(("redis", False, f":{redis_port}"))
 
-    # MinIO
+    # ── MinIO ─────────────────────────────────────────────────────
     minio_port = _port_from_url(cfg.s3.endpoint_url) or 9000
-    minio_ok = _probe_tcp("127.0.0.1", minio_port)
-    checks.append(("minio", minio_ok, f":{minio_port}"))
+    minio_tcp = _probe_tcp("127.0.0.1", minio_port)
+    if minio_tcp:
+        minio_ok = _minio_bucket_access(cfg)
+        detail = f":{minio_port} bucket={cfg.s3.bucket}"
+        checks.append(("minio", minio_ok, detail))
+    else:
+        checks.append(("minio", False, f":{minio_port}"))
 
-    # Control plane
+    # ── Control plane ─────────────────────────────────────────────
     cp_port = cfg.server.port
     cp_tcp = _probe_tcp("127.0.0.1", cp_port)
     cp_health = _probe_http_health(f"http://127.0.0.1:{cp_port}/health") if cp_tcp else False
     checks.append(("control-plane", cp_health, f":{cp_port} /health"))
 
-    # Control plane API (deeper check via AgpClient)
+    # ── API + runtime heartbeats ──────────────────────────────────
     if cp_health:
         try:
             from skyops._client import build_client
@@ -55,6 +63,18 @@ def health(ctx: typer.Context) -> None:
                 jobs_total = summary.get("total_jobs", "?")
                 agents_active = summary.get("active_agents", "?")
                 checks.append(("  api", True, f"jobs={jobs_total} agents={agents_active}"))
+
+                # Check runtime heartbeat freshness
+                agents = client.list_agents(limit=200)
+                stale_runtimes: list[str] = []
+                for agent in agents.get("items", []):
+                    rt_id = agent.get("assigned_runtime_id")
+                    if rt_id and agent.get("health_status") in ("degraded", "unreachable"):
+                        stale_runtimes.append(rt_id)
+                if stale_runtimes:
+                    checks.append(("  runtimes", False, f"stale heartbeats: {', '.join(stale_runtimes)}"))
+                else:
+                    checks.append(("  runtimes", True, "heartbeats OK"))
         except Exception as e:
             checks.append(("  api", False, str(e)))
 
@@ -77,3 +97,34 @@ def health(ctx: typer.Context) -> None:
 def _port_from_url(url: str) -> int | None:
     parsed = urlparse(url)
     return parsed.port
+
+
+def _redis_ping(redis_url: str) -> bool:
+    """Attempt a Redis PING command."""
+    try:
+        import redis
+
+        r = redis.from_url(redis_url, socket_timeout=2.0)
+        return r.ping()
+    except Exception:
+        return False
+
+
+def _minio_bucket_access(cfg) -> bool:
+    """Check MinIO bucket exists and is accessible with configured credentials."""
+    try:
+        import boto3
+        from botocore.config import Config as BotoConfig
+
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=cfg.s3.endpoint_url,
+            aws_access_key_id=cfg.s3.access_key_id,
+            aws_secret_access_key=cfg.s3.secret_access_key,
+            region_name="us-east-1",
+            config=BotoConfig(signature_version="s3v4"),
+        )
+        s3.head_bucket(Bucket=cfg.s3.bucket)
+        return True
+    except Exception:
+        return False

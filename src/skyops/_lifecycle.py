@@ -95,23 +95,50 @@ def _wait_http(url: str, label: str, timeout: float = 30.0) -> None:
     raise RuntimeError(f"{label} did not become healthy at {url} within {timeout}s")
 
 
+def _bare_metal_start_service(cfg: SkyopsConfig, service: str, host: str, port: int) -> None:
+    """Start a single bare-metal service by name."""
+    service_map = {
+        "control-plane": lambda: (
+            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane"),
+            _wait_http(f"http://127.0.0.1:{port}/health", "control-plane"),
+        ),
+        "lease-sweeper": lambda: _start_bg(
+            ["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper",
+        ),
+        "runtime-sweeper": lambda: _start_bg(
+            ["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper",
+        ),
+        "runtime": lambda: _start_bg(
+            ["agp", "runtime-work-loop", "rtm_local",
+             "--server-url", f"http://127.0.0.1:{port}",
+             "--agent-id", next(iter(cfg.agents), "agt_local"),
+             "--host-kind", cfg.runtime.host_kind,
+             "--adapter-kind", cfg.runtime.adapter_kind],
+            "runtime",
+        ),
+        "postgres": lambda: typer.echo("postgres must be started externally in bare-metal mode"),
+        "redis": lambda: typer.echo("redis must be started externally in bare-metal mode"),
+        "minio": lambda: typer.echo("minio must be started externally in bare-metal mode"),
+    }
+    # Also accept aliases
+    service_map["sweep-loop"] = service_map["lease-sweeper"]
+    service_map["sweep-runtimes-loop"] = service_map["runtime-sweeper"]
+
+    starter = service_map.get(service)
+    if starter is None:
+        typer.echo(f"Unknown service: {service}", err=True)
+        typer.echo(f"Available: {', '.join(sorted(service_map))}")
+        raise typer.Exit(1)
+    starter()
+
+
 def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
     """Start bare-metal services. If *service* is given, start only that one."""
     port = cfg.server.port
     host = cfg.server.host
 
     if service:
-        # Single service start
-        if service == "control-plane":
-            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane")
-            _wait_http(f"http://127.0.0.1:{port}/health", "control-plane")
-        elif service == "sweep-loop":
-            _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper")
-        elif service == "sweep-runtimes-loop":
-            _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper")
-        else:
-            typer.echo(f"Unknown service: {service}", err=True)
-            raise typer.Exit(1)
+        _bare_metal_start_service(cfg, service, host, port)
         return
 
     # Full stack startup

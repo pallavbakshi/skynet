@@ -262,6 +262,14 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def get_runtime(self, runtime_id: str) -> dict | None:
+        """Get a runtime by ID. Returns None if not found."""
+        response = self._client.get(f"/runtimes/{runtime_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()["data"]
+
     def logs_control_plane(self, *, limit: int = 100) -> dict:
         response = self._client.get("/observability/logs/control-plane", params={"limit": limit})
         response.raise_for_status()

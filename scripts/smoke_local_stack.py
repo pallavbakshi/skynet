@@ -30,9 +30,9 @@ def _assert_bucket_not_public() -> None:
             return  # expected: access denied
         raise RuntimeError(f"unexpected HTTP {e.code} checking bucket policy") from e
     except URLError as e:
-        # Connection refused means MinIO is unreachable — warn instead of silently passing
-        import sys
-        print(f"WARNING: could not reach MinIO at {url} to verify bucket policy: {e}", file=sys.stderr)
+        raise RuntimeError(
+            f"MinIO unreachable at {url} — cannot verify bucket policy: {e}"
+        ) from e
 
 
 def _agent_id() -> str:

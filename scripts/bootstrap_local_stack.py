@@ -4,8 +4,6 @@ from __future__ import annotations
 import os
 import time
 
-import httpx
-
 from agp.client import AgpClient, AgpProfile
 from agp.db import SessionLocal, init_db
 from agp.models import Capability, CapabilityPool, utc_now
@@ -86,9 +84,7 @@ def ensure_agent() -> None:
                 # Agent doesn't exist yet — register via SDK
                 assigned_runtime_id = _bootstrap_runtime_id()
                 if assigned_runtime_id:
-                    try:
-                        client._client.get(f"/runtimes/{assigned_runtime_id}").raise_for_status()
-                    except httpx.HTTPStatusError:
+                    if client.get_runtime(assigned_runtime_id) is None:
                         assigned_runtime_id = None
                 client.register_agent(
                     _bootstrap_agent_id(),

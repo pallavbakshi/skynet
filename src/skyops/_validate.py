@@ -146,36 +146,140 @@ def smoke() -> None:
 @validate_app.command("k8s-smoke")
 def k8s_smoke(
     cluster_name: str = typer.Option("agp-phase3", "--cluster", help="Kind cluster name."),
-    image: str = typer.Option("agp:dev", "--image", help="Docker image to build and load."),
+    image: str = typer.Option("agp:latest", "--image", help="Docker image to build and load."),
+    overlay: str = typer.Option("k8s/overlays/kind", "--overlay", help="Kustomize overlay path."),
+    timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds for each wait step."),
+    skip_build: bool = typer.Option(False, "--skip-build", help="Skip image build."),
+    skip_load: bool = typer.Option(False, "--skip-load", help="Skip image load into kind."),
 ) -> None:
     """Full kind cluster lifecycle + smoke test.
 
-    Creates a kind cluster, builds the image, deploys, and runs smoke tests.
+    Creates a kind cluster, builds the image, deploys, waits for bootstrap,
+    runs a smoke job, and validates it succeeds.
     """
-    typer.echo(f"Creating kind cluster: {cluster_name}...")
-    # Delete existing cluster if present
+    kctl = ["kubectl"]
+
+    # ── Cluster setup ─────────────────────────────────────────────
+    typer.echo(f"[1/7] Creating kind cluster: {cluster_name}...")
     subprocess.run(["kind", "delete", "cluster", "--name", cluster_name], capture_output=True)
     subprocess.run(["kind", "create", "cluster", "--name", cluster_name], check=True)
 
-    typer.echo(f"Building image: {image}...")
-    subprocess.run(["docker", "build", "-t", image, "."], check=True)
+    if not skip_build:
+        typer.echo(f"[2/7] Building image: {image}...")
+        subprocess.run(["docker", "build", "-t", image, "."], check=True)
+    else:
+        typer.echo("[2/7] Skipping image build.")
 
-    typer.echo("Loading image into kind cluster...")
-    subprocess.run(["kind", "load", "docker-image", image, "--name", cluster_name], check=True)
+    if not skip_load:
+        typer.echo("[3/7] Loading image into kind cluster...")
+        subprocess.run(["kind", "load", "docker-image", image, "--name", cluster_name], check=True)
+    else:
+        typer.echo("[3/7] Skipping image load.")
 
-    typer.echo("Applying k8s manifests...")
-    subprocess.run(
-        ["kubectl", "apply", "-k", "k8s/overlays/kind", "--wait=true"],
-        check=True,
+    # ── Apply manifests ───────────────────────────────────────────
+    typer.echo("[4/7] Applying k8s manifests...")
+    subprocess.run(kctl + ["delete", "namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
+    rendered = subprocess.run(
+        kctl + ["kustomize", overlay, "--load-restrictor=LoadRestrictionsNone"],
+        capture_output=True, text=True, check=True,
     )
+    subprocess.run(kctl + ["apply", "-f", "-"], input=rendered.stdout, text=True, check=True)
 
-    typer.echo("Waiting for deployments...")
-    for deploy in ["control-plane", "lease-sweeper", "runtime-sweeper"]:
+    # ── Wait for core services ────────────────────────────────────
+    typer.echo("[5/7] Waiting for core services...")
+    for deploy in ["postgres", "minio", "redis", "control-plane"]:
         subprocess.run(
-            ["kubectl", "rollout", "status", f"deployment/{deploy}",
-             "-n", "agp", "--timeout=120s"],
+            kctl + ["wait", "--namespace", "agp", "--for=condition=available",
+                    f"deployment/{deploy}", f"--timeout={timeout}s"],
             check=True,
         )
 
-    typer.echo("K8s smoke test complete.")
-    typer.echo(f"Cluster {cluster_name} is running. Clean up with: kind delete cluster --name {cluster_name}")
+    # ── Wait for bootstrap job ────────────────────────────────────
+    typer.echo("[6/7] Waiting for bootstrap job...")
+    import time as _time
+    deadline = _time.monotonic() + timeout
+    bootstrap_ok = False
+    while _time.monotonic() < deadline:
+        result = subprocess.run(
+            kctl + ["get", "job", "agp-bootstrap", "--namespace", "agp",
+                    "-o", "jsonpath={.status.succeeded}"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip() == "1":
+            bootstrap_ok = True
+            break
+        _time.sleep(2)
+    if not bootstrap_ok:
+        subprocess.run(kctl + ["logs", "job/agp-bootstrap", "--namespace", "agp", "--tail=50"])
+        typer.echo("Bootstrap job did not succeed.", err=True)
+        raise typer.Exit(1)
+
+    for deploy in ["lease-sweeper", "runtime-sweeper", "runtime"]:
+        subprocess.run(
+            kctl + ["wait", "--namespace", "agp", "--for=condition=available",
+                    f"deployment/{deploy}", f"--timeout={timeout}s"],
+            check=True,
+        )
+
+    # ── Run smoke job ─────────────────────────────────────────────
+    typer.echo("[7/7] Running smoke job...")
+    smoke_manifest = """\
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agp-smoke
+  namespace: agp
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: agp-smoke
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: {image}
+          imagePullPolicy: Never
+          command: ["python", "/app/scripts/smoke_local_stack.py"]
+          envFrom:
+            - configMapRef:
+                name: agp-config
+            - secretRef:
+                name: agp-secrets
+""".format(image=image)
+    subprocess.run(kctl + ["delete", "job", "agp-smoke", "--namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
+    subprocess.run(kctl + ["apply", "-f", "-"], input=smoke_manifest, text=True, check=True)
+
+    deadline = _time.monotonic() + timeout
+    smoke_ok = False
+    while _time.monotonic() < deadline:
+        result = subprocess.run(
+            kctl + ["get", "job", "agp-smoke", "--namespace", "agp",
+                    "-o", "jsonpath={.status.succeeded}"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip() == "1":
+            smoke_ok = True
+            break
+        # Check for failure
+        fail_result = subprocess.run(
+            kctl + ["get", "job", "agp-smoke", "--namespace", "agp",
+                    "-o", "jsonpath={.status.failed}"],
+            capture_output=True, text=True,
+        )
+        if fail_result.stdout.strip() not in ("", "0"):
+            subprocess.run(kctl + ["logs", "job/agp-smoke", "--namespace", "agp", "--tail=50"])
+            typer.echo("Smoke job failed.", err=True)
+            raise typer.Exit(1)
+        _time.sleep(2)
+
+    if not smoke_ok:
+        subprocess.run(kctl + ["logs", "job/agp-smoke", "--namespace", "agp", "--tail=50"])
+        typer.echo("Smoke job did not succeed before timeout.", err=True)
+        raise typer.Exit(1)
+
+    typer.echo("")
+    typer.echo("Kubernetes smoke passed.")
+    typer.echo(f"Cluster: {cluster_name}")
+    typer.echo(f"Clean up: kind delete cluster --name {cluster_name}")
