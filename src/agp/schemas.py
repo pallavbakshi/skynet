@@ -134,6 +134,15 @@ class HandoffRequest(BaseModel):
     artifact_ids: list[str] = Field(default_factory=list)
 
 
+class ArtifactUploadRequest(BaseModel):
+    namespace: str
+    job_id: str
+    name: str
+    content: str
+    role: str
+    content_type: str = "text/plain"
+
+
 class CapabilitySeedRequest(BaseModel):
     capability_id: str
     name: str

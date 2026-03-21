@@ -401,6 +401,61 @@ class S3ArtifactStore:
             return False
 
 
+class HttpProxyArtifactStore:
+    """Artifact store that uploads through the control plane API.
+
+    Remote runtimes use this so they only need ``--server-url`` —
+    no S3 credentials required.  The CP writes to its own storage backend.
+    """
+
+    name = "http"
+
+    def __init__(self, server_url: str, timeout: float = 30.0) -> None:
+        import httpx
+        self._server_url = server_url.rstrip("/")
+        self._client = httpx.Client(base_url=self._server_url, timeout=timeout)
+
+    def write_text(
+        self,
+        *,
+        namespace: str,
+        job_id: str,
+        name: str,
+        content: str,
+        role: str,
+        content_type: str = "text/plain",
+    ) -> StoredArtifact:
+        checksum, size_bytes = _checksum_text(content)
+        response = self._client.post(
+            "/artifacts/upload",
+            json={
+                "namespace": namespace,
+                "job_id": job_id,
+                "name": name,
+                "content": content,
+                "role": role,
+                "content_type": content_type,
+            },
+        )
+        response.raise_for_status()
+        data = response.json()["data"]
+        return StoredArtifact(
+            role=data["role"],
+            storage_ref=data["storage_ref"],
+            content_type=data["content_type"],
+            checksum=data["checksum"],
+            size_bytes=data["size_bytes"],
+        )
+
+    def read_text(self, *, storage_ref: str) -> str | None:
+        # Reading is done through the CP's /artifacts/{id}/content endpoint,
+        # not through the store directly.
+        return None
+
+    def exists(self, *, storage_ref: str) -> bool:
+        return True  # Trust the CP — it wrote the ref
+
+
 _INMEMORY_ARTIFACT_STORE = InMemoryArtifactStore()
 
 
@@ -409,13 +464,17 @@ def reset_artifact_store_state(name: str | None = None) -> None:
         _INMEMORY_ARTIFACT_STORE.reset()
 
 
-def get_artifact_store(name: str, root: str | Path) -> ArtifactStore:
+def get_artifact_store(name: str, root: str | Path, *, server_url: str | None = None) -> ArtifactStore:
     if name == "localfs":
         return LocalFsArtifactStore(root)
     if name == "sharedfs":
         return SharedFsArtifactStore(root)
     if name == "registryfs":
         return RegistryFsArtifactStore(root)
+    if name == "http":
+        if not server_url:
+            raise ValueError("http artifact backend requires server_url")
+        return HttpProxyArtifactStore(server_url)
     if name == "s3":
         from agp.config import settings
 

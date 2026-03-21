@@ -114,7 +114,10 @@ class RuntimeSupervisor:
         self.host = host
         self.adapter = adapter
         self.artifact_root = Path(artifact_root)
-        self.artifact_store = artifact_store or get_artifact_store(settings.artifact_backend, self.artifact_root)
+        self.artifact_store = artifact_store or get_artifact_store(
+            settings.artifact_backend, self.artifact_root,
+            server_url=client.identity.server_url,
+        )
 
     def _write_artifact(self, *, job_id: str, payload: ArtifactPayload) -> dict[str, Any]:
         stored = self.artifact_store.write_text(

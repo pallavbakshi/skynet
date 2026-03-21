@@ -51,6 +51,7 @@ from agp.queue_backend import QueueDelivery, get_queue_backend
 from agp.schemas import (
     AgentDownRequest,
     AgentUpRequest,
+    ArtifactUploadRequest,
     CancelRunRequest,
     CapabilitySeedRequest,
     ClaimRunRequest,
@@ -2227,6 +2228,32 @@ def get_artifact_content(
             payload["content"] = content
             payload["has_more"] = False
     return _ok(payload)
+
+
+@router.post("/artifacts/upload", response_model=dict)
+def upload_artifact(request: ArtifactUploadRequest) -> dict:
+    """Upload artifact content through the control plane.
+
+    The CP writes the artifact to its own storage backend (S3, localfs, etc.)
+    and returns the storage metadata.  This allows remote runtimes to store
+    artifacts without needing direct S3 credentials.
+    """
+    store = _artifact_store()
+    stored = store.write_text(
+        namespace=request.namespace,
+        job_id=request.job_id,
+        name=request.name,
+        content=request.content,
+        role=request.role,
+        content_type=request.content_type,
+    )
+    return _ok({
+        "storage_ref": stored.storage_ref,
+        "checksum": stored.checksum,
+        "size_bytes": stored.size_bytes,
+        "role": stored.role,
+        "content_type": stored.content_type,
+    })
 
 
 @router.get("/observability/summary", response_model=dict)
