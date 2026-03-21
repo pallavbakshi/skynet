@@ -1,4 +1,4 @@
-"""Tests for the skyops CLI — Phase B: skeleton, config, init, status."""
+"""Tests for the skyops CLI — Phases B & C."""
 
 from __future__ import annotations
 
@@ -243,6 +243,160 @@ class TestStatus(unittest.TestCase):
             self.assertIn("SERVICE", result.output)
             self.assertIn("postgres", result.output)
             self.assertIn("control-plane", result.output)
+
+
+# ── Phase C: lifecycle, db, health ────────────────────────────────
+
+
+class TestLifecycleDockerUp(unittest.TestCase):
+    def test_up_docker_calls_compose(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text(textwrap.dedent("""\
+                [stack]
+                mode = "docker"
+                compose_file = "compose.phase3.yaml"
+                project_name = "agp"
+            """))
+            cfg = load_config(toml_path)
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["up"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            # Check that docker compose up was called
+            calls = mock_sub.run.call_args_list
+            self.assertTrue(any("up" in str(c) for c in calls))
+
+    def test_down_docker_calls_compose(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["down"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            calls = mock_sub.run.call_args_list
+            self.assertTrue(any("down" in str(c) for c in calls))
+
+    def test_restart_docker(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["restart"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            calls = mock_sub.run.call_args_list
+            # Should have both down and up calls
+            call_str = str(calls)
+            self.assertIn("down", call_str)
+            self.assertIn("up", call_str)
+
+
+class TestLifecycleDockerSingleService(unittest.TestCase):
+    def test_up_single_service(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["up", "control-plane"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            # Should include the service name
+            call_args = mock_sub.run.call_args_list[0][0][0]
+            self.assertIn("control-plane", call_args)
+
+
+class TestDbSeed(unittest.TestCase):
+    def test_db_init_docker_mode(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._db.load_config", return_value=cfg):
+                with patch("skyops._db.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["db", "init"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("initialized", result.output.lower())
+
+
+class TestHealth(unittest.TestCase):
+    def test_health_all_down(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'bare-metal'\n[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._health.load_config", return_value=cfg):
+                with patch("skyops._health._probe_tcp", return_value=False):
+                    with patch("skyops._health._probe_http_health", return_value=False):
+                        result = runner.invoke(app, ["health"])
+            self.assertEqual(result.exit_code, 1)
+            self.assertIn("FAIL", result.output)
+
+    def test_health_all_up(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'bare-metal'\n[server]\nport = 7860\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._health.load_config", return_value=cfg):
+                with patch("skyops._health._probe_tcp", return_value=True):
+                    with patch("skyops._health._probe_http_health", return_value=True):
+                        # Mock the AgpClient observability call
+                        mock_client = unittest.mock.MagicMock()
+                        mock_client.observability_summary.return_value = {
+                            "total_jobs": 42,
+                            "active_agents": 2,
+                        }
+                        mock_client.__enter__ = lambda s: mock_client
+                        mock_client.__exit__ = lambda s, *a: None
+                        with patch("agp.client.AgpClient", return_value=mock_client):
+                            result = runner.invoke(app, ["health"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("PASS", result.output)
+            self.assertIn("All checks passed", result.output)
+
+
+class TestWriteProfile(unittest.TestCase):
+    def test_write_profile_creates_file(self):
+        import tempfile
+
+        from skyops._lifecycle import _write_profile
+
+        cfg = SkyopsConfig()
+        cfg.server.port = 9999
+        cfg.security.operator_token = "tok123"
+
+        with tempfile.TemporaryDirectory() as td:
+            profiles_dir = Path(td) / ".agp" / "profiles"
+            with patch("skyops._lifecycle.Path.home", return_value=Path(td)):
+                _write_profile(cfg)
+            profile = profiles_dir / "default.toml"
+            self.assertTrue(profile.exists())
+            content = profile.read_text()
+            self.assertIn("9999", content)
+            self.assertIn("tok123", content)
 
 
 if __name__ == "__main__":
