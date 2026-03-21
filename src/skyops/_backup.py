@@ -37,6 +37,40 @@ def backup_restore(
     typer.echo("Restore complete.")
 
 
+@backup_app.command("list")
+def backup_list(
+    path: str = typer.Argument("./backups", help="Directory containing backup snapshots."),
+) -> None:
+    """List available backup snapshots."""
+    from pathlib import Path
+
+    backup_dir = Path(path)
+    if not backup_dir.is_dir():
+        typer.echo(f"Backup directory not found: {path}", err=True)
+        raise typer.Exit(1)
+
+    snapshots: list[dict] = []
+    for manifest_path in sorted(backup_dir.rglob("manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            snapshots.append({
+                "path": str(manifest_path.parent),
+                "database_url": manifest.get("database_url", "?"),
+                "artifact_backend": manifest.get("artifact_backend", "?"),
+            })
+        except Exception:
+            continue
+
+    if not snapshots:
+        typer.echo("No backup snapshots found.")
+        return
+
+    typer.echo(f"Found {len(snapshots)} backup(s):")
+    for snap in snapshots:
+        typer.echo(f"  {snap['path']}")
+    _emit(snapshots)
+
+
 @backup_app.command("validate")
 def backup_validate(
     limit: int | None = typer.Option(None, "--limit", help="Max artifacts to check."),

@@ -7,6 +7,7 @@ import typer
 from skyops._init_cmd import init_app
 from skyops._status import status_app
 from skyops._config_cmd import config_app
+from skyops._infra import deps_app
 from skyops._lifecycle import lifecycle_app
 from skyops._db import db_app
 from skyops._health import health_app
@@ -17,7 +18,9 @@ from skyops._security import security_app
 from skyops._upgrade import upgrade_app
 from skyops._drill import drill_app
 from skyops._plugins import host_app, adapter_app, plugin_app
-from skyops._queue import queue_app, sweep_app
+from skyops._queue import queue_app, job_app, sweep_app
+from skyops._validate import validate_app
+from skyops._runtime_debug import runtime_debug_app
 
 app = typer.Typer(
     name="skyops",
@@ -29,6 +32,7 @@ app = typer.Typer(
 app.add_typer(init_app, name="init", invoke_without_command=True)
 app.add_typer(config_app, name="config")
 app.add_typer(status_app, name="status", invoke_without_command=True)
+app.add_typer(deps_app, name="deps")
 
 # Phase C: lifecycle
 app.add_typer(lifecycle_app)
@@ -47,7 +51,10 @@ app.add_typer(host_app, name="host")
 app.add_typer(adapter_app, name="adapter")
 app.add_typer(plugin_app, name="plugin")
 app.add_typer(queue_app, name="queue")
+app.add_typer(job_app, name="job")
 app.add_typer(sweep_app, name="sweep")
+app.add_typer(validate_app)
+app.add_typer(runtime_debug_app, name="runtime")
 
 if __name__ == "__main__":
     app()

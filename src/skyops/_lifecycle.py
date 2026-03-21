@@ -27,6 +27,18 @@ def _compose_cmd(cfg: SkyopsConfig) -> list[str]:
     ]
 
 
+def _is_first_boot(cfg: SkyopsConfig) -> bool:
+    """Check if this is the first boot by looking for a marker file."""
+    marker = Path(cfg._config_path.parent / ".skyops-initialized") if cfg._config_path else Path(".skyops-initialized")
+    return not marker.exists()
+
+
+def _mark_initialized(cfg: SkyopsConfig) -> None:
+    """Write a marker file indicating the stack has been initialized."""
+    marker = Path(cfg._config_path.parent / ".skyops-initialized") if cfg._config_path else Path(".skyops-initialized")
+    marker.write_text("initialized\n")
+
+
 def _docker_up(cfg: SkyopsConfig, service: str | None, build: bool) -> None:
     cmd = _compose_cmd(cfg) + ["up", "-d"]
     if build:
@@ -115,17 +127,43 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
         else:
             typer.echo(f"  WARNING: {label} not reachable on :{p}")
 
-    # Init DB
-    typer.echo("Initializing database...")
-    subprocess.run(["agp", "initdb"], check=True)
+    first_boot = _is_first_boot(cfg)
+
+    # Init DB (only on first boot)
+    if first_boot:
+        typer.echo("First boot detected — initializing database...")
+        subprocess.run(["agp", "initdb"], check=True)
 
     # Start control plane
     _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane")
     _wait_http(f"http://127.0.0.1:{port}/health", "control-plane")
 
+    # Seed on first boot
+    if first_boot:
+        typer.echo("Seeding data from skyops.toml...")
+        from skyops._db import db_seed
+        try:
+            db_seed()
+        except Exception as e:
+            typer.echo(f"  Seeding warning: {e}")
+        _mark_initialized(cfg)
+
     # Start sweepers
     _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper")
     _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper")
+
+    # Start runtime work loop if agents are configured
+    if cfg.agents:
+        agent_id = next(iter(cfg.agents))
+        runtime_id = "rtm_local"
+        _start_bg(
+            ["agp", "runtime-work-loop", runtime_id,
+             "--server-url", f"http://127.0.0.1:{port}",
+             "--agent-id", agent_id,
+             "--host-kind", cfg.runtime.host_kind,
+             "--adapter-kind", cfg.runtime.adapter_kind],
+            "runtime",
+        )
 
     typer.echo("Stack is up.")
 
@@ -180,11 +218,27 @@ def up(
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_up(cfg, service, build)
+        # First-boot: the compose bootstrap service handles db init + seed,
+        # but mark initialized so bare-metal mode knows too
+        if not service and _is_first_boot(cfg):
+            _mark_initialized(cfg)
     else:
         _bare_metal_up(cfg, service)
 
     if not service:
         _write_profile(cfg)
+
+
+@lifecycle_app.command("ps")
+def ps() -> None:
+    """Show detailed process list with resource usage."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        cmd = _compose_cmd(cfg) + ["ps", "-a"]
+        subprocess.run(cmd)
+    else:
+        typer.echo("AGP processes:")
+        subprocess.run("ps aux | head -1; ps aux | grep '[a]gp'", shell=True)
 
 
 @lifecycle_app.command("down")

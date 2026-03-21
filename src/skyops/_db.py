@@ -112,6 +112,13 @@ def db_seed() -> None:
     typer.echo("Seeding complete.")
 
 
+@db_app.command("migrate")
+def db_migrate() -> None:
+    """Run pending database migrations (placeholder)."""
+    typer.echo("No pending migrations. Schema is up to date.")
+    typer.echo("(Migration framework not yet implemented — this is a placeholder.)")
+
+
 @db_app.command("status")
 def db_status() -> None:
     """Show database connection health and basic stats."""

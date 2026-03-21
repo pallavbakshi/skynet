@@ -559,13 +559,151 @@ class TestCLIHelp(unittest.TestCase):
         result = runner.invoke(app, ["--help"])
         self.assertEqual(result.exit_code, 0, result.output)
         for cmd in [
-            "init", "config", "status", "up", "down", "restart",
+            "init", "config", "status", "deps", "up", "down", "restart", "ps",
             "db", "health", "send", "watch", "jobs", "agents",
             "interrupt", "fetch", "deliveries", "metrics", "alerts",
             "trace", "logs", "backup", "secrets", "upgrade", "drill",
-            "host", "adapter", "plugin", "queue", "sweep",
+            "host", "adapter", "plugin", "queue", "job", "sweep",
+            "validate", "smoke", "k8s-smoke", "runtime",
         ]:
             self.assertIn(cmd, result.output, f"Command '{cmd}' not found in --help output")
+
+
+# ── Gap fixes: new commands ──────────────────────────────────────
+
+
+class TestDepsCheck(unittest.TestCase):
+    def test_deps_check(self):
+        result = runner.invoke(app, ["deps", "check"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("DEPENDENCY", result.output)
+        self.assertIn("docker", result.output)
+
+
+class TestDbMigrate(unittest.TestCase):
+    def test_db_migrate_placeholder(self):
+        result = runner.invoke(app, ["db", "migrate"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("placeholder", result.output.lower())
+
+
+class TestBackupList(unittest.TestCase):
+    def test_backup_list_no_dir(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            result = runner.invoke(app, ["backup", "list", f"{td}/nonexistent"])
+        self.assertEqual(result.exit_code, 1)
+
+    def test_backup_list_empty(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            result = runner.invoke(app, ["backup", "list", td])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("No backup", result.output)
+
+
+class TestSecretsGenerateK8s(unittest.TestCase):
+    def test_generate_k8s(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[security]\noperator_token = 'tok'\n[s3]\naccess_key_id = 'ak'\nsecret_access_key = 'sk'\n")
+            cfg = load_config(toml_path)
+            out_path = Path(td) / "secret.yaml"
+            with patch("skyops._security.load_config", return_value=cfg):
+                result = runner.invoke(app, ["secrets", "generate-k8s", str(out_path)])
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertTrue(out_path.exists())
+            content = out_path.read_text()
+            self.assertIn("apiVersion: v1", content)
+            self.assertIn("agp-secrets", content)
+
+
+class TestValidateCommand(unittest.TestCase):
+    def test_validate_with_mocked_docker(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\ncompose_file = 'compose.phase3.yaml'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._validate.load_config", return_value=cfg):
+                with patch("skyops._validate.shutil") as mock_shutil:
+                    mock_shutil.which.return_value = None  # no docker/kubectl
+                    result = runner.invoke(app, ["validate"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("ok", result.output)
+
+
+class TestSweepIdle(unittest.TestCase):
+    def test_sweep_idle_subcommand_exists(self):
+        result = runner.invoke(app, ["sweep", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("idle", result.output)
+        self.assertIn("draining", result.output)
+
+
+class TestJobSubcommands(unittest.TestCase):
+    def test_job_subcommand_exists(self):
+        result = runner.invoke(app, ["job", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("block", result.output)
+        self.assertIn("unblock", result.output)
+
+
+class TestQueueRedrive(unittest.TestCase):
+    def test_queue_redrive_subcommand_exists(self):
+        result = runner.invoke(app, ["queue", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("redrive", result.output)
+        self.assertIn("reconstruct", result.output)
+
+
+class TestRuntimeDebug(unittest.TestCase):
+    def test_runtime_subcommands_exist(self):
+        result = runner.invoke(app, ["runtime", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("register", result.output)
+        self.assertIn("claim", result.output)
+        self.assertIn("work-once", result.output)
+
+
+class TestLogsFollow(unittest.TestCase):
+    def test_logs_service_subcommand_exists(self):
+        result = runner.invoke(app, ["logs", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("service", result.output)
+        self.assertIn("control-plane", result.output)
+        self.assertIn("runtime", result.output)
+        self.assertIn("prune", result.output)
+
+
+class TestInitChecksDeps(unittest.TestCase):
+    def test_init_reports_deps(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            result = runner.invoke(app, ["init", "--dir", td, "--mode", "docker"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Checking dependencies", result.output)
+
+
+class TestPsCommand(unittest.TestCase):
+    def test_ps_docker_mode(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text("[stack]\nmode = 'docker'\n")
+            cfg = load_config(toml_path)
+            with patch("skyops._lifecycle.load_config", return_value=cfg):
+                with patch("skyops._lifecycle.subprocess") as mock_sub:
+                    mock_sub.run.return_value = None
+                    result = runner.invoke(app, ["ps"])
+        self.assertEqual(result.exit_code, 0, result.output)
 
 
 if __name__ == "__main__":

@@ -94,6 +94,39 @@ def secrets_generate() -> None:
     typer.echo("  operator_token, runtime_token, s3.access_key_id, s3.secret_access_key")
 
 
+@security_app.command("generate-k8s")
+def secrets_generate_k8s(
+    path: str = typer.Argument("/tmp/agp-k8s-secret.dev.yaml", help="Output path for k8s Secret YAML."),
+) -> None:
+    """Generate a Kubernetes Secret manifest with current credentials."""
+    cfg = load_config()
+    from pathlib import Path
+
+    db_url = cfg.database.url
+    s3_access_key = cfg.s3.access_key_id
+    s3_secret_key = cfg.s3.secret_access_key
+    operator_token = cfg.security.operator_token
+    runtime_token = cfg.security.runtime_token
+
+    yaml_content = f"""\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: agp-secrets
+  namespace: agp
+type: Opaque
+stringData:
+  AGP_DATABASE_URL: "{db_url}"
+  AGP_S3_ACCESS_KEY_ID: "{s3_access_key}"
+  AGP_S3_SECRET_ACCESS_KEY: "{s3_secret_key}"
+  AGP_OPERATOR_TOKEN_ROLES_JSON: '{{}}'
+  AGP_RUNTIME_ACTIVE_TOKENS_JSON: '[]'
+  AGP_OBSERVABILITY_ALERT_WEBHOOK_URL: ""
+"""
+    Path(path).write_text(yaml_content)
+    typer.echo(f"Kubernetes Secret written to {path}")
+
+
 @security_app.command("rotate-operator")
 def rotate_operator() -> None:
     """Rotate operator tokens via the control plane API."""

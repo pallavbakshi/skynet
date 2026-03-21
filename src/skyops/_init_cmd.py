@@ -73,6 +73,15 @@ def _detect_os_info() -> str:
     return f"{platform.system()} {platform.machine()}"
 
 
+def _check_deps_summary() -> None:
+    """Quick dependency check during init."""
+    essentials = ["docker", "psql", "redis-cli"]
+    for dep in essentials:
+        path = shutil.which(dep)
+        status = "found" if path else "MISSING"
+        typer.echo(f"  {dep}: {status}")
+
+
 @init_app.callback(invoke_without_command=True)
 def init(
     ctx: typer.Context,
@@ -101,9 +110,13 @@ def init(
     typer.echo(f"Detected: {_detect_os_info()}")
     typer.echo(f"Stack mode: {resolved_mode}")
 
+    # Check dependencies
+    typer.echo("\nChecking dependencies...")
+    _check_deps_summary()
+
     # Write skyops.toml
     config_path.write_text(_SKYOPS_TOML_TEMPLATE.format(mode=resolved_mode))
-    typer.echo(f"Created {config_path}")
+    typer.echo(f"\nCreated {config_path}")
 
     # Write skyops.local.toml stub if missing
     if not local_path.exists():

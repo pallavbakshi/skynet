@@ -17,3 +17,4 @@ logs/
 *.sqlite3
 .env
 skyops.local.toml
+.skyops-initialized
