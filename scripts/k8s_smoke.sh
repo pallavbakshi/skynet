@@ -7,27 +7,22 @@ cd "${ROOT}"
 KIND_CLUSTER_NAME="${KIND_CLUSTER_NAME:-agp-phase3}"
 KIND_CONFIG_PATH="${ROOT}/.kind-agp-phase3.yaml"
 KUSTOMIZE_PATH="${KUSTOMIZE_PATH:-k8s/overlays/kind}"
-PORT_FORWARD_PORT="${PORT_FORWARD_PORT:-17860}"
 SMOKE_KUBECONFIG="${ROOT}/.kubeconfig-kind-${KIND_CLUSTER_NAME}"
 RECREATE_CLUSTER="${RECREATE_CLUSTER:-true}"
 SKIP_IMAGE_BUILD="${SKIP_IMAGE_BUILD:-false}"
 SKIP_IMAGE_LOAD="${SKIP_IMAGE_LOAD:-false}"
-KIND_NODE_CONTAINER="${KIND_CLUSTER_NAME}-control-plane"
 TMP_OVERLAY_DIR="$(mktemp -d)"
 TMP_SECRET_PATCH="${TMP_OVERLAY_DIR}/patch-secret.yaml"
 TMP_KUSTOMIZATION="${TMP_OVERLAY_DIR}/kustomization.yaml"
-TMP_BASE_LINK="${TMP_OVERLAY_DIR}/base"
 TMP_RENDERED_MANIFEST="${TMP_OVERLAY_DIR}/rendered.yaml"
-NODE_RENDERED_MANIFEST="/tmp/rendered.yaml"
 TMP_SMOKE_JOB_MANIFEST="${TMP_OVERLAY_DIR}/smoke-job.yaml"
-NODE_SMOKE_JOB_MANIFEST="/tmp/agp-k8s-smoke-job.yaml"
 
 if docker info >/dev/null 2>&1; then
   DOCKER=(docker)
   KIND_MODE="direct"
 elif sudo -n docker info >/dev/null 2>&1; then
   DOCKER=(sudo docker)
-  if user docker -c 'docker info >/dev/null 2>&1'; then
+  if command -v user >/dev/null 2>&1 && user docker -c 'docker info >/dev/null 2>&1'; then
     KIND_MODE="user"
   else
     KIND_MODE="sudo"
@@ -52,7 +47,9 @@ kind_run() {
       kind "$@"
       ;;
     user)
-      user docker -c "KUBECONFIG='${KUBECONFIG:-$HOME/.kube/config}' PATH='${PATH}' kind $*"
+      local cmd="KUBECONFIG='${KUBECONFIG:-$HOME/.kube/config}' PATH='${PATH}' kind"
+      local arg; for arg in "$@"; do cmd+=" $(printf '%q' "$arg")"; done
+      user docker -c "$cmd"
       ;;
     sudo)
       sudo -n env "KUBECONFIG=${KUBECONFIG:-$HOME/.kube/config}" "PATH=${PATH}" kind "$@"
@@ -103,13 +100,13 @@ if [[ "${SKIP_IMAGE_LOAD}" != "true" ]]; then
   kind_run load docker-image agp:latest --name "${KIND_CLUSTER_NAME}"
 fi
 
-./scripts/generate_k8s_dev_secret.sh "${TMP_SECRET_PATCH}" >/dev/null
-ln -s "${ROOT}/${KUSTOMIZE_PATH}" "${TMP_BASE_LINK}"
+bash ./scripts/generate_k8s_dev_secret.sh "${TMP_SECRET_PATCH}" >/dev/null
+cp -r "${ROOT}/k8s" "${TMP_OVERLAY_DIR}/k8s"
 cat > "${TMP_KUSTOMIZATION}" <<EOF
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
-  - ./base
+  - ./${KUSTOMIZE_PATH}
 patches:
   - path: ./patch-secret.yaml
 EOF
@@ -119,18 +116,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-KCTL=("${DOCKER[@]}" exec "${KIND_NODE_CONTAINER}" kubectl)
+KCTL=(kubectl --kubeconfig "${SMOKE_KUBECONFIG}")
 
 "${KCTL[@]}" delete namespace agp --ignore-not-found --wait=true
-KUBECONFIG="${SMOKE_KUBECONFIG}" kubectl kustomize "${TMP_OVERLAY_DIR}" --load-restrictor=LoadRestrictionsNone > "${TMP_RENDERED_MANIFEST}"
-"${DOCKER[@]}" exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_RENDERED_MANIFEST}'" < "${TMP_RENDERED_MANIFEST}"
-"${KCTL[@]}" apply -f "${NODE_RENDERED_MANIFEST}"
+kubectl --kubeconfig "${SMOKE_KUBECONFIG}" kustomize "${TMP_OVERLAY_DIR}" --load-restrictor=LoadRestrictionsNone > "${TMP_RENDERED_MANIFEST}"
+"${KCTL[@]}" apply -f "${TMP_RENDERED_MANIFEST}"
 
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/postgres --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/minio --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/redis --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/control-plane --timeout=180s
-for _ in $(seq 1 180); do
+for _ in {1..180}; do
   bootstrap_succeeded="$("${KCTL[@]}" get job agp-bootstrap --namespace agp -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
   if [[ "${bootstrap_succeeded}" == "1" ]]; then
     break
@@ -176,10 +172,9 @@ spec:
 EOF
 
 "${KCTL[@]}" delete job agp-smoke --namespace agp --ignore-not-found --wait=true
-"${DOCKER[@]}" exec -i "${KIND_NODE_CONTAINER}" sh -lc "cat > '${NODE_SMOKE_JOB_MANIFEST}'" < "${TMP_SMOKE_JOB_MANIFEST}"
-"${KCTL[@]}" apply -f "${NODE_SMOKE_JOB_MANIFEST}"
+"${KCTL[@]}" apply -f "${TMP_SMOKE_JOB_MANIFEST}"
 
-for _ in $(seq 1 180); do
+for _ in {1..180}; do
   smoke_succeeded="$("${KCTL[@]}" get job agp-smoke --namespace agp -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
   if [[ "${smoke_succeeded}" == "1" ]]; then
     break
