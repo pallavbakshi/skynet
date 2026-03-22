@@ -88,9 +88,16 @@ def db_seed() -> None:
 
 @db_app.command("migrate")
 def db_migrate() -> None:
-    """Run pending database migrations (placeholder)."""
-    typer.echo("No pending migrations. Schema is up to date.")
-    typer.echo("(Migration framework not yet implemented — this is a placeholder.)")
+    """Run pending database migrations."""
+    from agp.migrations import apply_migrations
+
+    result = apply_migrations()
+    if result["applied"]:
+        for tag in result["applied"]:
+            typer.echo(f"  Applied: {tag}")
+    else:
+        typer.echo("No pending migrations.")
+    typer.echo(f"Current version: {result['current_version']}")
 
 
 @db_app.command("status")

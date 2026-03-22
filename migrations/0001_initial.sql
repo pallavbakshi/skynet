@@ -213,6 +213,37 @@ CREATE TABLE idempotency_keys (
   PRIMARY KEY (idempotency_key, endpoint)
 );
 
+CREATE TABLE health_records (
+  id SERIAL PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  health_status TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  observed_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE capability_pools (
+  capability_id TEXT PRIMARY KEY REFERENCES capabilities(capability_id),
+  queue_id TEXT NOT NULL UNIQUE,
+  routing_policy TEXT NOT NULL DEFAULT 'least_recent',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE nudges (
+  nudge_id TEXT PRIMARY KEY,
+  target_agent_id TEXT NOT NULL,
+  priority INTEGER NOT NULL,
+  source TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  job_id TEXT REFERENCES jobs(job_id),
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  delivered_at TIMESTAMPTZ,
+  CHECK (status IN ('pending', 'delivered', 'expired')),
+  CHECK (source IN ('human', 'job_completion', 'agenda_setter', 'system'))
+);
+
 CREATE TABLE system_metadata (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,

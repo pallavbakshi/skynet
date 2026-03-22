@@ -43,13 +43,46 @@ def _default_server_url() -> str:
 
 @app.command()
 def initdb() -> None:
-    """Initialize the local database schema."""
+    """Initialize or migrate the database schema."""
     _require_server_extra()
 
     from agp.db import init_db
 
     init_db()
     typer.echo("Initialized database schema.")
+
+
+@app.command(name="db-status")
+def db_status() -> None:
+    """Show current schema version and pending migrations."""
+    _require_server_extra()
+
+    from agp.migrations import schema_status
+
+    info = schema_status()
+    typer.echo(f"Schema version:  {info['current_version']}")
+    typer.echo(f"Engine:          {info['engine']}")
+    typer.echo(f"Release version: {info['release_version']}")
+    if info["pending_migrations"]:
+        typer.echo(f"Pending:         {', '.join(info['pending_migrations'])}")
+    else:
+        typer.echo("Pending:         (none)")
+
+
+@app.command(name="db-migrate")
+def db_migrate() -> None:
+    """Apply pending schema migrations."""
+    _require_server_extra()
+
+    from agp.migrations import apply_migrations
+
+    result = apply_migrations()
+    if result["applied"]:
+        for tag in result["applied"]:
+            typer.echo(f"  Applied: {tag}")
+    else:
+        typer.echo("No pending migrations.")
+    typer.echo(f"Current version: {result['current_version']}")
 
 
 @app.command()

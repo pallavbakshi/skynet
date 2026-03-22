@@ -1,8 +1,12 @@
-"""ORM models for the AGP scaffold."""
+"""ORM models for the AGP scaffold.
+
+CheckConstraints mirror the constraints in migrations/0001_initial.sql
+so that ORM-level validation is consistent with the Postgres schema.
+"""
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agp.db import Base
@@ -14,6 +18,11 @@ def utc_now() -> datetime:
 
 class Capability(Base):
     __tablename__ = "capabilities"
+    __table_args__ = (
+        UniqueConstraint("name", "version", name="uq_capabilities_name_version"),
+        CheckConstraint("resource_tier IN ('small', 'medium', 'large', 'gpu')", name="chk_capabilities_resource_tier"),
+        CheckConstraint("queue_mode IN ('agent', 'capability_pool')", name="chk_capabilities_queue_mode"),
+    )
 
     capability_id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String)
@@ -37,6 +46,14 @@ class Runtime(Base):
     __tablename__ = "runtimes"
     __table_args__ = (
         Index("ix_runtimes_status_lastseen", "status", "last_seen_at"),
+        CheckConstraint(
+            "status IN ('registering', 'idle', 'busy', 'degraded', 'offline', 'draining')",
+            name="chk_runtimes_status",
+        ),
+        CheckConstraint(
+            "health_status IN ('healthy', 'degraded', 'unreachable', 'draining')",
+            name="chk_runtimes_health_status",
+        ),
     )
 
     runtime_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -55,6 +72,10 @@ class Agent(Base):
     __tablename__ = "agents"
     __table_args__ = (
         Index("ix_agents_status_created", "status", "created_at"),
+        CheckConstraint(
+            "status IN ('provisioning', 'idle', 'busy', 'degraded', 'draining', 'terminated')",
+            name="chk_agents_status",
+        ),
     )
 
     agent_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -70,6 +91,12 @@ class Agent(Base):
 
 class AgentRuntimeBinding(Base):
     __tablename__ = "agent_runtime_bindings"
+    __table_args__ = (
+        CheckConstraint(
+            "binding_status IN ('active', 'released', 'failed')",
+            name="chk_bindings_status",
+        ),
+    )
 
     agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id"), primary_key=True)
     runtime_id: Mapped[str] = mapped_column(ForeignKey("runtimes.runtime_id"), primary_key=True)
@@ -79,6 +106,9 @@ class AgentRuntimeBinding(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint("target_type IN ('agent', 'capability')", name="chk_messages_target_type"),
+    )
 
     message_id: Mapped[str] = mapped_column(String, primary_key=True)
     target_type: Mapped[str] = mapped_column(String)
@@ -93,6 +123,13 @@ class Job(Base):
     __table_args__ = (
         Index("ix_jobs_status_created", "status", "created_at"),
         Index("ix_jobs_agent_status_created", "target_agent_id", "status", "created_at"),
+        CheckConstraint(
+            "status IN ('accepted', 'queued', 'running', 'interrupt_requested', 'completed', 'failed', 'cancelled', 'blocked')",
+            name="chk_jobs_status",
+        ),
+        CheckConstraint("retry_count >= 0", name="chk_jobs_retry_count"),
+        CheckConstraint("max_retries >= 0", name="chk_jobs_max_retries"),
+        CheckConstraint("target_queue <> ''", name="chk_jobs_target_presence"),
     )
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -110,6 +147,13 @@ class Job(Base):
 
 class QueueDeliveryRecord(Base):
     __tablename__ = "queue_deliveries"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('pending', 'delivered', 'acked', 'dead_lettered')",
+            name="chk_deliveries_state",
+        ),
+        CheckConstraint("delivery_attempt >= 0", name="chk_deliveries_attempt"),
+    )
 
     delivery_id: Mapped[str] = mapped_column(String, primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"))
@@ -130,6 +174,11 @@ class Run(Base):
         UniqueConstraint("job_id", "attempt", name="uq_runs_job_attempt"),
         Index("ix_runs_job_attempt", "job_id", "attempt"),
         Index("ix_runs_runtime_status_created", "runtime_id", "status", "created_at"),
+        CheckConstraint(
+            "status IN ('created', 'leased', 'running', 'recovering', 'completed', 'failed', 'abandoned', 'cancelled')",
+            name="chk_runs_status",
+        ),
+        CheckConstraint("attempt > 0", name="chk_runs_attempt"),
     )
 
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -149,6 +198,8 @@ class Lease(Base):
     __table_args__ = (
         Index("ix_leases_run_status", "run_id", "status"),
         Index("ix_leases_runtime_status_expires", "runtime_id", "status", "expires_at"),
+        CheckConstraint("fencing_token > 0", name="chk_leases_fencing_token"),
+        CheckConstraint("status IN ('active', 'expired', 'released')", name="chk_leases_status"),
     )
 
     lease_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -167,6 +218,11 @@ class Artifact(Base):
     __table_args__ = (
         Index("ix_artifacts_job_created", "job_id", "created_at"),
         Index("ix_artifacts_run_created", "run_id", "created_at"),
+        CheckConstraint(
+            "kind IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
+            name="chk_artifacts_kind",
+        ),
+        CheckConstraint("size_bytes >= 0", name="chk_artifacts_size"),
     )
 
     artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -182,6 +238,12 @@ class Artifact(Base):
 
 class JobArtifact(Base):
     __tablename__ = "job_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
+            name="chk_job_artifacts_role",
+        ),
+    )
 
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), primary_key=True)
     artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.artifact_id"), primary_key=True)
@@ -190,6 +252,12 @@ class JobArtifact(Base):
 
 class RunArtifact(Base):
     __tablename__ = "run_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
+            name="chk_run_artifacts_role",
+        ),
+    )
 
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"), primary_key=True)
     artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.artifact_id"), primary_key=True)
@@ -238,6 +306,12 @@ class Event(Base):
 
 class EventJobLink(Base):
     __tablename__ = "event_job_links"
+    __table_args__ = (
+        CheckConstraint(
+            "relation IN ('primary', 'source', 'child', 'related')",
+            name="chk_event_links_relation",
+        ),
+    )
 
     event_id: Mapped[str] = mapped_column(ForeignKey("events.event_id"), primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), primary_key=True)
@@ -281,14 +355,18 @@ class CapabilityPool(Base):
 
 class Nudge(Base):
     __tablename__ = "nudges"
+    __table_args__ = (
+        CheckConstraint("status IN ('pending', 'delivered', 'expired')", name="chk_nudges_status"),
+        CheckConstraint("source IN ('human', 'job_completion', 'agenda_setter', 'system')", name="chk_nudges_source"),
+    )
 
     nudge_id: Mapped[str] = mapped_column(String, primary_key=True)
     target_agent_id: Mapped[str] = mapped_column(String)
-    priority: Mapped[int] = mapped_column(Integer)  # 1=highest, 4=lowest
-    source: Mapped[str] = mapped_column(String)  # human, job_completion, agenda_setter, system
+    priority: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String)
     payload: Mapped[str] = mapped_column(Text)
     job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.job_id"), nullable=True)
-    status: Mapped[str] = mapped_column(String, default="pending")  # pending, delivered, expired
+    status: Mapped[str] = mapped_column(String, default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

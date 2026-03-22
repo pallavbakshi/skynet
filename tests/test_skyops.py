@@ -579,10 +579,10 @@ class TestDepsCheck(unittest.TestCase):
 
 
 class TestDbMigrate(unittest.TestCase):
-    def test_db_migrate_placeholder(self):
+    def test_db_migrate_runs_migrations(self):
         result = runner.invoke(app, ["db", "migrate"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("placeholder", result.output.lower())
+        self.assertIn("version", result.output.lower())
 
 
 class TestBackupList(unittest.TestCase):

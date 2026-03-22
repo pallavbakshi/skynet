@@ -6,7 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
-from time import monotonic, sleep
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -158,18 +158,15 @@ class RuntimeSupervisor:
         )
 
     def _cleanup_workspace(self, session: TerminalSession, claimed: dict[str, Any]) -> None:
-        """Best-effort workspace cleanup after run completion/failure/cancel.
+        """Best-effort post-run workspace cleanup.
 
-        Removes stale lock files and temporary run artifacts left behind
-        by the adapter or host.
+        Currently limited to logging.  Checkpoint cursor files are
+        intentionally retained for restart resilience.  No filesystem
+        artifacts are deleted — the host and adapter own their own
+        lifecycle for those.
         """
         try:
             run_id = claimed.get("run", {}).get("run_id", "unknown")
-            # Clean up any checkpoint cursor files for this session
-            if hasattr(self.host, "checkpoint_dir"):
-                import glob
-                for stale in glob.glob(str(self.host.checkpoint_dir / f"cursor-{session.session_id}*")):
-                    pass  # cursors are retained for restart resilience — don't delete
             _append_runtime_log(
                 self.client.identity.runtime_id,
                 {
@@ -180,7 +177,7 @@ class RuntimeSupervisor:
                 },
             )
         except Exception:  # noqa: BLE001
-            pass  # cleanup is best-effort
+            pass
 
     def run_forever(
         self,
@@ -425,7 +422,6 @@ class RuntimeSupervisor:
                         extend_seconds=lease_ttl_seconds,
                     )
                     attempts += 1
-            sleep(0)
             stored_artifacts = [
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in result.artifacts

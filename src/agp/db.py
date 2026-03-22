@@ -3,7 +3,7 @@
 from collections.abc import Generator
 from importlib.metadata import PackageNotFoundError, version as package_version
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from agp.config import settings
@@ -37,29 +37,20 @@ def current_release_version() -> str:
         return "0.1.0"
 
 
+def is_postgres() -> bool:
+    return str(engine.url).startswith("postgresql")
+
+
 def init_db() -> None:
-    """Create all known tables for the initial scaffold."""
+    """Initialize or migrate the database schema.
 
-    from agp import models  # noqa: F401
+    On PostgreSQL, applies pending SQL migrations from ``migrations/``.
+    On SQLite, uses ``create_all()`` from ORM metadata (which now
+    includes CheckConstraints aligned with the migration SQL).
+    """
+    from agp.migrations import apply_migrations
 
-    Base.metadata.create_all(bind=engine)
-    session = SessionLocal()
-    try:
-        existing = session.get(models.SystemMetadata, "schema_version")
-        if existing is None:
-            session.add(models.SystemMetadata(key="schema_version", value="0001_initial", updated_at=models.utc_now()))
-        existing = session.get(models.SystemMetadata, "release_version")
-        if existing is None:
-            session.add(
-                models.SystemMetadata(
-                    key="release_version",
-                    value=current_release_version(),
-                    updated_at=models.utc_now(),
-                )
-            )
-        session.commit()
-    finally:
-        session.close()
+    apply_migrations()
 
 
 def get_db() -> Generator:
@@ -70,3 +61,14 @@ def get_db() -> Generator:
         yield session
     finally:
         session.close()
+
+
+def next_event_seq_db(session) -> int | None:
+    """Allocate the next event sequence from the database sequence (Postgres only).
+
+    Returns the next sequence value, or None if not on PostgreSQL.
+    """
+    if not is_postgres():
+        return None
+    result = session.execute(text("SELECT nextval('events_event_seq_seq')"))
+    return result.scalar()

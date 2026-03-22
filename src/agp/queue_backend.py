@@ -1,4 +1,31 @@
-"""Queue backend boundary for AGP."""
+"""Queue backend boundary for AGP.
+
+Backend Contract
+~~~~~~~~~~~~~~~~
+
+Every queue backend implementation must provide the same semantic
+guarantees, regardless of transport mechanism:
+
+**Source of truth**: SQL ``queue_deliveries`` table is the durable
+authority for delivery state.  External transports (Redis lists, in-memory
+deques) are *acceleration layers* — operator-visible state and crash
+recovery are always driven from the SQL records.
+
+**Durability expectations**:
+
+- ``db``: No separate transport; polls the jobs table directly.
+- ``delivery_table``: SQL-only.  Fully durable.  Ordering via timestamps.
+- ``inmemory_broker``: Process-local.  Lost on restart.  For dev/test only.
+- ``redis``: Redis lists for fast dequeue; SQL shadow records for
+  durability.  On crash, SQL records are the recovery source.
+
+**Reconciliation**: ``redrive_stale_deliveries()`` resets in-flight
+deliveries that exceeded the visibility timeout back to pending, or
+dead-letters them after ``max_delivery_attempts``.
+
+**Operator visibility**: All backends that create ``QueueDeliveryRecord``
+rows expose state through the ``/queue/deliveries`` API endpoint.
+"""
 
 from __future__ import annotations
 
@@ -205,7 +232,8 @@ class DeliveryTableQueueBackend:
         redriven = 0
         dead_lettered = 0
         for record in stale:
-            assert record.last_delivered_at is not None
+            if record.last_delivered_at is None:
+                continue
             if record.last_delivered_at.timestamp() > stale_cutoff:
                 continue
             if record.delivery_attempt >= max_delivery_attempts:
@@ -341,7 +369,19 @@ def _load_redis_client(url: str):
 
 
 class RedisQueueBackend:
-    """Redis-backed transport with state-store shadow records for operator visibility."""
+    """Redis-backed transport with SQL as authoritative delivery state.
+
+    **Authority model**: SQL ``queue_deliveries`` is the source of truth
+    for delivery lifecycle (pending → delivered → acked / dead_lettered).
+    Redis lists and sets are the *acceleration transport* — they provide
+    fast O(1) enqueue/dequeue but are rebuildable from SQL.
+
+    On crash between Redis and SQL operations, the SQL state wins:
+
+    - If Redis dequeued but SQL was not updated → redrive recovers it.
+    - If SQL was acked but Redis still has inflight metadata → harmless;
+      next ``redrive_stale_deliveries`` cleans up.
+    """
 
     name = "redis"
 

@@ -86,8 +86,9 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(db_backup_path, db_path)
     else:
+        from agp import models  # noqa: F401 — ensure all models loaded
         Base.metadata.drop_all(bind=engine)
-        Base.metadata.create_all(bind=engine)
+        Base.metadata.create_all(bind=engine)  # bare schema only; restore will repopulate data
 
     if settings.artifact_root.exists():
         shutil.rmtree(settings.artifact_root)

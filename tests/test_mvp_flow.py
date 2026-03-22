@@ -169,7 +169,8 @@ class MvpFlowTest(unittest.TestCase):
         queue_backend_module._REDIS_CLIENT_FACTORY = None
         reset_queue_backend_state()
         reset_artifact_store_state()
-        control_plane_module._event_seq_counter = None
+        from agp.services.events import reset_event_seq
+        reset_event_seq()
         if settings.log_root.exists():
             shutil.rmtree(settings.log_root)
         engine.dispose()
@@ -184,7 +185,7 @@ class MvpFlowTest(unittest.TestCase):
                     version="v1",
                     image_ref="python:3.12",
                     model_ref="gpt-5.4",
-                    resource_tier="default",
+                    resource_tier="small",
                     permission_profile="default",
                     queue_mode="agent",
                     runtime_requirements_json={},
@@ -3484,7 +3485,7 @@ class MvpFlowTest(unittest.TestCase):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 self.sent.append(text)
                 super().send_text(session, text, enter=enter)
-                if text.startswith("ncodex "):
+                if "ncodex " in text:
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a What is 2 + 2? Reply with just the number.\n\u2022 4\n"
                     )
@@ -3522,7 +3523,7 @@ class MvpFlowTest(unittest.TestCase):
         }
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(host.reset_calls, 1)
-        self.assertTrue(any(text.startswith("ncodex --full-auto ") for text in host.sent))
+        self.assertTrue(any("ncodex --full-auto " in text for text in host.sent))
         self.assertEqual(result.artifacts[-1].content, "4")
         self.assertEqual(result.summary["mode"], "tui")
 
@@ -4222,7 +4223,7 @@ class MvpFlowTest(unittest.TestCase):
                 version="v1",
                 image_ref="test:v1",
                 model_ref="test",
-                resource_tier="default",
+                resource_tier="small",
                 permission_profile="default",
                 queue_mode="capability_pool",
                 runtime_requirements_json={},
@@ -4293,7 +4294,7 @@ class MvpFlowTest(unittest.TestCase):
                 version="v1",
                 image_ref="test:v1",
                 model_ref="test",
-                resource_tier="default",
+                resource_tier="small",
                 permission_profile="default",
                 queue_mode="capability_pool",
                 runtime_requirements_json={},
