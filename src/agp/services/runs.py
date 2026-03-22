@@ -364,3 +364,84 @@ def fail_run_service(
         _enqueue_nudge(db, target_agent_id=nudge_target, priority=2, source="job_completion", payload=_format_job_nudge(job, "FAILED"), job_id=job.job_id)
     db.commit()
     return failure_artifact_id
+
+
+def heartbeat_run_service(
+    db: Session, *, run: Run, lease: Lease, runtime: Runtime, extend_seconds: int,
+) -> dict:
+    """Heartbeat a run — extend lease, promote leased→running, record event."""
+    if run.status == RunStatus.LEASED.value:
+        run.status = RunStatus.RUNNING.value
+        run.started_at = utc_now()
+        _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime.runtime_id, event_type="run.running", body={"started_by": runtime.runtime_id})
+    lease.expires_at = utc_now() + timedelta(seconds=extend_seconds)
+    runtime.last_seen_at = utc_now()
+    runtime.last_heartbeat_at = utc_now()
+    _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime.runtime_id, event_type="lease.heartbeat", body={"lease_id": lease.lease_id, "expires_at": lease.expires_at.isoformat()})
+    db.commit()
+    job = db.get(Job, run.job_id)
+    return {
+        "run_id": run.run_id,
+        "lease_id": lease.lease_id,
+        "status": run.status,
+        "expires_at": lease.expires_at,
+        "interrupt_requested": job is not None and job.status == JobStatus.INTERRUPT_REQUESTED.value,
+    }
+
+
+def progress_run_service(
+    db: Session, *, run: Run, runtime_id: str, message: str, details: dict,
+) -> dict:
+    """Record progress — promote leased→running if needed, emit event."""
+    if run.status == RunStatus.LEASED.value:
+        run.status = RunStatus.RUNNING.value
+        run.started_at = utc_now()
+    event = _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime_id, event_type="run.progress", body={"message": message, "details": details})
+    db.commit()
+    return {"run_id": run.run_id, "event_id": event.event_id, "status": run.status}
+
+
+def recovering_run_service(
+    db: Session, *, run: Run, lease: Lease, runtime: Runtime, details: dict,
+) -> dict:
+    """Transition running→recovering, extend lease, emit event."""
+    from fastapi import HTTPException
+    if run.status != RunStatus.RUNNING.value:
+        raise HTTPException(status_code=409, detail=f"run cannot enter recovering from state {run.status}")
+    run.status = RunStatus.RECOVERING.value
+    lease.expires_at = utc_now() + timedelta(seconds=30)
+    runtime.last_seen_at = utc_now()
+    runtime.last_heartbeat_at = utc_now()
+    event = _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime.runtime_id, event_type="run.recovering", body={"details": details, "expires_at": lease.expires_at.isoformat()})
+    db.commit()
+    return {"run_id": run.run_id, "event_id": event.event_id, "status": run.status}
+
+
+def resumed_run_service(db: Session, *, run: Run, runtime_id: str, details: dict) -> dict:
+    """Transition recovering→running, emit event."""
+    from fastapi import HTTPException
+    if run.status != RunStatus.RECOVERING.value:
+        raise HTTPException(status_code=409, detail=f"run cannot resume from state {run.status}")
+    run.status = RunStatus.RUNNING.value
+    event = _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime_id, event_type="run.resumed", body={"details": details})
+    db.commit()
+    return {"run_id": run.run_id, "event_id": event.event_id, "status": run.status}
+
+
+def cancel_run_service(
+    db: Session, *, run: Run, job: Job, agent: Agent, runtime: Runtime, lease: Lease, reason: str,
+) -> dict:
+    """Cancel a run — release lease, transition states, emit events."""
+    run.status = RunStatus.CANCELLED.value
+    run.finished_at = utc_now()
+    lease.status = LeaseStatus.RELEASED.value
+    lease.released_at = utc_now()
+    job.status = JobStatus.CANCELLED.value
+    job.updated_at = utc_now()
+    agent.status = AgentStatus.IDLE.value if agent.status != AgentStatus.TERMINATED.value else agent.status
+    runtime.status = RuntimeStatus.IDLE.value
+    _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
+    _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="run.cancelled", body={"reason": reason})
+    _create_event(db, job_id=job.job_id, event_type="job.cancelled", body={"status": job.status})
+    db.commit()
+    return {"run_id": run.run_id, "job_id": job.job_id, "status": run.status}

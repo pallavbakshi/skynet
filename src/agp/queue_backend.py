@@ -442,6 +442,20 @@ class RedisQueueBackend:
         self.client.sadd(pending_set, job.job_id)
 
     def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
+        """Dequeue the next candidate delivery.
+
+        SQL is the durable authority.  The sequence is:
+        1. ``LPOP`` from Redis (necessary — Redis lists don't support peek)
+        2. Immediately mark the SQL delivery record as "delivered" and
+           ``flush()`` so the state is durable in the DB transaction.
+        3. Write the Redis inflight hash for fast visibility.
+
+        If the process dies between step 1 and step 2, the job vanishes
+        from the Redis list while SQL still says "pending".  The phase-2
+        orphan scan in ``redrive_stale_deliveries`` recovers these by
+        checking for SQL "pending" records whose job is no longer in the
+        Redis pending set and re-enqueuing them.
+        """
         now = utc_now()
         for target_queue in target_queues:
             while True:
@@ -454,6 +468,7 @@ class RedisQueueBackend:
                 job = db.get(Job, job_id)
                 if job is None or job.status != JobStatus.QUEUED.value or job.retry_count >= job.max_retries:
                     continue
+                # Ensure SQL delivery record exists
                 record = db.scalar(select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job_id))
                 if record is None:
                     record = QueueDeliveryRecord(
@@ -468,14 +483,13 @@ class RedisQueueBackend:
                     )
                     db.add(record)
                     db.flush()
+                # Transition to "delivered" in SQL immediately and flush —
+                # this is the durable claim marker.
                 record.target_queue = target_queue
                 record.state = "delivered"
                 record.delivery_attempt += 1
                 record.last_delivered_at = now
                 record.updated_at = now
-                # Flush SQL first — this is the durable authority.  If the
-                # process crashes after this flush but before the Redis write,
-                # redrive_stale_deliveries will recover from the SQL record.
                 db.flush()
                 payload = {
                     "delivery_id": record.delivery_id,
@@ -606,6 +620,20 @@ class RedisQueueBackend:
                     self.client.rpush(self._queue_key(record.target_queue), record.job_id)
                     self.client.sadd(pending_set, record.job_id)
                 redriven += 1
+
+        # Phase 3: recover SQL "pending" records whose job vanished from
+        # the Redis pending set (crash between LPOP and SQL flush).
+        pending_sql = db.scalars(
+            select(QueueDeliveryRecord).where(QueueDeliveryRecord.state == "pending")
+        ).all()
+        for record in pending_sql:
+            pending_set = self._pending_set_key(record.target_queue)
+            if self.client.sismember(pending_set, record.job_id):
+                continue  # already in Redis
+            # Job was removed from Redis but SQL still says pending — re-enqueue
+            self.client.rpush(self._queue_key(record.target_queue), record.job_id)
+            self.client.sadd(pending_set, record.job_id)
+            redriven += 1
 
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}
 
