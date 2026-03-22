@@ -15,7 +15,7 @@ from agp.services._helpers import _artifact_store, _require_job
 router = APIRouter()
 
 
-@router.get("/artifacts/{artifact_id}", response_model=dict)
+@router.get("/artifacts/{artifact_id}")
 def get_artifact(artifact_id: str, db: Session = Depends(get_db)) -> dict:
     artifact = db.get(Artifact, artifact_id)
     if artifact is None:
@@ -25,7 +25,7 @@ def get_artifact(artifact_id: str, db: Session = Depends(get_db)) -> dict:
     )
 
 
-@router.get("/jobs/{job_id}/artifacts", response_model=dict)
+@router.get("/jobs/{job_id}/artifacts")
 def list_job_artifacts(job_id: str, role: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
     _require_job(db, job_id)
     rows = db.execute(
@@ -42,7 +42,7 @@ def list_job_artifacts(job_id: str, role: str | None = Query(default=None), db: 
     return _ok({"items": items, "job_id": job_id, "role": role})
 
 
-@router.get("/runs/{run_id}/artifacts", response_model=dict)
+@router.get("/runs/{run_id}/artifacts")
 def list_run_artifacts(run_id: str, role: str | None = Query(default=None), db: Session = Depends(get_db)) -> dict:
     run = db.get(Run, run_id)
     if run is None:
@@ -61,7 +61,7 @@ def list_run_artifacts(run_id: str, role: str | None = Query(default=None), db: 
     return _ok({"items": items, "run_id": run_id, "role": role})
 
 
-@router.get("/artifacts/{artifact_id}/content", response_model=dict)
+@router.get("/artifacts/{artifact_id}/content")
 def get_artifact_content(
     artifact_id: str,
     offset: int = Query(default=0, ge=0),
@@ -93,7 +93,7 @@ def get_artifact_content(
     return _ok(payload)
 
 
-@router.post("/artifacts/upload", response_model=dict)
+@router.post("/artifacts/upload")
 def upload_artifact(request: ArtifactUploadRequest) -> dict:
     store = _artifact_store()
     stored = store.write_text(

@@ -47,7 +47,7 @@ from agp.models import Lease, Run
 router = APIRouter()
 
 
-@router.post("/messages/send", response_model=dict)
+@router.post("/messages/send")
 def send_message(
     request: SendMessageRequest,
     db: Session = Depends(get_db),
@@ -254,7 +254,7 @@ def send_message(
     return response
 
 
-@router.get("/jobs", response_model=dict)
+@router.get("/jobs")
 def list_jobs(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -308,7 +308,7 @@ def list_jobs(
     )
 
 
-@router.get("/jobs/{job_id}", response_model=dict)
+@router.get("/jobs/{job_id}")
 def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     return _ok(
@@ -331,7 +331,7 @@ def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     )
 
 
-@router.get("/jobs/{job_id}/events", response_model=dict)
+@router.get("/jobs/{job_id}/events")
 def get_job_events(
     job_id: str,
     db: Session = Depends(get_db),
@@ -369,7 +369,7 @@ def get_job_events(
     )
 
 
-@router.post("/jobs/{job_id}/interrupt", response_model=dict)
+@router.post("/jobs/{job_id}/interrupt")
 def interrupt_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     if job.status == JobStatus.QUEUED.value:
@@ -386,7 +386,7 @@ def interrupt_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     return _ok({"job_id": job.job_id, "status": job.status})
 
 
-@router.post("/jobs/{job_id}/block", response_model=dict)
+@router.post("/jobs/{job_id}/block")
 def block_job(job_id: str, reason: str = Query(default="operator_blocked"), db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     _block_job(db, job=job, reason=reason)
@@ -394,7 +394,7 @@ def block_job(job_id: str, reason: str = Query(default="operator_blocked"), db: 
     return _ok({"job_id": job.job_id, "status": job.status, "reason": reason})
 
 
-@router.post("/jobs/{job_id}/unblock", response_model=dict)
+@router.post("/jobs/{job_id}/unblock")
 def unblock_job(job_id: str, reason: str = Query(default="operator_unblocked"), db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     _unblock_job(db, job=job, reason=reason)
@@ -402,7 +402,7 @@ def unblock_job(job_id: str, reason: str = Query(default="operator_unblocked"), 
     return _ok({"job_id": job.job_id, "status": job.status, "reason": reason})
 
 
-@router.post("/jobs/{job_id}/handoff", response_model=dict)
+@router.post("/jobs/{job_id}/handoff")
 def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_db)) -> dict:
     source_job = _require_job(db, job_id)
     ancestor_ids = _handoff_ancestor_job_ids(db, source_job.job_id)

@@ -19,7 +19,7 @@ from agp.services.events import _create_event
 router = APIRouter()
 
 
-@router.get("/agents", response_model=dict)
+@router.get("/agents")
 def list_agents(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -57,13 +57,13 @@ def list_agents(
     )
 
 
-@router.get("/agents/{agent_id}", response_model=dict)
+@router.get("/agents/{agent_id}")
 def get_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     agent = _require_agent(db, agent_id)
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref", "created_at", "updated_at", "last_seen_at")))
 
 
-@router.post("/agents/up", response_model=dict)
+@router.post("/agents/up")
 def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     _require_capability(db, request.capability_id)
     agent_id = request.agent_id or _new_id("agt")
@@ -88,7 +88,7 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 
-@router.patch("/agents/{agent_id}", response_model=dict)
+@router.patch("/agents/{agent_id}")
 def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends(get_db)) -> dict:
     agent = _require_agent(db, agent_id)
     if request.workspace_ref is not None:
@@ -97,7 +97,7 @@ def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 
-@router.post("/agents/{agent_id}/undrain", response_model=dict)
+@router.post("/agents/{agent_id}/undrain")
 def agent_undrain(agent_id: str, db: Session = Depends(get_db)) -> dict:
     agent = _require_agent(db, agent_id)
     if agent.status != AgentStatus.DRAINING.value:
@@ -109,7 +109,7 @@ def agent_undrain(agent_id: str, db: Session = Depends(get_db)) -> dict:
     return _ok({"agent_id": agent.agent_id, "status": agent.status})
 
 
-@router.post("/agents/{agent_id}/down", response_model=dict)
+@router.post("/agents/{agent_id}/down")
 def agent_down(agent_id: str, request: AgentDownRequest, db: Session = Depends(get_db)) -> dict:
     agent = _require_agent(db, agent_id)
     if request.mode == "drain":

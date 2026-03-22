@@ -42,7 +42,7 @@ from agp.services.observability import _current_alerts_payload
 router = APIRouter()
 
 
-@router.get("/observability/summary", response_model=dict)
+@router.get("/observability/summary")
 def observability_summary(db: Session = Depends(get_db)) -> dict:
     latest_event_seq = int(db.scalar(select(func.max(Event.event_seq))) or 0)
     queue_depth = int(db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.QUEUED.value)) or 0)
@@ -61,12 +61,12 @@ def observability_summary(db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.get("/observability/alerts", response_model=dict)
+@router.get("/observability/alerts")
 def observability_alerts(db: Session = Depends(get_db)) -> dict:
     return _ok(_current_alerts_payload(db))
 
 
-@router.post("/observability/alerts/dispatch", response_model=dict)
+@router.post("/observability/alerts/dispatch")
 def observability_dispatch_alerts(db: Session = Depends(get_db)) -> dict:
     if not settings.observability_alert_webhook_url:
         raise HTTPException(status_code=409, detail="observability alert webhook is not configured")
@@ -137,7 +137,7 @@ def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
-@router.get("/observability/jobs/{job_id}/trace", response_model=dict)
+@router.get("/observability/jobs/{job_id}/trace")
 def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     events = db.scalars(select(Event).where(Event.job_id == job_id).order_by(Event.event_seq.asc())).all()
@@ -172,12 +172,12 @@ def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.get("/observability/logs/control-plane", response_model=dict)
+@router.get("/observability/logs/control-plane")
 def observability_control_plane_logs(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     return _ok({"items": read_tail_jsonl_family(_control_plane_log_path(), limit=limit), "source": str(_control_plane_log_path()), "limit": limit})
 
 
-@router.get("/observability/logs/runtimes/{runtime_id}", response_model=dict)
+@router.get("/observability/logs/runtimes/{runtime_id}")
 def observability_runtime_logs(runtime_id: str, limit: int = Query(default=100, ge=1, le=500)) -> dict:
     path = settings.log_root / f"runtime-{runtime_id}.jsonl"
     return _ok({"items": read_tail_jsonl_family(path, limit=limit), "source": str(path), "runtime_id": runtime_id, "limit": limit})
@@ -192,7 +192,7 @@ _AUDIT_EVENT_TYPES = frozenset({
 })
 
 
-@router.get("/observability/audit", response_model=dict)
+@router.get("/observability/audit")
 def observability_audit(db: Session = Depends(get_db), limit: int = Query(default=100, ge=1, le=500), cursor: str | None = Query(default=None)) -> dict:
     query = select(Event).where(Event.event_type.in_(_AUDIT_EVENT_TYPES))
     query = _apply_created_cursor(query, Event, cursor)
@@ -208,7 +208,7 @@ def observability_audit(db: Session = Depends(get_db), limit: int = Query(defaul
     ))
 
 
-@router.get("/observability/triage", response_model=dict)
+@router.get("/observability/triage")
 def observability_triage(db: Session = Depends(get_db)) -> dict:
     active_leases = db.scalars(select(Lease).where(Lease.status == LeaseStatus.ACTIVE.value)).all()
     active_by_runtime: dict[str, list[dict]] = {}
@@ -231,7 +231,7 @@ def observability_triage(db: Session = Depends(get_db)) -> dict:
     return _ok({"active_jobs_by_runtime": active_by_runtime, "recent_failures": failure_items, "stale_runtimes": stale_items, "capabilities": cap_summary})
 
 
-@router.get("/observability/health-records", response_model=dict)
+@router.get("/observability/health-records")
 def list_health_records(entity_type: str | None = Query(default=None), entity_id: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
     query = select(HealthRecord)
     if entity_type is not None:

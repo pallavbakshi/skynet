@@ -47,7 +47,7 @@ from agp.services.runs import (
 router = APIRouter()
 
 
-@router.post("/runs/claim", response_model=dict)
+@router.post("/runs/claim")
 def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, request.runtime_id)
     if runtime.health_status == HealthStatus.UNREACHABLE.value:
@@ -93,7 +93,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.post("/runs/{run_id}/heartbeat", response_model=dict)
+@router.post("/runs/{run_id}/heartbeat")
 def heartbeat_run(run_id: str, request: HeartbeatRequest, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, request.runtime_id)
     lease = _active_lease_for_run(db, run_id, request.lease_id)
@@ -115,7 +115,7 @@ def heartbeat_run(run_id: str, request: HeartbeatRequest, db: Session = Depends(
     return _ok({"run_id": run_id, "lease_id": lease.lease_id, "status": run.status, "expires_at": lease.expires_at, "interrupt_requested": interrupt_requested})
 
 
-@router.post("/runs/{run_id}/progress", response_model=dict)
+@router.post("/runs/{run_id}/progress")
 def progress_run(run_id: str, request: ProgressRequest, db: Session = Depends(get_db)) -> dict:
     lease = _active_lease_for_run(db, run_id, request.lease_id)
     _assert_lease_owner(lease, request.runtime_id, request.fencing_token)
@@ -130,7 +130,7 @@ def progress_run(run_id: str, request: ProgressRequest, db: Session = Depends(ge
     return _ok({"run_id": run_id, "event_id": event.event_id, "status": run.status})
 
 
-@router.post("/runs/{run_id}/recovering", response_model=dict)
+@router.post("/runs/{run_id}/recovering")
 def recovering_run(run_id: str, request: RecoveryRequest, db: Session = Depends(get_db)) -> dict:
     lease = _active_lease_for_run(db, run_id, request.lease_id)
     _assert_lease_owner(lease, request.runtime_id, request.fencing_token)
@@ -149,7 +149,7 @@ def recovering_run(run_id: str, request: RecoveryRequest, db: Session = Depends(
     return _ok({"run_id": run_id, "event_id": event.event_id, "status": run.status})
 
 
-@router.post("/runs/{run_id}/resumed", response_model=dict)
+@router.post("/runs/{run_id}/resumed")
 def resumed_run(run_id: str, request: RecoveryRequest, db: Session = Depends(get_db)) -> dict:
     lease = _active_lease_for_run(db, run_id, request.lease_id)
     _assert_lease_owner(lease, request.runtime_id, request.fencing_token)
@@ -164,7 +164,7 @@ def resumed_run(run_id: str, request: RecoveryRequest, db: Session = Depends(get
     return _ok({"run_id": run_id, "event_id": event.event_id, "status": run.status})
 
 
-@router.post("/runs/{run_id}/cancel", response_model=dict)
+@router.post("/runs/{run_id}/cancel")
 def cancel_run(run_id: str, request: CancelRunRequest, db: Session = Depends(get_db)) -> dict:
     from agp.enums import LeaseStatus as LS
     lease = _active_lease_for_run(db, run_id, request.lease_id)
@@ -192,7 +192,7 @@ def cancel_run(run_id: str, request: CancelRunRequest, db: Session = Depends(get
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status})
 
 
-@router.post("/runs/{run_id}/complete", response_model=dict)
+@router.post("/runs/{run_id}/complete")
 def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends(get_db)) -> dict:
     _validate_terminal_artifact_roles(request.artifacts, {ArtifactKind.PROMPT.value, ArtifactKind.TRANSCRIPT_LOG.value, ArtifactKind.EXEC_LOG.value, ArtifactKind.RESULT.value})
     _validate_artifact_store_refs(request.artifacts)
@@ -209,7 +209,7 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status, "result_artifact_id": result_artifact_id})
 
 
-@router.post("/runs/{run_id}/fail", response_model=dict)
+@router.post("/runs/{run_id}/fail")
 def fail_run(run_id: str, request: FailRunRequest, db: Session = Depends(get_db)) -> dict:
     _validate_terminal_artifact_roles(request.artifacts, {ArtifactKind.PROMPT.value, ArtifactKind.TRANSCRIPT_LOG.value, ArtifactKind.EXEC_LOG.value, ArtifactKind.FAILURE_EVIDENCE.value})
     _validate_artifact_store_refs(request.artifacts)

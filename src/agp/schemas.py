@@ -1,11 +1,31 @@
 """Pydantic schemas for the AGP control plane MVP."""
 
-from typing import Any, Literal
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, Field
 
 from agp.db import current_release_version
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+
+T = TypeVar("T")
+
+
+class OkResponse(BaseModel, Generic[T]):
+    """Standard API envelope for successful responses."""
+    ok: bool = True
+    data: T
+
+
+class PageInfo(BaseModel):
+    limit: int
+    next_cursor: str | None
+    has_more: bool
+
+
+class PagedData(BaseModel, Generic[T]):
+    """Paginated list data payload."""
+    items: list[T]
+    page: PageInfo
 
 
 class HealthResponse(BaseModel):

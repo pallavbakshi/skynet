@@ -23,24 +23,24 @@ from agp.api.helpers import _decode_cursor
 router = APIRouter()
 
 
-@router.get("/health", response_model=dict)
+@router.get("/health")
 def health() -> dict:
     payload = HealthResponse(components={"api": "ok", "db": "ok"})
     return _ok(payload.model_dump())
 
 
-@router.get("/system/upgrade-status", response_model=dict)
+@router.get("/system/upgrade-status")
 def system_upgrade_status(db: Session = Depends(get_db)) -> dict:
     return _ok(_get_upgrade_status(db))
 
 
-@router.get("/capabilities/{capability_id}", response_model=dict)
+@router.get("/capabilities/{capability_id}")
 def get_capability(capability_id: str, db: Session = Depends(get_db)) -> dict:
     cap = _require_capability(db, capability_id)
     return _ok(_serialize(cap, ("capability_id", "name", "version", "image_ref", "model_ref", "resource_tier", "permission_profile", "queue_mode", "runtime_requirements_json")))
 
 
-@router.get("/capabilities", response_model=dict)
+@router.get("/capabilities")
 def list_capabilities(
     db: Session = Depends(get_db),
     version: str | None = Query(default=None),
@@ -72,7 +72,7 @@ def list_capabilities(
     ))
 
 
-@router.post("/capabilities/seed", response_model=dict)
+@router.post("/capabilities/seed")
 def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db)) -> dict:
     capability_id = request.capability_id
     existing = db.get(Capability, capability_id)
@@ -109,20 +109,20 @@ def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db
     return _ok({"capability_id": capability_id, "created": True, "pool_queue_id": pool.queue_id, "pool_routing_policy": pool.routing_policy})
 
 
-@router.get("/capability-pools", response_model=dict)
+@router.get("/capability-pools")
 def list_capability_pools(db: Session = Depends(get_db)) -> dict:
     pools = db.scalars(select(CapabilityPool).order_by(CapabilityPool.capability_id.asc())).all()
     return _ok({"items": [{"capability_id": p.capability_id, "queue_id": p.queue_id, "routing_policy": p.routing_policy} for p in pools]})
 
 
-@router.post("/nudges", response_model=dict)
+@router.post("/nudges")
 def create_nudge(request: CreateNudgeRequest, db: Session = Depends(get_db)) -> dict:
     nudge = _enqueue_nudge(db, target_agent_id=request.target_agent_id, priority=request.priority, source=request.source, payload=request.payload, job_id=request.job_id)
     db.commit()
     return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "status", "created_at")))
 
 
-@router.get("/nudges/next", response_model=dict)
+@router.get("/nudges/next")
 def next_nudge(target_agent_id: str = Query(...), db: Session = Depends(get_db)) -> dict:
     nudge = db.scalars(
         select(Nudge).where(Nudge.target_agent_id == target_agent_id, Nudge.status == "pending")
@@ -136,7 +136,7 @@ def next_nudge(target_agent_id: str = Query(...), db: Session = Depends(get_db))
     return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "payload", "job_id", "status", "created_at", "delivered_at")))
 
 
-@router.get("/nudges", response_model=dict)
+@router.get("/nudges")
 def list_nudges(target_agent_id: str | None = Query(default=None), status: str | None = Query(default=None), limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> dict:
     query = select(Nudge)
     if target_agent_id is not None:
@@ -147,7 +147,7 @@ def list_nudges(target_agent_id: str | None = Query(default=None), status: str |
     return _ok({"items": [_serialize(n, ("nudge_id", "target_agent_id", "priority", "source", "status", "job_id", "created_at", "delivered_at")) for n in nudges]})
 
 
-@router.get("/queue/deliveries", response_model=dict)
+@router.get("/queue/deliveries")
 def list_queue_deliveries(
     db: Session = Depends(get_db),
     state: str | None = Query(default=None),

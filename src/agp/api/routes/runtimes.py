@@ -24,7 +24,7 @@ from agp.services.events import _create_event
 router = APIRouter()
 
 
-@router.post("/runtimes/register", response_model=dict)
+@router.post("/runtimes/register")
 def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_db)) -> dict:
     _assert_supported_runtime_skew(db, request.release_version)
     runtime_id = request.runtime_id or _new_id("rtm")
@@ -75,7 +75,7 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
     )
 
 
-@router.get("/runtimes", response_model=dict)
+@router.get("/runtimes")
 def list_runtimes(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -111,7 +111,7 @@ def list_runtimes(
     return _ok(_page(items, limit=limit, next_cursor=next_cursor))
 
 
-@router.get("/runtimes/{runtime_id}", response_model=dict)
+@router.get("/runtimes/{runtime_id}")
 def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, runtime_id)
     data = _serialize(runtime, ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at", "created_at"))

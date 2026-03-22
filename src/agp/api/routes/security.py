@@ -17,7 +17,7 @@ from agp.services.events import _create_event
 router = APIRouter()
 
 
-@router.get("/system/auth-status", response_model=dict)
+@router.get("/system/auth-status")
 def system_auth_status() -> dict:
     role_counts: dict[str, int] = {}
     for role in settings.operator_token_roles_json.values():
@@ -35,7 +35,7 @@ def system_auth_status() -> dict:
     })
 
 
-@router.post("/system/tokens/operator", response_model=dict)
+@router.post("/system/tokens/operator")
 def system_rotate_operator_tokens(request: RotateOperatorTokensRequest, db: Session = Depends(get_db)) -> dict:
     settings.operator_bearer_token = request.operator_bearer_token
     settings.operator_token_roles_json = dict(request.operator_token_roles_json)
@@ -63,7 +63,7 @@ def system_rotate_operator_tokens(request: RotateOperatorTokensRequest, db: Sess
     })
 
 
-@router.post("/system/tokens/runtime", response_model=dict)
+@router.post("/system/tokens/runtime")
 def system_rotate_runtime_tokens(request: RotateRuntimeTokensRequest, db: Session = Depends(get_db)) -> dict:
     settings.runtime_bearer_token = request.runtime_bearer_token
     settings.runtime_active_tokens_json = list(request.runtime_active_tokens_json)
