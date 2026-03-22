@@ -70,7 +70,7 @@ local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
 local-initdb: export AGP_HOST=0.0.0.0
 local-initdb: export AGP_PORT=7860
 local-initdb: export AGP_DATABASE_URL=sqlite+pysqlite:///${ROOT}/agp.db
-local-initdb: export AGP_QUEUE_BACKEND=memory
+local-initdb: export AGP_QUEUE_BACKEND=db
 local-initdb: export AGP_ARTIFACT_BACKEND=localfs
 local-initdb: export AGP_ARTIFACT_ROOT=${ROOT}/.agp-artifacts
 local-initdb: export AGP_LOG_ROOT=${ROOT}/.agp-logs
@@ -83,7 +83,7 @@ local-seed: export AGP_HOST=0.0.0.0
 local-seed: export AGP_PORT=7860
 local-seed: export AGP_SERVER_URL=http://127.0.0.1:7860
 local-seed: export AGP_DATABASE_URL=sqlite+pysqlite:///${ROOT}/agp.db
-local-seed: export AGP_QUEUE_BACKEND=memory
+local-seed: export AGP_QUEUE_BACKEND=db
 local-seed: export AGP_ARTIFACT_BACKEND=localfs
 local-seed: export AGP_ARTIFACT_ROOT=${ROOT}/.agp-artifacts
 local-seed: export AGP_LOG_ROOT=${ROOT}/.agp-logs
@@ -94,7 +94,7 @@ local-seed: ## Seed capabilities and agents into the local bare-metal stack
 local-serve: export AGP_HOST=0.0.0.0
 local-serve: export AGP_PORT=7860
 local-serve: export AGP_DATABASE_URL=sqlite+pysqlite:///${ROOT}/agp.db
-local-serve: export AGP_QUEUE_BACKEND=memory
+local-serve: export AGP_QUEUE_BACKEND=db
 local-serve: export AGP_ARTIFACT_BACKEND=localfs
 local-serve: export AGP_ARTIFACT_ROOT=${ROOT}/.agp-artifacts
 local-serve: export AGP_LOG_ROOT=${ROOT}/.agp-logs
