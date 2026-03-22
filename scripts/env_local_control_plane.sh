@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+export AGP_SERVER_HOST="${AGP_SERVER_HOST:-0.0.0.0}"
+export AGP_SERVER_PORT="${AGP_SERVER_PORT:-7860}"
+export AGP_DATABASE_URL="${AGP_DATABASE_URL:-sqlite+pysqlite:///${ROOT_DIR}/agp.db}"
+export AGP_ARTIFACT_ROOT="${AGP_ARTIFACT_ROOT:-${ROOT_DIR}/.agp-artifacts}"
+export AGP_LOG_ROOT="${AGP_LOG_ROOT:-${ROOT_DIR}/.agp-logs}"
+export AGP_CHECKPOINT_ROOT="${AGP_CHECKPOINT_ROOT:-${ROOT_DIR}/.agp-checkpoints}"
+
+echo "AGP_SERVER_HOST=${AGP_SERVER_HOST}"
+echo "AGP_SERVER_PORT=${AGP_SERVER_PORT}"
+echo "AGP_DATABASE_URL=${AGP_DATABASE_URL}"
+echo "AGP_ARTIFACT_ROOT=${AGP_ARTIFACT_ROOT}"
+echo "AGP_LOG_ROOT=${AGP_LOG_ROOT}"
+echo "AGP_CHECKPOINT_ROOT=${AGP_CHECKPOINT_ROOT}"
