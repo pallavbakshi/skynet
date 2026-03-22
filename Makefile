@@ -246,6 +246,7 @@ runtime: ## Start a local runtime (tmux + codex)
 runtime-remote: ## Start a remote tmux runtime against the hard-coded Ubuntu control plane
 	OPENROUTER_API_KEY="$${OPENROUTER_API_KEY}" \
 	AGP_SERVER_URL="$${AGP_REMOTE_SERVER_URL}" \
+	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
@@ -260,6 +261,7 @@ runtime-remote: ## Start a remote tmux runtime against the hard-coded Ubuntu con
 runtime-wezterm: ## Start a remote WezTerm runtime against the hard-coded Ubuntu control plane
 	OPENROUTER_API_KEY="$${OPENROUTER_API_KEY}" \
 	AGP_SERVER_URL="$${AGP_REMOTE_SERVER_URL}" \
+	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=wezterm \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
