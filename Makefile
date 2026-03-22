@@ -245,13 +245,14 @@ runtime: ## Start a local runtime (tmux + codex)
 
 runtime-remote: ## Start a remote tmux runtime against the hard-coded Ubuntu control plane
 	OPENROUTER_API_KEY="$${OPENROUTER_API_KEY}" \
+	OPENAI_BASE_URL="https://openrouter.ai/api/v1" \
 	AGP_SERVER_URL="$${AGP_REMOTE_SERVER_URL}" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_TMUX_DEFAULT_CWD="$(ROOT)" \
-	AGP_CODEX_CLI_COMMAND="codex --full-auto" \
+	AGP_CODEX_CLI_COMMAND="ncodex -m openai/gpt-5.3-codex -a never -s danger-full-access" \
 	$(RUN) agp runtime-work-loop "$${AGP_RUNTIME_ID}" \
 		--server-url "$${AGP_REMOTE_SERVER_URL}" \
 		--host-kind tmux \
@@ -260,13 +261,14 @@ runtime-remote: ## Start a remote tmux runtime against the hard-coded Ubuntu con
 
 runtime-wezterm: ## Start a remote WezTerm runtime against the hard-coded Ubuntu control plane
 	OPENROUTER_API_KEY="$${OPENROUTER_API_KEY}" \
+	OPENAI_BASE_URL="https://openrouter.ai/api/v1" \
 	AGP_SERVER_URL="$${AGP_REMOTE_SERVER_URL}" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=wezterm \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_WEZTERM_DEFAULT_CWD="$(ROOT)" \
-	AGP_CODEX_CLI_COMMAND="codex --full-auto" \
+	AGP_CODEX_CLI_COMMAND="ncodex -m openai/gpt-5.3-codex -a never -s danger-full-access" \
 	$(RUN) agp runtime-work-loop "$${AGP_RUNTIME_ID}" \
 		--server-url "$${AGP_REMOTE_SERVER_URL}" \
 		--host-kind wezterm \

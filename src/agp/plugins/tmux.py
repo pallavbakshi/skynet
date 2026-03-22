@@ -23,6 +23,13 @@ from agp.runtime import (
 
 
 def _provider_env() -> dict[str, str]:
+    """Collect provider API keys and AGP connection vars for tmux sessions.
+
+    When OPENROUTER_API_KEY is set, OPENAI_BASE_URL is forced to the
+    OpenRouter endpoint so Codex routes through OpenRouter rather than
+    hitting OpenAI directly.  OPENAI_API_KEY is intentionally NOT
+    forwarded in that case to prevent Codex from ignoring the config.
+    """
     env: dict[str, str] = {}
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_base_url = os.environ.get("OPENAI_BASE_URL")
@@ -38,6 +45,9 @@ def _provider_env() -> dict[str, str]:
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if anthropic_key:
         env["ANTHROPIC_API_KEY"] = anthropic_key
+    agp_server_url = os.environ.get("AGP_SERVER_URL")
+    if agp_server_url:
+        env["AGP_SERVER_URL"] = agp_server_url
     server_url = os.environ.get("AGP_SERVER_URL")
     if server_url:
         env["AGP_SERVER_URL"] = server_url
