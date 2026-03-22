@@ -19,4 +19,5 @@ logs/
 skyops.local.toml
 .skyops-initialized
 .skyops-pids/
+.superset/
 superset/
