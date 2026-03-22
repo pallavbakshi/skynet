@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agp.db import Base
@@ -27,9 +27,17 @@ class Capability(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
+    @property
+    def runtime_requirements(self) -> dict:
+        """Spec-compatible alias for runtime_requirements_json."""
+        return self.runtime_requirements_json
+
 
 class Runtime(Base):
     __tablename__ = "runtimes"
+    __table_args__ = (
+        Index("ix_runtimes_status_lastseen", "status", "last_seen_at"),
+    )
 
     runtime_id: Mapped[str] = mapped_column(String, primary_key=True)
     hostname: Mapped[str] = mapped_column(String)
@@ -45,6 +53,9 @@ class Runtime(Base):
 
 class Agent(Base):
     __tablename__ = "agents"
+    __table_args__ = (
+        Index("ix_agents_status_created", "status", "created_at"),
+    )
 
     agent_id: Mapped[str] = mapped_column(String, primary_key=True)
     capability_id: Mapped[str] = mapped_column(ForeignKey("capabilities.capability_id"))
@@ -79,6 +90,10 @@ class Message(Base):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        Index("ix_jobs_status_created", "status", "created_at"),
+        Index("ix_jobs_agent_status_created", "target_agent_id", "status", "created_at"),
+    )
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.message_id"))
@@ -111,6 +126,11 @@ class QueueDeliveryRecord(Base):
 
 class Run(Base):
     __tablename__ = "runs"
+    __table_args__ = (
+        UniqueConstraint("job_id", "attempt", name="uq_runs_job_attempt"),
+        Index("ix_runs_job_attempt", "job_id", "attempt"),
+        Index("ix_runs_runtime_status_created", "runtime_id", "status", "created_at"),
+    )
 
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"))
@@ -126,6 +146,10 @@ class Run(Base):
 
 class Lease(Base):
     __tablename__ = "leases"
+    __table_args__ = (
+        Index("ix_leases_run_status", "run_id", "status"),
+        Index("ix_leases_runtime_status_expires", "runtime_id", "status", "expires_at"),
+    )
 
     lease_id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"))
@@ -140,6 +164,10 @@ class Lease(Base):
 
 class Artifact(Base):
     __tablename__ = "artifacts"
+    __table_args__ = (
+        Index("ix_artifacts_job_created", "job_id", "created_at"),
+        Index("ix_artifacts_run_created", "run_id", "created_at"),
+    )
 
     artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
     job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.job_id"), nullable=True)
@@ -192,6 +220,10 @@ class HandoffJob(Base):
 
 class Event(Base):
     __tablename__ = "events"
+    __table_args__ = (
+        Index("ix_events_job_seq", "job_id", "event_seq"),
+        Index("ix_events_run_seq", "run_id", "event_seq"),
+    )
 
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
     event_seq: Mapped[int] = mapped_column(Integer, unique=True)
@@ -214,6 +246,9 @@ class EventJobLink(Base):
 
 class IdempotencyKey(Base):
     __tablename__ = "idempotency_keys"
+    __table_args__ = (
+        Index("ix_idempotency_expires", "expires_at"),
+    )
 
     idempotency_key: Mapped[str] = mapped_column(String, primary_key=True)
     endpoint: Mapped[str] = mapped_column(String, primary_key=True)

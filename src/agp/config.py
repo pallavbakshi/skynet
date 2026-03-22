@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     redis_queue_key_prefix: str = "agp"
     queue_visibility_timeout_seconds: int = 30
     queue_max_delivery_attempts: int = 3
+    lease_heartbeat_interval_seconds: int = 10
     agent_idle_timeout_seconds: int = 300
     runtime_stale_timeout_seconds: int = 90
     runtime_degraded_timeout_seconds: int = 45
@@ -83,6 +84,14 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "artifact backend 's3' requires: " + ", ".join(missing)
                 )
+        if self.queue_visibility_timeout_seconds <= self.lease_heartbeat_interval_seconds:
+            import warnings
+            warnings.warn(
+                f"queue_visibility_timeout_seconds ({self.queue_visibility_timeout_seconds}) should be "
+                f"greater than lease_heartbeat_interval_seconds ({self.lease_heartbeat_interval_seconds}) "
+                f"to prevent premature broker redelivery",
+                stacklevel=2,
+            )
         return self
 
 

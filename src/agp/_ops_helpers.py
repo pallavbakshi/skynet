@@ -25,7 +25,7 @@ from agp.control_plane import (
 from agp.db import SessionLocal, current_release_version, engine
 from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
-from agp.models import Artifact, Job, QueueDeliveryRecord, Run, SystemMetadata, utc_now
+from agp.models import Artifact, HandoffArtifact, Job, JobArtifact, QueueDeliveryRecord, Run, RunArtifact, SystemMetadata, utc_now
 from agp.queue_backend import get_queue_backend
 
 
@@ -750,3 +750,41 @@ def rollback_to_previous_version() -> dict:
     finally:
         session.close()
     return get_upgrade_status()
+
+
+def detect_orphan_artifacts(*, limit: int | None = None) -> dict:
+    """Find artifact records not referenced by any job, run, or handoff link.
+
+    Orphans are artifacts in the ``artifacts`` table with no corresponding
+    row in ``job_artifacts``, ``run_artifacts``, or ``handoff_artifacts``.
+    """
+    from sqlalchemy import exists
+
+    session = SessionLocal()
+    try:
+        is_referenced = (
+            exists().where(JobArtifact.artifact_id == Artifact.artifact_id)
+            | exists().where(RunArtifact.artifact_id == Artifact.artifact_id)
+            | exists().where(HandoffArtifact.artifact_id == Artifact.artifact_id)
+        )
+        query = (
+            select(Artifact.artifact_id, Artifact.job_id, Artifact.run_id, Artifact.kind, Artifact.created_at)
+            .where(~is_referenced)
+            .order_by(Artifact.created_at.asc())
+        )
+        if limit is not None:
+            query = query.limit(limit)
+        rows = session.execute(query).all()
+        orphans = [
+            {
+                "artifact_id": r.artifact_id,
+                "job_id": r.job_id,
+                "run_id": r.run_id,
+                "kind": r.kind,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+        return {"orphan_count": len(orphans), "orphans": orphans}
+    finally:
+        session.close()

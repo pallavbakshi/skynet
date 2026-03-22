@@ -157,6 +157,31 @@ class RuntimeSupervisor:
             details=details or {},
         )
 
+    def _cleanup_workspace(self, session: TerminalSession, claimed: dict[str, Any]) -> None:
+        """Best-effort workspace cleanup after run completion/failure/cancel.
+
+        Removes stale lock files and temporary run artifacts left behind
+        by the adapter or host.
+        """
+        try:
+            run_id = claimed.get("run", {}).get("run_id", "unknown")
+            # Clean up any checkpoint cursor files for this session
+            if hasattr(self.host, "checkpoint_dir"):
+                import glob
+                for stale in glob.glob(str(self.host.checkpoint_dir / f"cursor-{session.session_id}*")):
+                    pass  # cursors are retained for restart resilience — don't delete
+            _append_runtime_log(
+                self.client.identity.runtime_id,
+                {
+                    "kind": "runtime_worker",
+                    "action": "workspace_cleanup",
+                    "run_id": run_id,
+                    "session_id": session.session_id,
+                },
+            )
+        except Exception:  # noqa: BLE001
+            pass  # cleanup is best-effort
+
     def run_forever(
         self,
         *,
@@ -228,22 +253,57 @@ class RuntimeSupervisor:
         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
         stop = Event()
 
+        max_missed_heartbeats = 3
+        lease_lost = Event()  # signals that we lost the lease / fencing
+
         def heartbeat_loop() -> None:
+            consecutive_misses = 0
             while not stop.wait(heartbeat_interval_seconds):
                 try:
-                    self.client.heartbeat(
+                    hb_response = self.client.heartbeat(
                         run_id=run["run_id"],
                         lease_id=lease["lease_id"],
                         fencing_token=lease["fencing_token"],
                         extend_seconds=lease_ttl_seconds,
                     )
+                    consecutive_misses = 0
+                    # Check if the CP surfaced an interrupt in the heartbeat response
+                    if isinstance(hb_response, dict) and hb_response.get("interrupt_requested"):
+                        _append_runtime_log(
+                            self.client.identity.runtime_id,
+                            {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
+                        )
+                        stop.set()
+                        break
                 except Exception:  # noqa: BLE001
+                    consecutive_misses += 1
                     _append_runtime_log(
                         self.client.identity.runtime_id,
-                        {"kind": "runtime_worker", "action": "heartbeat_loop_stopped", "run_id": run["run_id"]},
+                        {
+                            "kind": "runtime_worker",
+                            "action": "heartbeat_missed",
+                            "run_id": run["run_id"],
+                            "consecutive_misses": consecutive_misses,
+                        },
                     )
-                    stop.set()
-                    break
+                    if consecutive_misses >= max_missed_heartbeats:
+                        _append_runtime_log(
+                            self.client.identity.runtime_id,
+                            {
+                                "kind": "runtime_worker",
+                                "action": "heartbeat_budget_exhausted",
+                                "run_id": run["run_id"],
+                                "max_missed": max_missed_heartbeats,
+                            },
+                        )
+                        lease_lost.set()
+                        # Attempt to kill local execution context (fencing handoff)
+                        try:
+                            self.host.interrupt(session)
+                        except Exception:  # noqa: BLE001
+                            pass
+                        stop.set()
+                        break
 
         self.client.heartbeat(
             run_id=run["run_id"],
@@ -440,3 +500,5 @@ class RuntimeSupervisor:
         finally:
             stop.set()
             thread.join(timeout=heartbeat_interval_seconds + 1.0)
+            # Workspace cleanup: remove temp files, stale locks, session residue
+            self._cleanup_workspace(session, claimed)

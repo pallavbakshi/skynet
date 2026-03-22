@@ -18,15 +18,31 @@ else:
 _PROFILES_DIR = Path.home() / ".agp" / "profiles"
 
 
+def _url_from_host_port() -> str | None:
+    """Build a server URL from AGP_HOST/AGP_PORT if set (deploy-script compat)."""
+    host = os.environ.get("AGP_HOST")
+    port = os.environ.get("AGP_PORT")
+    if host is not None or port is not None:
+        h = host or "127.0.0.1"
+        # Map 0.0.0.0 (listen-on-all) to 127.0.0.1 for client connections
+        if h == "0.0.0.0":
+            h = "127.0.0.1"
+        p = port or "7860"
+        return f"http://{h}:{p}"
+    return None
+
+
 @dataclass
 class AgpProfile:
     """Connection context for talking to an AGP control plane.
 
     Resolution order:
     1. Explicit constructor args (programmatic use)
-    2. AGP_SERVER_URL + AGP_OPERATOR_TOKEN env vars (container/CI use)
-    3. ~/.agp/profiles/{name}.toml file (operator workstation use)
-    4. Fallback: http://127.0.0.1:7860, no token (local dev)
+    2. AGP_SERVER_URL env var (container/CI use)
+    3. AGP_HOST + AGP_PORT env vars (deploy-script compat)
+    4. AGP_OPERATOR_TOKEN env var (independent of URL source)
+    5. ~/.agp/profiles/{name}.toml file (operator workstation use)
+    6. Fallback: http://127.0.0.1:7860, no token (local dev)
     """
 
     server_url: str = "http://127.0.0.1:7860"
@@ -38,10 +54,10 @@ class AgpProfile:
         """Load a profile by name, checking env vars then profile files.
 
         Env vars are checked first and override independently:
-        AGP_SERVER_URL overrides the server URL, AGP_OPERATOR_TOKEN
-        overrides the token.  Either or both can be set.
+        AGP_SERVER_URL (or AGP_HOST/AGP_PORT) overrides the server URL,
+        AGP_OPERATOR_TOKEN overrides the token.  Either or both can be set.
         """
-        env_url = os.environ.get("AGP_SERVER_URL")
+        env_url = os.environ.get("AGP_SERVER_URL") or _url_from_host_port()
         env_token = os.environ.get("AGP_OPERATOR_TOKEN")
 
         # If any env var is set (even empty string), start from env.
@@ -79,7 +95,7 @@ class AgpProfile:
     def from_env(cls) -> AgpProfile:
         """Build a profile purely from environment variables."""
         return cls(
-            server_url=os.environ.get("AGP_SERVER_URL", "http://127.0.0.1:7860"),
+            server_url=os.environ.get("AGP_SERVER_URL") or _url_from_host_port() or "http://127.0.0.1:7860",
             token=os.environ.get("AGP_OPERATOR_TOKEN"),
             name="env",
         )

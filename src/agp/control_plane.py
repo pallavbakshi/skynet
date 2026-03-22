@@ -15,7 +15,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Query, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy.exc import OperationalError
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from agp.config import settings
@@ -536,6 +536,23 @@ def _active_lease_for_run(db: Session, run_id: str, lease_id: str) -> Lease:
     return lease
 
 
+_TERMINAL_RUN_STATES = frozenset({
+    RunStatus.COMPLETED.value,
+    RunStatus.FAILED.value,
+    RunStatus.CANCELLED.value,
+    RunStatus.ABANDONED.value,
+})
+
+
+def _reject_if_terminal(run: Run) -> None:
+    """Reject a terminal report if the run is already in a terminal state."""
+    if run.status in _TERMINAL_RUN_STATES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"run {run.run_id} is already terminal (status={run.status})",
+        )
+
+
 def _assert_lease_owner(lease: Lease, runtime_id: str, fencing_token: int) -> None:
     if lease.runtime_id != runtime_id:
         raise HTTPException(status_code=409, detail="lease runtime mismatch")
@@ -784,7 +801,13 @@ def sweep_idle_agents(
                 Lease.status == LeaseStatus.ACTIVE.value,
             )
         ) or 0
-        if has_queued_work or has_active_lease:
+        has_active_run = db.scalar(
+            select(func.count()).select_from(Run).where(
+                Run.agent_id == agent.agent_id,
+                Run.status.in_([RunStatus.LEASED.value, RunStatus.RUNNING.value, RunStatus.RECOVERING.value]),
+            )
+        ) or 0
+        if has_queued_work or has_active_lease or has_active_run:
             continue
         agent.status = AgentStatus.TERMINATED.value
         agent.updated_at = now
@@ -1100,6 +1123,10 @@ def send_message(
 
     if request.target.type == "agent":
         target_agent = _require_agent(db, request.target.id)
+        if target_agent.status == AgentStatus.TERMINATED.value:
+            raise HTTPException(status_code=409, detail=f"agent is terminated: {request.target.id}")
+        if target_agent.status == AgentStatus.DRAINING.value:
+            raise HTTPException(status_code=409, detail=f"agent is draining: {request.target.id}")
     elif request.target.type == "capability":
         _require_capability(db, request.target.id)
         target_agent = None
@@ -1430,9 +1457,48 @@ def unblock_job(job_id: str, reason: str = Query(default="operator_unblocked"), 
     return _ok({"job_id": job.job_id, "status": job.status, "reason": reason})
 
 
+def _handoff_ancestor_job_ids(db: Session, job_id: str, max_depth: int = 50) -> set[str]:
+    """Walk the handoff chain upward to collect all ancestor job IDs."""
+    ancestors: set[str] = set()
+    current = job_id
+    for _ in range(max_depth):
+        # Find the handoff where current is a child job
+        link = db.scalar(
+            select(HandoffJob.handoff_id).where(HandoffJob.job_id == current)
+        )
+        if link is None:
+            break
+        parent = db.scalar(
+            select(Handoff.source_job_id).where(Handoff.handoff_id == link)
+        )
+        if parent is None or parent in ancestors:
+            break
+        ancestors.add(parent)
+        current = parent
+    return ancestors
+
+
 @router.post("/jobs/{job_id}/handoff", response_model=dict)
 def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_db)) -> dict:
     source_job = _require_job(db, job_id)
+    # Cycle detection: reject if any target agent currently has a running/queued
+    # ancestor job in the handoff chain (would create a circular dependency).
+    ancestor_ids = _handoff_ancestor_job_ids(db, source_job.job_id)
+    if ancestor_ids:
+        for target in request.targets:
+            if target.type == "agent":
+                agent_ancestor_jobs = db.scalars(
+                    select(Job.job_id).where(
+                        Job.target_agent_id == target.id,
+                        Job.status.in_([JobStatus.RUNNING.value, JobStatus.QUEUED.value]),
+                        Job.job_id.in_(ancestor_ids),
+                    )
+                ).all()
+                if agent_ancestor_jobs:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"handoff cycle detected: agent {target.id} has ancestor job {agent_ancestor_jobs[0]} in its chain",
+                    )
     handoff = Handoff(handoff_id=_new_id("hnd"), source_job_id=source_job.job_id)
     db.add(handoff)
     db.flush()
@@ -1468,6 +1534,7 @@ def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_
         db.add(HandoffJob(handoff_id=handoff.handoff_id, job_id=child.job_id))
         child_job_ids.append(child.job_id)
         _queue_backend().enqueue_job(db, job=child)
+    validated_artifact_ids: list[str] = []
     for artifact_id in request.artifact_ids:
         artifact = db.get(Artifact, artifact_id)
         if artifact is None:
@@ -1478,6 +1545,13 @@ def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_
                 detail=f"artifact {artifact_id} does not belong to source job {source_job.job_id}",
             )
         db.add(HandoffArtifact(handoff_id=handoff.handoff_id, artifact_id=artifact_id))
+        validated_artifact_ids.append(artifact_id)
+    # Preserve handoff artifacts to each child job for provenance
+    for child_job_id in child_job_ids:
+        for artifact_id in validated_artifact_ids:
+            artifact = db.get(Artifact, artifact_id)
+            if artifact is not None:
+                db.add(JobArtifact(job_id=child_job_id, artifact_id=artifact_id, role=artifact.kind))
     _create_event(
         db,
         job_id=source_job.job_id,
@@ -1576,6 +1650,19 @@ def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends
         agent.workspace_ref = request.workspace_ref
     db.commit()
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
+
+
+@router.post("/agents/{agent_id}/undrain", response_model=dict)
+def agent_undrain(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    """Lift draining status and return agent to IDLE."""
+    agent = _require_agent(db, agent_id)
+    if agent.status != AgentStatus.DRAINING.value:
+        raise HTTPException(status_code=409, detail=f"agent is not draining (status={agent.status})")
+    agent.status = AgentStatus.IDLE.value
+    agent.updated_at = utc_now()
+    _create_event(db, agent_id=agent.agent_id, event_type="agent.idle", body={"reason": "undrain"})
+    db.commit()
+    return _ok({"agent_id": agent.agent_id, "status": agent.status})
 
 
 @router.post("/agents/{agent_id}/down", response_model=dict)
@@ -1821,14 +1908,36 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     elif request.capability_id is not None:
         pool = db.get(CapabilityPool, request.capability_id)
         routing_policy = pool.routing_policy if pool else "least_recent"
-        candidate_query = select(Agent).where(
-            Agent.capability_id == request.capability_id,
-            Agent.status == AgentStatus.IDLE.value,
-            or_(Agent.assigned_runtime_id.is_(None), Agent.assigned_runtime_id == runtime.runtime_id),
+        # Exclude agents whose assigned runtime is draining, degraded, or unreachable.
+        # Prefer agents on healthy runtimes over degraded ones.
+        candidate_query = (
+            select(Agent)
+            .outerjoin(Runtime, Agent.assigned_runtime_id == Runtime.runtime_id)
+            .where(
+                Agent.capability_id == request.capability_id,
+                Agent.status == AgentStatus.IDLE.value,
+                or_(Agent.assigned_runtime_id.is_(None), Agent.assigned_runtime_id == runtime.runtime_id),
+                or_(
+                    Agent.assigned_runtime_id.is_(None),
+                    Runtime.status.notin_([RuntimeStatus.DRAINING.value, RuntimeStatus.OFFLINE.value]),
+                ),
+                or_(
+                    Agent.assigned_runtime_id.is_(None),
+                    Runtime.health_status.notin_([HealthStatus.UNREACHABLE.value]),
+                ),
+            )
         )
         if routing_policy == "least_recent":
+            # Prefer healthy runtimes over degraded, then by recency
             candidate_query = candidate_query.order_by(
-                Agent.last_seen_at.asc().nulls_first(), Agent.agent_id.asc()
+                # healthy (0) < degraded (1) < null (2)
+                case(
+                    (Runtime.health_status == HealthStatus.HEALTHY.value, 0),
+                    (Runtime.health_status == HealthStatus.DEGRADED.value, 1),
+                    else_=2,
+                ).asc(),
+                Agent.last_seen_at.asc().nulls_first(),
+                Agent.agent_id.asc(),
             )
         else:
             candidate_query = candidate_query.order_by(Agent.agent_id.asc())
@@ -1875,7 +1984,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
         agent_id=agent.agent_id,
         runtime_id=runtime.runtime_id,
         attempt=attempt,
-        status=RunStatus.LEASED.value,
+        status=RunStatus.CREATED.value,
     )
     db.add(run)
     db.flush()
@@ -1888,6 +1997,8 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
         event_type="run.created",
         body={"attempt": attempt},
     )
+    # Transition created → leased
+    run.status = RunStatus.LEASED.value
     lease = Lease(
         lease_id=_new_id("lease"),
         run_id=run.run_id,
@@ -1950,6 +2061,10 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
             "run": _serialize(run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status")),
             "lease": _serialize(lease, ("lease_id", "run_id", "agent_id", "runtime_id", "fencing_token", "status", "expires_at")),
             "agent_id": agent.agent_id,
+            "artifact_upload_policy": {
+                "required_roles": ["prompt", "transcript_log", "exec_log", "result"],
+                "allow_additional_roles": True,
+            },
         }
     )
 
@@ -1987,7 +2102,17 @@ def heartbeat_run(run_id: str, request: HeartbeatRequest, db: Session = Depends(
         body={"lease_id": lease.lease_id, "expires_at": lease.expires_at.isoformat()},
     )
     db.commit()
-    return _ok({"run_id": run_id, "lease_id": lease.lease_id, "status": run.status, "expires_at": lease.expires_at})
+    # Surface interrupt intent in heartbeat response so the runtime discovers it
+    # without needing a separate get_job poll.
+    job = db.get(Job, run.job_id)
+    interrupt_requested = job is not None and job.status == JobStatus.INTERRUPT_REQUESTED.value
+    return _ok({
+        "run_id": run_id,
+        "lease_id": lease.lease_id,
+        "status": run.status,
+        "expires_at": lease.expires_at,
+        "interrupt_requested": interrupt_requested,
+    })
 
 
 @router.post("/runs/{run_id}/progress", response_model=dict)
@@ -2021,7 +2146,7 @@ def recovering_run(run_id: str, request: RecoveryRequest, db: Session = Depends(
     if run is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
     runtime = _require_runtime(db, request.runtime_id)
-    if run.status not in {RunStatus.RUNNING.value, RunStatus.LEASED.value}:
+    if run.status != RunStatus.RUNNING.value:
         raise HTTPException(status_code=409, detail=f"run cannot enter recovering from state {run.status}")
     run.status = RunStatus.RECOVERING.value
     lease.expires_at = utc_now() + timedelta(seconds=30)
@@ -2070,6 +2195,7 @@ def cancel_run(run_id: str, request: CancelRunRequest, db: Session = Depends(get
     run = db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
     agent = _require_agent(db, run.agent_id)
     runtime = _require_runtime(db, run.runtime_id)
@@ -2121,6 +2247,7 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     run = db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
     agent = _require_agent(db, run.agent_id)
     runtime = _require_runtime(db, run.runtime_id)
@@ -2186,6 +2313,7 @@ def fail_run(run_id: str, request: FailRunRequest, db: Session = Depends(get_db)
     run = db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
     agent = _require_agent(db, run.agent_id)
     runtime = _require_runtime(db, run.runtime_id)
@@ -2601,6 +2729,72 @@ def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
             _prom_metric("agp_events_latest_seq", latest_event_seq),
         ]
     )
+
+    # Job throughput: total completed + failed (terminal jobs)
+    total_completed = int(db.scalar(
+        select(func.count()).select_from(Job).where(Job.status == JobStatus.COMPLETED.value)
+    ) or 0)
+    total_failed = int(db.scalar(
+        select(func.count()).select_from(Job).where(Job.status == JobStatus.FAILED.value)
+    ) or 0)
+    lines.extend([
+        "# HELP agp_jobs_completed_total Total jobs that reached completed state.",
+        "# TYPE agp_jobs_completed_total counter",
+        _prom_metric("agp_jobs_completed_total", total_completed),
+        "# HELP agp_jobs_failed_total Total jobs that reached failed state.",
+        "# TYPE agp_jobs_failed_total counter",
+        _prom_metric("agp_jobs_failed_total", total_failed),
+    ])
+
+    # Interrupt rate: count of interrupt_requested events
+    interrupt_count = int(db.scalar(
+        select(func.count()).select_from(Event).where(Event.event_type == "job.interrupt_requested")
+    ) or 0)
+    lines.extend([
+        "# HELP agp_interrupts_total Total job interrupt requests.",
+        "# TYPE agp_interrupts_total counter",
+        _prom_metric("agp_interrupts_total", interrupt_count),
+    ])
+
+    # Queue depth (convenience gauge)
+    queue_depth = int(db.scalar(
+        select(func.count()).select_from(Job).where(Job.status == JobStatus.QUEUED.value)
+    ) or 0)
+    lines.extend([
+        "# HELP agp_queue_depth Current number of queued jobs.",
+        "# TYPE agp_queue_depth gauge",
+        _prom_metric("agp_queue_depth", queue_depth),
+    ])
+
+    # Active leases
+    active_leases = int(db.scalar(
+        select(func.count()).select_from(Lease).where(Lease.status == LeaseStatus.ACTIVE.value)
+    ) or 0)
+    lines.extend([
+        "# HELP agp_leases_active Current active leases.",
+        "# TYPE agp_leases_active gauge",
+        _prom_metric("agp_leases_active", active_leases),
+    ])
+
+    # RPO/RTO: time since last backup (seconds) — derived from system_metadata
+    last_backup_at = db.scalar(
+        select(SystemMetadata.value).where(SystemMetadata.key == "last_backup_at")
+    )
+    if last_backup_at:
+        try:
+            from datetime import datetime as _dt
+            backup_ts = _dt.fromisoformat(last_backup_at)
+            backup_age = (utc_now() - backup_ts).total_seconds()
+        except Exception:
+            backup_age = -1
+    else:
+        backup_age = -1
+    lines.extend([
+        "# HELP agp_backup_age_seconds Seconds since last successful backup (-1 if unknown).",
+        "# TYPE agp_backup_age_seconds gauge",
+        _prom_metric("agp_backup_age_seconds", backup_age),
+    ])
+
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
@@ -2704,6 +2898,53 @@ def observability_runtime_logs(runtime_id: str, limit: int = Query(default=100, 
             "runtime_id": runtime_id,
             "limit": limit,
         }
+    )
+
+
+_AUDIT_EVENT_TYPES = frozenset({
+    "agent.provisioning", "agent.idle", "agent.terminated", "agent.draining",
+    "job.interrupt_requested", "job.cancelled",
+    "runtime.registered", "runtime.offline",
+    "handoff.created",
+    "token.operator_rotated", "token.runtime_rotated",
+})
+
+
+@router.get("/observability/audit", response_model=dict)
+def observability_audit(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    cursor: str | None = Query(default=None),
+) -> dict:
+    """Audit trail: security and lifecycle events filtered for operator review."""
+    query = select(Event).where(Event.event_type.in_(_AUDIT_EVENT_TYPES))
+    query = _apply_created_cursor(query, Event, cursor)
+    rows = db.scalars(
+        query.order_by(Event.event_seq.desc()).limit(limit + 1)
+    ).all()
+    page_rows = rows[:limit]
+    next_cursor = None
+    if len(rows) > limit:
+        tail = page_rows[-1]
+        next_cursor = _encode_cursor({"created_at": tail.created_at.isoformat(), "id": tail.event_id})
+    return _ok(
+        _page(
+            [
+                {
+                    "event_id": e.event_id,
+                    "event_seq": e.event_seq,
+                    "event_type": e.event_type,
+                    "agent_id": e.agent_id,
+                    "runtime_id": e.runtime_id,
+                    "job_id": e.job_id,
+                    "body": e.body_json,
+                    "created_at": e.created_at,
+                }
+                for e in page_rows
+            ],
+            limit=limit,
+            next_cursor=next_cursor,
+        )
     )
 
 

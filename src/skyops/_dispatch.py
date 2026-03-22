@@ -93,6 +93,46 @@ def fetch(
     _emit(result)
 
 
+@dispatch_app.command("handoff")
+def handoff(
+    job_id: str = typer.Argument(help="Source job ID."),
+    target_type: str = typer.Option("agent", "--type", "-t", help="Target type: agent or capability."),
+    target_id: str = typer.Option(..., "--target", help="Target agent or capability ID."),
+    task: str = typer.Option(..., "--task", help="Task text for child job(s)."),
+    artifact_ids: str | None = typer.Option(None, "--artifacts", help="Comma-separated artifact IDs to pass through."),
+) -> None:
+    """Create a handoff from a source job to a child job."""
+    targets = [{"type": target_type, "id": target_id}]
+    message = {"text": task, "metadata": {}}
+    art_ids = [a.strip() for a in artifact_ids.split(",")] if artifact_ids else []
+    with _client() as client:
+        result = client.handoff(job_id, targets, message, artifact_ids=art_ids)
+    _emit(result)
+
+
+@dispatch_app.command("nudge")
+def nudge(
+    agent_id: str = typer.Argument(help="Target agent ID to nudge."),
+    message: str = typer.Argument(help="Nudge message text."),
+    priority: int = typer.Option(1, "--priority", "-p", help="Priority 1-4 (1=highest)."),
+    job_id: str | None = typer.Option(None, "--job", help="Associated job ID."),
+) -> None:
+    """Send a human co-pilot nudge to an agent."""
+    with _client() as client:
+        result = client.create_nudge(agent_id, message, priority=priority, source="human", job_id=job_id)
+    _emit(result)
+
+
+@dispatch_app.command("undrain")
+def undrain(
+    agent_id: str = typer.Argument(help="Agent ID to undrain."),
+) -> None:
+    """Lift draining status and return agent to IDLE."""
+    with _client() as client:
+        result = client.agent_undrain(agent_id)
+    _emit(result)
+
+
 @dispatch_app.command("deliveries")
 def list_deliveries(
     state: str | None = typer.Option(None, "--state", help="Filter by delivery state."),

@@ -230,6 +230,57 @@ def host_terminate(
     _emit({"host_kind": host.kind, "session_id": session.session_id, "agent_id": session.agent_id, "terminated": True})
 
 
+@host_app.command("attach")
+def host_attach(
+    host_kind: str,
+    session_id: str,
+    agent_id: str,
+    workspace_ref: str | None = None,
+    workspace: str | None = None,
+) -> None:
+    """Re-attach to an existing session (verify it exists and return its state)."""
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
+    session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
+    exists = host.session_exists(session)
+    if not exists:
+        typer.echo(f"Session {session_id} does not exist.", err=True)
+        raise typer.Exit(1)
+    health = host.health(session)
+    _emit({
+        "host_kind": host.kind,
+        "session_id": session.session_id,
+        "agent_id": session.agent_id,
+        "attached": True,
+        "healthy": health.healthy,
+        "reason": health.reason,
+    })
+
+
+@host_app.command("reset")
+def host_reset(
+    host_kind: str,
+    session_id: str,
+    agent_id: str,
+    workspace_ref: str | None = None,
+    workspace: str | None = None,
+) -> None:
+    """Reset a session (terminate and recreate)."""
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
+    session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
+    new_session = host.reset_session(session)
+    _emit({
+        "host_kind": host.kind,
+        "old_session_id": session.session_id,
+        "new_session_id": new_session.session_id,
+        "agent_id": new_session.agent_id,
+        "reset": True,
+    })
+
+
 @adapter_app.command("list-adapters")
 def adapter_list_adapters() -> None:
     """List supported adapter kinds."""

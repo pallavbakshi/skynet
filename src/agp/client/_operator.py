@@ -346,6 +346,12 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def observability_audit(self, *, limit: int = 100) -> dict:
+        """Fetch the audit trail (security and lifecycle events)."""
+        response = self._client.get("/observability/audit", params={"limit": limit})
+        response.raise_for_status()
+        return response.json()["data"]
+
     def logs_control_plane(self, *, limit: int = 100) -> dict:
         response = self._client.get("/observability/logs/control-plane", params={"limit": limit})
         response.raise_for_status()
@@ -400,6 +406,62 @@ class AgpClient:
         if status is not None:
             params["status"] = status
         response = self._client.get("/nudges", params=params)
+        response.raise_for_status()
+        return response.json()["data"]
+
+    # ── Handoff ───────────────────────────────────────────────────
+
+    def handoff(
+        self,
+        job_id: str,
+        targets: list[dict[str, str]],
+        message: dict[str, Any],
+        *,
+        artifact_ids: list[str] | None = None,
+    ) -> dict:
+        """Create a handoff from a source job to one or more child jobs.
+
+        Parameters
+        ----------
+        job_id : str
+            Source job ID.
+        targets : list[dict]
+            List of ``{"type": "agent"|"capability", "id": "..."}`` dicts.
+        message : dict
+            ``{"text": "...", "metadata": {...}}`` payload for child jobs.
+        artifact_ids : list[str] | None
+            Artifact IDs from the source job to attach to the handoff.
+        """
+        response = self._client.post(
+            f"/jobs/{job_id}/handoff",
+            json={
+                "targets": targets,
+                "message": message,
+                "artifact_ids": artifact_ids or [],
+            },
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
+    # ── Agent lifecycle ──────────────────────────────────────────
+
+    def agent_down(
+        self,
+        agent_id: str,
+        *,
+        mode: str = "drain",
+    ) -> dict:
+        """Take an agent down (drain, terminate, or force)."""
+        response = self._client.post(
+            f"/agents/{agent_id}/down",
+            json={"mode": mode},
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def agent_undrain(self, agent_id: str) -> dict:
+        """Lift draining status and return the agent to IDLE."""
+        response = self._client.post(f"/agents/{agent_id}/undrain")
         response.raise_for_status()
         return response.json()["data"]
 
