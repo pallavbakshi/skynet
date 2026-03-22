@@ -1,8 +1,8 @@
-"""CLI entrypoint for the AGP scaffold — service commands only.
+"""CLI entrypoint for the AGP scaffold.
 
-Operator, debug, and API-client commands have moved to ``skyops``.
-SDK client functions live in ``agp.client``.
-Operator helper functions live in ``agp._ops_helpers``.
+Contains both service-side commands (serve, initdb, sweep, etc.) and
+lightweight SDK client commands (send, wait, status, ls, info, nudge,
+etc.) that talk to a running control plane over HTTP.
 
 All server-side imports are deferred to command bodies so that
 ``pip install agp`` (without ``[server]``) can still import
@@ -99,8 +99,14 @@ def runtime_work_loop(
     actual_adapter_kind = adapter_kind if adapter_kind is not None else settings.runtime_agent_adapter_kind
 
     actual_hostname = hostname or _socket.gethostname()
+    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or None
     client = RuntimeClient(
-        RuntimeIdentity(runtime_id=runtime_id, hostname=actual_hostname, server_url=actual_server_url)
+        RuntimeIdentity(
+            runtime_id=runtime_id,
+            hostname=actual_hostname,
+            server_url=actual_server_url,
+            token=runtime_token,
+        )
     )
     worker = RuntimeSupervisor(
         client,
@@ -178,14 +184,19 @@ def sweep_runtimes_loop(
 _SEPARATOR = "========================================="
 
 
-def _resolve_url(server_url: str | None) -> str:
-    return server_url or os.environ.get("AGP_SERVER_URL") or _default_server_url()
+def _make_client(server_url: str | None = None):
+    """Build an AgpClient that honours profile/env auth.
 
-
-def _make_client(server_url: str | None):
+    If *server_url* is explicitly passed (e.g. via ``--server-url``), it
+    overrides the URL from the profile/env, but the token is still loaded
+    from the profile resolution chain (env → file → fallback).
+    """
     from agp.client import AgpClient, AgpProfile
 
-    return AgpClient(profile=AgpProfile(server_url=_resolve_url(server_url)))
+    profile = AgpProfile.load()
+    if server_url:
+        profile.server_url = server_url
+    return AgpClient(profile=profile)
 
 
 def _print_banner(label: str, subtitle: str) -> None:
@@ -297,13 +308,11 @@ def send(
     Use --nudge <orc_id> to get a push notification when the task finishes.
     """
     import time
-    from agp.client import AgpClient, AgpProfile
 
-    url = _resolve_url(server_url)
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
-    with AgpClient(profile=AgpProfile(server_url=url)) as client:
+    with _make_client(server_url) as client:
         typer.echo(f"[..] Dispatching to {agent_id}...")
         result = client.send(
             "agent", agent_id, task,
@@ -383,15 +392,11 @@ def status(
 
 
 def _status_health(server_url: str | None) -> None:
-    import json
-    import urllib.request
-
-    url = _resolve_url(server_url)
     try:
-        resp = urllib.request.urlopen(f"{url}/health", timeout=5)
-        data = json.loads(resp.read())
-        typer.echo(f"ok: {data['ok']}")
-        for k, v in data.get("data", {}).get("components", {}).items():
+        with _make_client(server_url) as client:
+            data = client.health()
+        typer.echo(f"status: {data.get('status', 'ok')}")
+        for k, v in data.get("components", {}).items():
             typer.echo(f"  {k}: {v}")
     except Exception as e:
         typer.echo(f"unreachable: {e}", err=True)

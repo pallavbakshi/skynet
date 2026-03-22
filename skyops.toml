@@ -28,7 +28,9 @@ runtime_token = ""
 
 [agents.agt_local]
 capability_id = "cap_python"
-workspace_ref = "/Users/pb/projects/skynet"
+# workspace_ref is machine-specific — set it in skyops.local.toml:
+#   [agents.agt_local]
+#   workspace_ref = "/path/to/your/checkout"
 
 [capabilities.cap_python]
 name = "python"

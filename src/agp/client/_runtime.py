@@ -18,6 +18,7 @@ class RuntimeIdentity:
     server_url: str = "http://127.0.0.1:7860"
     release_version: str = "0.1.0"
     metadata: dict[str, Any] = field(default_factory=dict)
+    token: str | None = None
 
 
 class RuntimeClient:
@@ -46,8 +47,13 @@ class RuntimeClient:
     ) -> None:
         self.identity = identity
         self._owns_client = client is None
+        headers: dict[str, str] = {}
+        if identity.token:
+            headers["Authorization"] = f"Bearer {identity.token}"
         self._client = client or httpx.Client(
-            base_url=identity.server_url.rstrip("/"), timeout=timeout
+            base_url=identity.server_url.rstrip("/"),
+            timeout=timeout,
+            headers=headers,
         )
         self._log_fn = log_fn
 

@@ -179,14 +179,49 @@ def k8s_smoke(
     else:
         typer.echo("[3/7] Skipping image load.")
 
-    # ── Apply manifests ───────────────────────────────────────────
-    typer.echo("[4/7] Applying k8s manifests...")
-    subprocess.run(kctl + ["delete", "namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
-    rendered = subprocess.run(
-        kctl + ["kustomize", overlay, "--load-restrictor=LoadRestrictionsNone"],
-        capture_output=True, text=True, check=True,
-    )
-    subprocess.run(kctl + ["apply", "-f", "-"], input=rendered.stdout, text=True, check=True)
+    # ── Generate dev secret + apply manifests ────────────────────
+    typer.echo("[4/7] Applying k8s manifests (with generated dev secrets)...")
+    import tempfile
+    tmp_dir = tempfile.mkdtemp(prefix="agp-k8s-smoke-")
+    try:
+        # Generate a dev secret patch (mirrors scripts/generate_k8s_dev_secret.sh)
+        secret_patch = Path(tmp_dir) / "patch-secret.yaml"
+        secret_patch.write_text(
+            "apiVersion: v1\n"
+            "kind: Secret\n"
+            "metadata:\n"
+            "  name: agp-secrets\n"
+            "  namespace: agp\n"
+            "type: Opaque\n"
+            "stringData:\n"
+            '  AGP_DATABASE_URL: "postgresql+psycopg://agp:agp@postgres:5432/agp"\n'
+            '  AGP_S3_ACCESS_KEY_ID: "minioadmin"\n'
+            '  AGP_S3_SECRET_ACCESS_KEY: "minioadmin"\n'
+            "  AGP_OPERATOR_TOKEN_ROLES_JSON: '{}'\n"
+            "  AGP_RUNTIME_ACTIVE_TOKENS_JSON: '[]'\n"
+            '  AGP_OBSERVABILITY_ALERT_WEBHOOK_URL: ""\n'
+        )
+        # Copy overlay into temp dir and create a wrapping kustomization that patches the secret
+        import shutil as _shutil
+        dst_overlay = Path(tmp_dir) / "overlay"
+        _shutil.copytree(overlay, dst_overlay)
+        kustomization = Path(tmp_dir) / "kustomization.yaml"
+        kustomization.write_text(
+            "apiVersion: kustomize.config.k8s.io/v1beta1\n"
+            "kind: Kustomization\n"
+            "resources:\n"
+            f"  - ./overlay\n"
+            "patches:\n"
+            "  - path: ./patch-secret.yaml\n"
+        )
+        subprocess.run(kctl + ["delete", "namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
+        rendered = subprocess.run(
+            kctl + ["kustomize", tmp_dir, "--load-restrictor=LoadRestrictionsNone"],
+            capture_output=True, text=True, check=True,
+        )
+        subprocess.run(kctl + ["apply", "-f", "-"], input=rendered.stdout, text=True, check=True)
+    finally:
+        _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ── Wait for core services ────────────────────────────────────
     typer.echo("[5/7] Waiting for core services...")

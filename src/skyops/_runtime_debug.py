@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 
 import typer
@@ -27,10 +28,12 @@ def runtime_register(
 
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
+    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
         server_url=resolve_server_url(cfg),
+        token=runtime_token,
     )
     client = RuntimeClient(identity)
     try:
@@ -52,10 +55,12 @@ def runtime_claim(
 
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
+    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
         server_url=resolve_server_url(cfg),
+        token=runtime_token,
     )
     client = RuntimeClient(identity)
     try:
@@ -84,11 +89,13 @@ def runtime_work_once(
     cfg = load_config()
     resolved_url = server_url or resolve_server_url(cfg)
     actual_hostname = hostname or socket.gethostname()
+    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
     client = RuntimeClient(
         RuntimeIdentity(
             runtime_id=runtime_id,
             hostname=actual_hostname,
             server_url=resolved_url,
+            token=runtime_token,
         )
     )
     worker = RuntimeSupervisor(

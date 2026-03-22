@@ -2,19 +2,16 @@
 
 These commands will eventually move to the skyops operator CLI.
 For now they are registered into the main ``agp`` app as sub-commands.
+
+All heavy imports (agp.config, agp.plugins, agp.runtime) are deferred
+to command bodies so that ``skyops`` can import this module without
+requiring server-side extras at import time.
 """
 
 import json
 from pathlib import Path
 
 import typer
-
-from agp.config import settings
-from agp.plugins import build_terminal_host, build_agent_adapter
-from agp.runtime import (
-    StandalonePluginRunner,
-    TerminalSession,
-)
 
 host_app = typer.Typer(help="Standalone terminal host debugging commands")
 adapter_app = typer.Typer(help="Standalone agent adapter debugging commands")
@@ -23,6 +20,14 @@ plugin_app = typer.Typer(help="Standalone integrated plugin runner commands")
 
 def _emit(payload: object) -> None:
     typer.echo(json.dumps(payload, indent=2, sort_keys=True, default=str))
+
+
+def _resolve_workspace(workspace: str | None) -> str | None:
+    """Return explicit workspace or fall back to settings.wezterm_workspace."""
+    if workspace is not None:
+        return workspace
+    from agp.config import settings
+    return settings.wezterm_workspace
 
 
 def _host_kwargs(kind: str, workspace: str | None = None, runner: object | None = None) -> dict[str, object]:
@@ -34,7 +39,8 @@ def _host_kwargs(kind: str, workspace: str | None = None, runner: object | None 
     return kwargs
 
 
-def _session(*, session_id: str, agent_id: str, workspace_ref: str | None = None) -> TerminalSession:
+def _session(*, session_id: str, agent_id: str, workspace_ref: str | None = None):
+    from agp.runtime import TerminalSession
     return TerminalSession(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
 
 
@@ -59,10 +65,12 @@ def host_create(
     host_kind: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Create or reuse a session for one agent."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = host.get_or_create_session(agent_id=agent_id, workspace_ref=workspace_ref)
     _emit({
         "host_kind": host.kind,
@@ -79,10 +87,12 @@ def host_exists(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Check whether a session currently exists."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     _emit({
         "host_kind": host.kind,
         "session_id": session_id,
@@ -99,10 +109,12 @@ def host_health(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Fetch session health."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     health = host.health(_session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref))
     _emit({
         "host_kind": host.kind,
@@ -122,10 +134,12 @@ def host_send(
     text: str,
     enter: bool = True,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Send text to an existing session."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
     host.send_text(session, text, enter=enter)
     _emit({
@@ -144,10 +158,12 @@ def host_read(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Read visible output and one incremental output pass from a session."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
     cursor = host.load_cursor(session) or host.create_cursor(session)
     read = host.read_output(session, cursor)
@@ -170,10 +186,12 @@ def host_snapshot(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Capture a session snapshot."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
     _emit(host.snapshot(session))
 
@@ -184,10 +202,12 @@ def host_interrupt(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Interrupt a session."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
     host.interrupt(session)
     _emit({"host_kind": host.kind, "session_id": session.session_id, "agent_id": session.agent_id, "interrupted": True})
@@ -199,10 +219,12 @@ def host_terminate(
     session_id: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Terminate a session."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     session = _session(session_id=session_id, agent_id=agent_id, workspace_ref=workspace_ref)
     host.terminate_session(session)
     _emit({"host_kind": host.kind, "session_id": session.session_id, "agent_id": session.agent_id, "terminated": True})
@@ -220,10 +242,12 @@ def adapter_bootstrap(
     host_kind: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Create or reuse a session and bootstrap the adapter into it."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host, build_agent_adapter
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     adapter = build_agent_adapter(adapter_kind)
     session = host.get_or_create_session(agent_id=agent_id, workspace_ref=workspace_ref)
     claimed = {
@@ -250,6 +274,7 @@ def adapter_inspect(
     run_id: str | None = None,
 ) -> None:
     """Inspect a transcript or raw output file through one adapter."""
+    from agp.plugins import build_agent_adapter
     adapter = build_agent_adapter(adapter_kind)
     text = Path(path).read_text(encoding="utf-8")
     _emit(adapter.inspect_output(text=text, run_id=run_id))
@@ -265,11 +290,14 @@ def adapter_run_once(
     workspace_ref: str | None = None,
     output_root: str = ".agp-plugin-runs",
     keep_session: bool = False,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Run one standalone task through a host and adapter."""
+    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.runtime import StandalonePluginRunner
+    ws = _resolve_workspace(workspace)
     runner = StandalonePluginRunner(
-        host=build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace)),
+        host=build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws)),
         adapter=build_agent_adapter(adapter_kind),
         output_root=output_root,
     )
@@ -292,11 +320,14 @@ def plugin_run(
     workspace_ref: str | None = None,
     output_root: str = ".agp-plugin-runs",
     keep_session: bool = False,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Run one standalone task through the shared plugin interfaces."""
+    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.runtime import StandalonePluginRunner
+    ws = _resolve_workspace(workspace)
     runner = StandalonePluginRunner(
-        host=build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace)),
+        host=build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws)),
         adapter=build_agent_adapter(adapter_kind),
         output_root=output_root,
     )
@@ -315,10 +346,13 @@ def plugin_repl(
     adapter_kind: str,
     agent_id: str,
     workspace_ref: str | None = None,
-    workspace: str | None = settings.wezterm_workspace,
+    workspace: str | None = None,
 ) -> None:
     """Create or reuse a session, bootstrap it, and stream tasks from stdin until exit."""
-    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=workspace))
+    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.runtime import StandalonePluginRunner
+    ws = _resolve_workspace(workspace)
+    host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     adapter = build_agent_adapter(adapter_kind)
     session = host.get_or_create_session(agent_id=agent_id, workspace_ref=workspace_ref)
     claimed = {

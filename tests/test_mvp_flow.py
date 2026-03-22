@@ -4022,7 +4022,7 @@ class MvpFlowTest(unittest.TestCase):
                             default_cwd="/tmp",
                         )
 
-                with patch("agp._plugin_cli.build_terminal_host", side_effect=factory):
+                with patch("agp.plugins.build_terminal_host", side_effect=factory):
                     created = self.cli_runner.invoke(skyops_app, ["host", "create", host_kind, "agt_host", "--workspace-ref", "/tmp"])
                     self.assertEqual(created.exit_code, 0, created.output)
                     created_payload = json.loads(created.stdout)
@@ -4064,8 +4064,8 @@ class MvpFlowTest(unittest.TestCase):
         tmp = Path(mkdtemp())
         try:
             with (
-                patch("agp._plugin_cli.build_terminal_host", return_value=CodexHost()),
-                patch("agp._plugin_cli.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
+                patch("agp.plugins.build_terminal_host", return_value=CodexHost()),
+                patch("agp.plugins.build_agent_adapter", return_value=CodexAdapter(tui_mode=False, max_polls=2, poll_interval_seconds=0.0)),
             ):
                 result = self.cli_runner.invoke(
                     skyops_app,
@@ -4105,9 +4105,9 @@ class MvpFlowTest(unittest.TestCase):
         tmp = Path(mkdtemp())
         try:
             with (
-                patch("agp._plugin_cli.build_terminal_host", return_value=TuiHost()),
+                patch("agp.plugins.build_terminal_host", return_value=TuiHost()),
                 patch(
-                    "agp._plugin_cli.build_agent_adapter",
+                    "agp.plugins.build_agent_adapter",
                     return_value=CodexAdapter(
                         tui_mode=True,
                         cli_command="codex",
@@ -4187,7 +4187,7 @@ class MvpFlowTest(unittest.TestCase):
         try:
             from agp.plugins.tmux import TmuxHost
 
-            with patch("agp._plugin_cli.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
+            with patch("agp.plugins.build_terminal_host", return_value=TmuxHost(runner=runner, checkpoint_dir=tmp)):
                 result = self.cli_runner.invoke(
                     skyops_app,
                     [
