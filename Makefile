@@ -287,11 +287,7 @@ runtime-clean-tmux: ## Kill tmux session for the configured AGP runtime agent
 
 runtime-clean-wezterm: ## Kill WezTerm panes titled AGP:<agent_id>
 	@if command -v wezterm >/dev/null 2>&1; then \
-		wezterm cli list --format json 2>/dev/null | python3 -c 'import json,subprocess,sys; agent="AGP:" + "'"$${AGP_RUNTIME_AGENT_ID}"'"; panes=json.load(sys.stdin) if not sys.stdin.closed else []; \
-for p in panes: \
-    title=(p.get("tab_title") or ""); \
-    pane_id=p.get("pane_id"); \
-    if pane_id and agent in title: subprocess.run(["wezterm","cli","kill-pane","--pane-id",str(pane_id)], check=False)' || true; \
+		AGP_RUNTIME_AGENT_ID="$${AGP_RUNTIME_AGENT_ID}" wezterm cli list --format json 2>/dev/null | python3 -c 'import json, os, subprocess, sys; agent = "AGP:" + os.environ["AGP_RUNTIME_AGENT_ID"]; panes = json.load(sys.stdin); [subprocess.run(["wezterm", "cli", "kill-pane", "--pane-id", str(p["pane_id"])], check=False) for p in panes if p.get("pane_id") and agent in (p.get("tab_title") or "")]' || true; \
 	fi
 	@echo "WezTerm runtime panes cleaned."
 
