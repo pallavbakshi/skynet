@@ -18,7 +18,7 @@ from agp.queue_backend import (
 )
 import agp.queue_backend as queue_backend_module
 
-from _base import AgpTestCase
+from _base import AgpTestCase, FakeRedisClient
 
 
 def _seed_agent(session, agent_id: str = "agt_q") -> Agent:
@@ -231,48 +231,6 @@ class InMemoryBrokerContractTest(AgpTestCase):
             self.assertIsNone(d)
         finally:
             session.close()
-
-
-class FakeRedisClient:
-    """Minimal fake Redis for contract testing without a real Redis server."""
-
-    def __init__(self) -> None:
-        self.lists: dict[str, list[str]] = {}
-        self.hashes: dict[str, dict[str, str]] = {}
-        self.sets: dict[str, set[str]] = {}
-
-    def flushdb(self) -> None:
-        self.lists.clear()
-        self.hashes.clear()
-        self.sets.clear()
-
-    def rpush(self, key: str, value: str) -> None:
-        self.lists.setdefault(key, []).append(value)
-
-    def lpop(self, key: str) -> str | None:
-        values = self.lists.setdefault(key, [])
-        return values.pop(0) if values else None
-
-    def hset(self, name: str, key: str, value: str) -> None:
-        self.hashes.setdefault(name, {})[key] = value
-
-    def hget(self, name: str, key: str) -> str | None:
-        return self.hashes.get(name, {}).get(key)
-
-    def hdel(self, name: str, key: str) -> None:
-        self.hashes.setdefault(name, {}).pop(key, None)
-
-    def hkeys(self, name: str) -> list[str]:
-        return list(self.hashes.get(name, {}).keys())
-
-    def sadd(self, name: str, value: str) -> None:
-        self.sets.setdefault(name, set()).add(value)
-
-    def srem(self, name: str, value: str) -> None:
-        self.sets.setdefault(name, set()).discard(value)
-
-    def sismember(self, name: str, value: str) -> bool:
-        return value in self.sets.setdefault(name, set())
 
 
 class RedisBackendContractTest(AgpTestCase):

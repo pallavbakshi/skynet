@@ -473,6 +473,10 @@ class RedisQueueBackend:
                 record.delivery_attempt += 1
                 record.last_delivered_at = now
                 record.updated_at = now
+                # Flush SQL first — this is the durable authority.  If the
+                # process crashes after this flush but before the Redis write,
+                # redrive_stale_deliveries will recover from the SQL record.
+                db.flush()
                 payload = {
                     "delivery_id": record.delivery_id,
                     "job_id": job_id,
@@ -534,6 +538,8 @@ class RedisQueueBackend:
         stale_before = now_ts - visibility_timeout_seconds
         redriven = 0
         dead_lettered = 0
+
+        # Phase 1: scan Redis inflight hash (normal path)
         for delivery_id in list(self.client.hkeys(self._inflight_hash_key())):
             payload = self.client.hget(self._inflight_hash_key(), delivery_id)
             if payload is None:
@@ -564,6 +570,43 @@ class RedisQueueBackend:
                 self.client.rpush(self._queue_key(item["target_queue"]), item["job_id"])
                 self.client.sadd(pending_set, item["job_id"])
             redriven += 1
+
+        # Phase 2: scan SQL "delivered" records that have no Redis inflight
+        # entry.  This handles the crash-between case where SQL was flushed
+        # but the process died before writing the Redis inflight hash.
+        # Re-query to exclude records already moved by phase 1.
+        db.flush()
+        orphaned = db.scalars(
+            select(QueueDeliveryRecord).where(
+                QueueDeliveryRecord.state == "delivered",
+                QueueDeliveryRecord.last_delivered_at.is_not(None),
+            )
+        ).all()
+        for record in orphaned:
+            if record.last_delivered_at is None:
+                continue
+            if record.last_delivered_at.timestamp() > stale_before:
+                continue
+            # Check if Redis still tracks this delivery
+            if self.client.hget(self._inflight_hash_key(), record.delivery_id) is not None:
+                continue  # already handled in phase 1
+            now = utc_now()
+            if record.delivery_attempt >= max_delivery_attempts:
+                record.state = "dead_lettered"
+                record.dead_lettered_at = now
+                record.updated_at = now
+                self.client.sadd(self._dead_lettered_jobs_key(), record.job_id)
+                dead_lettered += 1
+            else:
+                record.state = "pending"
+                record.available_at = now
+                record.updated_at = now
+                pending_set = self._pending_set_key(record.target_queue)
+                if not self.client.sismember(pending_set, record.job_id):
+                    self.client.rpush(self._queue_key(record.target_queue), record.job_id)
+                    self.client.sadd(pending_set, record.job_id)
+                redriven += 1
+
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}
 
 
