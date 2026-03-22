@@ -22,6 +22,28 @@ from agp.runtime import (
 )
 
 
+def _provider_env() -> dict[str, str]:
+    env: dict[str, str] = {}
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if openrouter_key:
+        env["OPENROUTER_API_KEY"] = openrouter_key
+        env["OPENAI_BASE_URL"] = openai_base_url or "https://openrouter.ai/api/v1"
+    else:
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            env["OPENAI_API_KEY"] = openai_key
+        if openai_base_url:
+            env["OPENAI_BASE_URL"] = openai_base_url
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        env["ANTHROPIC_API_KEY"] = anthropic_key
+    server_url = os.environ.get("AGP_SERVER_URL")
+    if server_url:
+        env["AGP_SERVER_URL"] = server_url
+    return env
+
+
 class TmuxHost(TerminalHost):
     """Terminal host backed by tmux sessions.
 
@@ -101,14 +123,11 @@ class TmuxHost(TerminalHost):
         self._run(args)
         # Forward environment variables that agent adapters may need
         # (tmux new-session does not inherit the parent's full env).
-        for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-                     "ANTHROPIC_API_KEY", "AGP_SERVER_URL"):
-            val = os.environ.get(key)
-            if val:
-                try:
-                    self._run(["set-environment", "-t", name, key, val], allow_failure=True)
-                except Exception:
-                    pass  # best-effort; test mocks may not support set-environment
+        for key, val in _provider_env().items():
+            try:
+                self._run(["set-environment", "-t", name, key, val], allow_failure=True)
+            except Exception:
+                pass  # best-effort; test mocks may not support set-environment
         return TerminalSession(
             session_id=name,
             agent_id=agent_id,

@@ -40,6 +40,27 @@ _NOISE_INFIXES = (
 )
 
 
+def _runtime_env_prefix() -> str:
+    import os
+
+    env_pairs: list[tuple[str, str]] = []
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if openrouter_key:
+        env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
+        env_pairs.append(("OPENAI_BASE_URL", openai_base_url or "https://openrouter.ai/api/v1"))
+    else:
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            env_pairs.append(("OPENAI_API_KEY", openai_key))
+        if openai_base_url:
+            env_pairs.append(("OPENAI_BASE_URL", openai_base_url))
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_key:
+        env_pairs.append(("ANTHROPIC_API_KEY", anthropic_key))
+    return "".join(f"{key}={shlex.quote(val)} " for key, val in env_pairs if val)
+
+
 def _is_noise_line(line: str) -> bool:
     s = line.strip()
     if not s:
@@ -349,12 +370,7 @@ class CodexAdapter(AgentAdapter):
         if host.kind == "tmux":
             # Inline env vars so the shell in the tmux pane has them
             # (tmux set-environment only affects new panes, not existing shells).
-            import os
-            env_prefix = ""
-            for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY"):
-                val = os.environ.get(key)
-                if val:
-                    env_prefix += f"{key}={shlex.quote(val)} "
+            env_prefix = _runtime_env_prefix()
             host.send_text(session, f"{env_prefix}{self.cli_command} {shlex.quote(prompt)}", enter=True)
         else:
             host.send_text(session, prompt, enter=True)
