@@ -159,7 +159,7 @@ class AgpClient:
 
     def register_agent(
         self,
-        agent_id: str,
+        agent_id: str | None,
         capability_id: str,
         *,
         assigned_runtime_id: str | None = None,
@@ -167,16 +167,17 @@ class AgpClient:
     ) -> dict:
         """Register (bring up) an agent with the control plane."""
         payload: dict[str, Any] = {
-            "agent_id": agent_id,
             "capability_id": capability_id,
         }
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
         if assigned_runtime_id is not None:
             payload["assigned_runtime_id"] = assigned_runtime_id
         if workspace_ref is not None:
             payload["workspace_ref"] = workspace_ref
         response = self._client.post("/agents/up", json=payload)
         response.raise_for_status()
-        return response.json()
+        return response.json()["data"]
 
     def patch_agent(
         self,
@@ -226,6 +227,15 @@ class AgpClient:
         response = self._client.get("/capabilities", params=params)
         response.raise_for_status()
         return response.json()["data"]
+
+    def resolve_capability_by_name(self, name: str) -> dict | None:
+        """Find a capability by display name. Returns None if not found."""
+        data = self.list_capabilities(name=name)
+        items = data.get("items", [])
+        for item in items:
+            if item.get("name") == name:
+                return item
+        return None
 
     def list_deliveries(
         self,

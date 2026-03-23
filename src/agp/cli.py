@@ -324,6 +324,259 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
     return client.get_job(job_id), True  # last check before giving up
 
 
+# ── 0a. up ──────────────────────────────────────────────────────────
+
+
+def _poll_agent_ready(
+    client, agent_id: str, *, timeout: float = 120.0, heartbeat_interval: float = 5.0
+) -> dict:
+    """Poll until agent reaches idle status.  Returns agent dict.
+
+    Currently the server transitions agents to IDLE synchronously inside
+    the ``POST /agents/up`` response, so the first poll always succeeds.
+    The loop exists for forward-compatibility with async provisioning
+    (e.g. waiting for a runtime to bind).
+    """
+    import time
+
+    import httpx as _httpx
+
+    start = time.monotonic()
+    deadline = start + timeout
+    last_heartbeat = start
+
+    while time.monotonic() < deadline:
+        try:
+            agent = client.get_agent(agent_id)
+        except _httpx.HTTPStatusError as exc:
+            # Non-retryable HTTP errors — bail immediately
+            if exc.response.status_code in (401, 403, 404):
+                return {"status": "error", "detail": str(exc)}
+            # 5xx or other — keep polling
+        except _httpx.TransportError:
+            # Network-level failures (timeout, DNS, connection reset) — keep polling
+            pass
+        else:
+            status = agent.get("status")
+            if status == "idle":
+                return agent
+            # Terminal statuses will never become idle — exit early
+            if status in ("terminated", "error", "failed"):
+                return agent
+
+        now = time.monotonic()
+        if now - last_heartbeat >= heartbeat_interval:
+            elapsed = int(now - start)
+            typer.echo(f"[..] Waiting for agent registration... ({elapsed}s elapsed)")
+            last_heartbeat = now
+
+        time.sleep(1)
+
+    # Final check — guarded so a down server doesn't produce a raw traceback
+    try:
+        return client.get_agent(agent_id)
+    except (_httpx.HTTPStatusError, _httpx.TransportError):
+        return {"status": "unknown"}
+
+
+@app.command()
+def up(
+    capability_name: str = typer.Argument(..., help="Capability name (must match agp ls output)."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    agent_id: str = typer.Option(None, "--agent-id", help="Explicit agent ID (default: auto-generated)."),
+    runtime_id: str = typer.Option(None, "--runtime-id", help="Pin to a specific runtime."),
+    workspace_ref: str = typer.Option(None, "--workspace", help="Working directory for the agent."),
+    timeout: int = typer.Option(120, help="Max seconds to wait for agent to become idle."),
+    max_retries: int = typer.Option(3, help="Provisioning retry attempts on server error."),
+) -> None:
+    """Provision an agent from a capability. Blocks until the agent is IDLE.
+
+    Resolves the capability by display name (as shown in agp ls), creates an
+    agent, and waits for it to become ready.
+    """
+    import time
+
+    import httpx as _httpx
+
+    with _make_client(server_url) as client:
+        # Resolve capability name → ID
+        typer.echo(f"[..] Provisioning capability '{capability_name}'...")
+        try:
+            cap = client.resolve_capability_by_name(capability_name)
+        except Exception as exc:
+            _print_banner("ERROR", "Provisioning Failed")
+            typer.echo(f"FATAL: Could not reach control plane: {exc}")
+            raise typer.Exit(1)
+        if cap is None:
+            _print_banner("ERROR", "Provisioning Failed")
+            typer.echo(f"FATAL: Unknown capability '{capability_name}'.")
+            typer.echo("ACTION: Run `agp ls` to see available capabilities.")
+            raise typer.Exit(1)
+
+        capability_id = cap["capability_id"]
+
+        # Retry loop for provisioning
+        data: dict | None = None
+        for attempt in range(1, max_retries + 1):
+            typer.echo(f"[..] Registering agent... (Attempt {attempt}/{max_retries})")
+            try:
+                data = client.register_agent(
+                    agent_id=agent_id,
+                    capability_id=capability_id,
+                    assigned_runtime_id=runtime_id,
+                    workspace_ref=workspace_ref,
+                )
+                break
+            except _httpx.HTTPStatusError as exc:
+                status = exc.response.status_code
+                if status == 409:
+                    detail = agent_id or "(auto-generated)"
+                    _print_banner("ERROR", "Provisioning Failed")
+                    typer.echo(f"FATAL: Agent already exists: {detail}")
+                    raise typer.Exit(1)
+                if status >= 500 and attempt < max_retries:
+                    typer.echo(f"[..] Server error. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(2)
+                    continue
+                _print_banner("ERROR", "Provisioning Failed")
+                typer.echo(f"FATAL: Could not bring up '{capability_name}' after {attempt} attempts.")
+                typer.echo(f"REASON: {exc}")
+                raise typer.Exit(1)
+            except _httpx.TransportError:
+                if attempt < max_retries:
+                    typer.echo(f"[..] Network error. Retrying... (Attempt {attempt + 1}/{max_retries})")
+                    time.sleep(2)
+                    continue
+                _print_banner("ERROR", "Provisioning Failed")
+                typer.echo(f"FATAL: Could not reach server after {max_retries} attempts.")
+                raise typer.Exit(1)
+
+        if data is None:
+            _print_banner("ERROR", "Provisioning Failed")
+            typer.echo(f"FATAL: Could not bring up '{capability_name}' after {max_retries} attempts.")
+            typer.echo("REASON: Infrastructure unavailable or insufficient resources.")
+            typer.echo("ACTION: Pivot your strategy or try a different capability.")
+            raise typer.Exit(1)
+
+        resolved_agent_id = data["agent_id"]
+
+        # Print agent ID early so the user can recover if polling fails
+        typer.echo(f"[..] Agent {resolved_agent_id} created. Waiting for IDLE...")
+
+        # Poll until idle
+        agent = _poll_agent_ready(client, resolved_agent_id, timeout=timeout)
+
+        if agent.get("status") != "idle":
+            _print_banner("ERROR", "Provisioning Failed")
+            typer.echo(f"FATAL: Agent {resolved_agent_id} did not reach IDLE within {timeout}s.")
+            typer.echo(f"STATUS: {agent.get('status', '?').upper()}")
+            typer.echo("ACTION: Check runtime logs or try again.")
+            raise typer.Exit(1)
+
+        _print_banner("SUCCESS", "Agent Provisioned Successfully")
+        typer.echo(f"CAPABILITY: {capability_name}")
+        typer.echo(f"AGENT_ID:   {resolved_agent_id}")
+        typer.echo(f"STATUS:     {agent.get('status', 'idle').upper()}")
+        typer.echo(f"CWD:        {agent.get('workspace_ref') or '-'}")
+        typer.echo("-----------------------------------------")
+        typer.echo("Ready. You may now route tasks using:")
+        typer.echo(f"  agp send {resolved_agent_id} \"your prompt here\"")
+
+
+# ── 0b. down ────────────────────────────────────────────────────────
+
+
+@app.command()
+def down(
+    agent_id: str = typer.Argument(..., help="Agent ID to tear down."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    force: bool = typer.Option(False, "--force", help="Force teardown even if agent is busy (cancels active jobs)."),
+) -> None:
+    """Tear down an agent and release its resources.
+
+    If the agent is busy, use --force to cancel active jobs and destroy it.
+    Without --force, busy agents will be rejected — use --force explicitly.
+    """
+    import httpx as _httpx
+
+    with _make_client(server_url) as client:
+        typer.echo(f"[..] Locating agent {agent_id}...")
+
+        try:
+            agent = client.get_agent(agent_id)
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                _print_banner("ERROR", "Teardown Failed")
+                typer.echo(f"FATAL: Agent not found: {agent_id}")
+                raise typer.Exit(1)
+            raise
+
+        agent_status = agent.get("status", "unknown")
+
+        # Already terminated — nothing to do
+        if agent_status == "terminated":
+            _print_banner("ERROR", "Teardown Failed")
+            typer.echo(f"Agent {agent_id} is already terminated.")
+            raise typer.Exit(1)
+
+        # Statuses that may have active work — require --force
+        _HAS_ACTIVE_WORK = ("busy", "draining", "degraded")
+
+        if agent_status in _HAS_ACTIVE_WORK and not force:
+            _print_banner("ERROR", "Teardown Blocked")
+            typer.echo(f"Agent {agent_id} is {agent_status.upper()} (may have active work).")
+            typer.echo("Use --force to cancel active jobs and destroy it:")
+            typer.echo(f"  agp down {agent_id} --force")
+            raise typer.Exit(1)
+
+        # Determine mode
+        if agent_status in _HAS_ACTIVE_WORK:
+            typer.echo(f"[..] WARNING: Agent is {agent_status.upper()}.")
+            typer.echo("[..] Aborting active jobs and clearing queue...")
+            mode = "force"
+        elif agent_status == "idle":
+            typer.echo("[..] Agent is IDLE. Proceeding with teardown...")
+            mode = "terminate"
+        else:
+            typer.echo(f"[..] Agent is {agent_status.upper()}. Proceeding with teardown...")
+            mode = "force" if force else "terminate"
+
+        try:
+            result = client.agent_down(agent_id, mode=mode)
+        except _httpx.HTTPStatusError as exc:
+            # 409 from TOCTOU guard — agent changed state between our check and the call
+            if exc.response.status_code == 409:
+                try:
+                    detail = exc.response.json().get("error", {}).get("message", "")
+                except Exception:
+                    detail = ""
+                if "force" in detail:
+                    _print_banner("ERROR", "Teardown Blocked")
+                    typer.echo(f"Agent {agent_id} has active work.")
+                    typer.echo("Use --force to cancel active jobs and destroy it:")
+                    typer.echo(f"  agp down {agent_id} --force")
+                else:
+                    _print_banner("ERROR", "Teardown Failed")
+                    typer.echo(f"FATAL: {detail or exc}")
+                raise typer.Exit(1)
+            _print_banner("ERROR", "Teardown Failed")
+            try:
+                detail = exc.response.json().get("error", {}).get("message", str(exc))
+            except Exception:
+                detail = str(exc)
+            typer.echo(f"FATAL: {detail}")
+            raise typer.Exit(1)
+
+        result_status = result.get("status", "terminated").upper()
+        if mode == "force":
+            _print_banner("SUCCESS", "Agent Forcefully Destroyed")
+        else:
+            _print_banner("SUCCESS", "Agent Destroyed")
+
+        typer.echo(f"AGENT_ID:   {agent_id}")
+        typer.echo(f"STATUS:     {result_status}")
+
+
 # ── 1. send ──────────────────────────────────────────────────────────
 
 

@@ -45,6 +45,14 @@ from agp.services._helpers import (
 )
 from agp.services.events import _create_event
 from agp.services.exceptions import BadRequestError, ConflictError, InternalError
+
+# Agent statuses that must NOT be reverted to IDLE when a run completes/fails.
+# These represent operator-set or sweeper-set states that take precedence.
+_PRESERVE_AGENT_STATUSES = frozenset({
+    AgentStatus.TERMINATED.value,
+    AgentStatus.DRAINING.value,
+    AgentStatus.DEGRADED.value,
+})
 from agp.services.jobs import _fail_exhausted_queued_jobs
 
 _TERMINAL_RUN_STATES = frozenset({
@@ -305,7 +313,7 @@ def complete_run_service(
     job.status = JobStatus.COMPLETED.value
     job.result_artifact_id = result_artifact_id
     job.updated_at = utc_now()
-    agent.status = AgentStatus.IDLE.value if agent.status != AgentStatus.TERMINATED.value else agent.status
+    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
@@ -346,7 +354,7 @@ def fail_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.FAILED.value
     job.updated_at = utc_now()
-    agent.status = AgentStatus.IDLE.value if agent.status != AgentStatus.TERMINATED.value else agent.status
+    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
@@ -433,7 +441,7 @@ def cancel_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.CANCELLED.value
     job.updated_at = utc_now()
-    agent.status = AgentStatus.IDLE.value if agent.status != AgentStatus.TERMINATED.value else agent.status
+    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="run.cancelled", body={"reason": reason})

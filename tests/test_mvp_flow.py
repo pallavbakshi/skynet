@@ -23,7 +23,7 @@ import agp.control_plane as control_plane_module
 from agp.artifact_store import S3ArtifactStore, reset_artifact_store_state
 from agp.control_plane import build_app
 from agp.db import Base, SessionLocal, engine, init_db
-from agp.models import Agent, Capability, Event, QueueDeliveryRecord, Runtime, utc_now
+from agp.models import Agent, Capability, Event, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.enums import HealthStatus, RuntimeStatus
 from agp.cli import app
 from agp.client import AgpClient
@@ -5010,6 +5010,341 @@ class MvpFlowTest(unittest.TestCase):
         self.assertIn("agents", summary)
         self.assertIn("leases", summary)
         self.assertIn("queue", summary)
+
+
+    # ── agp up / agp down CLI commands ─────────────────────────────
+
+    def _cli_invoke(self, args: list[str]):
+        from unittest.mock import patch
+        from agp.cli import app as cli_app
+
+        with patch("agp.cli._make_client") as mock:
+            mock.return_value.__enter__ = lambda s: self.agp
+            mock.return_value.__exit__ = lambda *a: None
+            return self.cli_runner.invoke(cli_app, args)
+
+    def test_agp_up_provisions_agent_from_capability_name(self) -> None:
+        result = self._cli_invoke(["up", "Python Tester"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[SUCCESS]", result.output)
+        self.assertIn("AGENT_ID:", result.output)
+        self.assertIn("STATUS:     IDLE", result.output)
+        self.assertIn("CAPABILITY: Python Tester", result.output)
+
+    def test_agp_up_auto_generates_agent_id(self) -> None:
+        result = self._cli_invoke(["up", "Python Tester"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for line in result.output.splitlines():
+            if line.startswith("AGENT_ID:"):
+                agent_id = line.split(":")[1].strip()
+                self.assertTrue(agent_id.startswith("agt_"), f"Expected agt_ prefix, got {agent_id}")
+                break
+        else:
+            self.fail("AGENT_ID not found in output")
+
+    def test_agp_up_unknown_capability_fails(self) -> None:
+        result = self._cli_invoke(["up", "nonexistent"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("[ERROR]", result.output)
+        self.assertIn("Unknown capability", result.output)
+
+    def test_agp_up_duplicate_agent_id_fails(self) -> None:
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_dup", "capability_id": "cap_python",
+        })
+        result = self._cli_invoke(["up", "Python Tester", "--agent-id", "agt_dup"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("[ERROR]", result.output)
+        self.assertIn("already exists", result.output)
+
+    def test_agp_down_idle_agent(self) -> None:
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_down_idle", "capability_id": "cap_python",
+        })
+        result = self._cli_invoke(["down", "agt_down_idle"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[SUCCESS]", result.output)
+        self.assertIn("AGENT_ID:   agt_down_idle", result.output)
+
+    def test_agp_down_busy_agent_without_force_blocked(self) -> None:
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_dwn", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_down_busy", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_dwn",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_down_busy"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_dwn", "agent_id": "agt_down_busy",
+        })
+        result = self._cli_invoke(["down", "agt_down_busy"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("BUSY", result.output)
+        self.assertIn("--force", result.output)
+
+    def test_agp_down_busy_agent_with_force_cancels_jobs_runs_leases(self) -> None:
+        """Force-down cancels jobs AND their runs and leases."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_dwn2", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_down_force", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_dwn2",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_down_force"},
+            "message": {"text": "work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        claim = self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_dwn2", "agent_id": "agt_down_force",
+        })
+        run_id = claim.json()["data"]["run"]["run_id"]
+        lease_id = claim.json()["data"]["lease"]["lease_id"]
+
+        result = self._cli_invoke(["down", "agt_down_force", "--force"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[SUCCESS]", result.output)
+        self.assertIn("Forcefully", result.output)
+
+        # Verify job, run, and lease all cancelled/released
+        job = self.client.get(f"/jobs/{job_id}").json()["data"]
+        self.assertEqual(job["status"], "cancelled")
+
+        session = SessionLocal()
+        try:
+            run = session.get(Run, run_id)
+            self.assertEqual(run.status, "cancelled")
+            lease = session.get(Lease, lease_id)
+            self.assertEqual(lease.status, "released")
+        finally:
+            session.close()
+
+    def test_agp_down_nonexistent_agent_fails(self) -> None:
+        result = self._cli_invoke(["down", "agt_ghost"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("[ERROR]", result.output)
+        self.assertIn("not found", result.output)
+
+    def test_agp_down_already_terminated_fails(self) -> None:
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_term", "capability_id": "cap_python",
+        })
+        self._cli_invoke(["down", "agt_term"])
+        result = self._cli_invoke(["down", "agt_term"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("already terminated", result.output)
+
+    def test_agp_down_draining_without_force_blocked(self) -> None:
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_drain", "capability_id": "cap_python",
+        })
+        self.client.post("/agents/agt_drain/down", json={"mode": "drain"})
+        result = self._cli_invoke(["down", "agt_drain"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("DRAINING", result.output)
+        self.assertIn("--force", result.output)
+
+    def test_agp_down_force_with_multiple_jobs(self) -> None:
+        """Force-down cancels ALL active jobs, not just the first."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_multi", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_multi", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_multi",
+        })
+        j1 = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_multi"},
+            "message": {"text": "job1"},
+        }).json()["data"]["job_id"]
+        j2 = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_multi"},
+            "message": {"text": "job2"},
+        }).json()["data"]["job_id"]
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_multi", "agent_id": "agt_multi",
+        })
+
+        result = self._cli_invoke(["down", "agt_multi", "--force"])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        self.assertEqual(self.client.get(f"/jobs/{j1}").json()["data"]["status"], "cancelled")
+        self.assertEqual(self.client.get(f"/jobs/{j2}").json()["data"]["status"], "cancelled")
+
+    def test_agent_down_service_toctou_guard_busy(self) -> None:
+        """Server rejects terminate on busy agent."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_toctou", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_toctou", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_toctou",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_toctou"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_toctou", "agent_id": "agt_toctou",
+        })
+        resp = self.client.post("/agents/agt_toctou/down", json={"mode": "terminate"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("active work", resp.json()["error"]["message"])
+
+    def test_agent_down_service_toctou_guard_draining(self) -> None:
+        """Server rejects terminate on draining agent (may have active work)."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_drain_guard", "capability_id": "cap_python",
+        })
+        self.client.post("/agents/agt_drain_guard/down", json={"mode": "drain"})
+        resp = self.client.post("/agents/agt_drain_guard/down", json={"mode": "terminate"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("active work", resp.json()["error"]["message"])
+
+    def test_agent_down_service_double_drain_rejected(self) -> None:
+        """Server rejects drain on already-draining agent."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_dd", "capability_id": "cap_python",
+        })
+        self.client.post("/agents/agt_dd/down", json={"mode": "drain"})
+        resp = self.client.post("/agents/agt_dd/down", json={"mode": "drain"})
+        self.assertEqual(resp.status_code, 409)
+        self.assertIn("already draining", resp.json()["error"]["message"])
+
+    def test_agp_down_force_draining_agent_with_active_work(self) -> None:
+        """Force-down on a draining agent with active jobs cancels everything."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_drnf", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_drnf", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_drnf",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_drnf"},
+            "message": {"text": "work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        claim = self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_drnf", "agent_id": "agt_drnf",
+        })
+        run_id = claim.json()["data"]["run"]["run_id"]
+        lease_id = claim.json()["data"]["lease"]["lease_id"]
+
+        # Put into draining first — agent still has active work
+        self.client.post("/agents/agt_drnf/down", json={"mode": "drain"})
+
+        # Force-down should cancel everything
+        result = self._cli_invoke(["down", "agt_drnf", "--force"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Forcefully", result.output)
+
+        # Verify all cancelled/released
+        self.assertEqual(self.client.get(f"/jobs/{job_id}").json()["data"]["status"], "cancelled")
+        session = SessionLocal()
+        try:
+            self.assertEqual(session.get(Run, run_id).status, "cancelled")
+            self.assertEqual(session.get(Lease, lease_id).status, "released")
+        finally:
+            session.close()
+
+    def test_drain_preserved_after_run_completes(self) -> None:
+        """Completing a run on a draining agent preserves DRAINING, not IDLE."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_drn", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_drn_pres", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_drn",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_drn_pres"},
+            "message": {"text": "work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        claim = self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_drn", "agent_id": "agt_drn_pres",
+        })
+        run_id = claim.json()["data"]["run"]["run_id"]
+        lease_id = claim.json()["data"]["lease"]["lease_id"]
+        fencing = claim.json()["data"]["lease"]["fencing_token"]
+
+        # Drain while run is active
+        self.client.post("/agents/agt_drn_pres/down", json={"mode": "drain"})
+
+        # Heartbeat to promote leased → running
+        self.client.post(f"/runs/{run_id}/heartbeat", json={
+            "runtime_id": "rtm_drn", "lease_id": lease_id, "fencing_token": fencing,
+        })
+
+        # Complete the run
+        self.client.post(f"/runs/{run_id}/complete", json={
+            "runtime_id": "rtm_drn", "lease_id": lease_id,
+            "fencing_token": fencing, "artifacts": [], "summary": {},
+        })
+
+        # Agent should still be DRAINING, not reverted to IDLE
+        agent = self.client.get("/agents/agt_drn_pres").json()["data"]
+        self.assertEqual(agent["status"], "draining")
+
+    def test_force_down_transitions_runtime_to_idle(self) -> None:
+        """Force-down releases all leases and transitions the runtime back to IDLE."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_rtm_idle", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_rtm_idle", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_rtm_idle",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_rtm_idle"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_rtm_idle", "agent_id": "agt_rtm_idle",
+        })
+
+        # Runtime should be busy
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_rtm_idle")
+            self.assertEqual(runtime.status, "busy")
+        finally:
+            session.close()
+
+        # Force-down the agent
+        self._cli_invoke(["down", "agt_rtm_idle", "--force"])
+
+        # Runtime should be back to idle
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_rtm_idle")
+            self.assertEqual(runtime.status, "idle")
+        finally:
+            session.close()
+
+    def test_force_down_event_records_previous_status(self) -> None:
+        """Events from force-down include previous_status for audit trail."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_evt", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_evt", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_evt",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_evt"},
+            "message": {"text": "work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_evt", "agent_id": "agt_evt",
+        })
+
+        self.client.post("/agents/agt_evt/down", json={"mode": "force"})
+
+        # Check events for previous_status
+        events_resp = self.client.get(f"/jobs/{job_id}/events").json()["data"]["items"]
+        cancelled_events = [e for e in events_resp if e["event_type"] == "job.cancelled"]
+        self.assertTrue(len(cancelled_events) >= 1)
+        self.assertEqual(cancelled_events[0]["body"]["previous_status"], "running")
+
+        run_cancelled = [e for e in events_resp if e["event_type"] == "run.cancelled"]
+        self.assertTrue(len(run_cancelled) >= 1)
+        self.assertIn("previous_status", run_cancelled[0]["body"])
+
+        lease_released = [e for e in events_resp if e["event_type"] == "lease.released"]
+        self.assertTrue(len(lease_released) >= 1)
+        self.assertIn("previous_status", lease_released[0]["body"])
 
 
 if __name__ == "__main__":
