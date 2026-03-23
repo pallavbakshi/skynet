@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     runtime_terminal_host_kind: str = "inprocess"
     runtime_agent_adapter_kind: str = "default"
     wezterm_workspace: str = "agp"
+    wezterm_domain: str = ""
     codex_begin_marker: str = "AGP_RUN_BEGIN"
     codex_result_marker: str = "AGP_RUN_RESULT"
     codex_poll_interval_seconds: float = 0.25

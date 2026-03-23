@@ -26,6 +26,7 @@ class WezTermHost(TerminalHost):
         *,
         wezterm_bin: str = "wezterm",
         workspace: str = "agp",
+        domain: str = "",
         shell_argv: list[str] | None = None,
         runner: Any | None = None,
         scrollback_lines: int = 5000,
@@ -34,6 +35,7 @@ class WezTermHost(TerminalHost):
     ) -> None:
         self.wezterm_bin = wezterm_bin
         self.workspace = workspace
+        self.domain = domain or settings.wezterm_domain
         self.shell_argv = shell_argv
         self._runner = runner or subprocess.run
         self.scrollback_lines = scrollback_lines
@@ -99,6 +101,8 @@ class WezTermHost(TerminalHost):
             return existing
         cwd = workspace_ref or self.default_cwd
         args = ["spawn", "--new-window", "--workspace", self.workspace]
+        if self.domain:
+            args.extend(["--domain-name", self.domain])
         if cwd:
             args.extend(["--cwd", cwd])
         if self.shell_argv:
