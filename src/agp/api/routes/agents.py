@@ -1,25 +1,23 @@
-"""Agent route handlers."""
+"""Agent route handlers — thin HTTP layer delegating to services."""
 
 from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
-from agp.enums import AgentStatus, JobStatus
-from agp.models import Agent, Job, utc_now
-from agp.schemas import AgentDownRequest, AgentPatchRequest, AgentUpRequest
-from agp.services._helpers import _new_id, _require_agent, _require_capability, _require_runtime
-from agp.services.events import _create_event
+from agp.models import Agent
+from agp.schemas import AgentDownRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
+from agp.services.agents import agent_down_service, agent_patch_service, agent_undrain_service, agent_up_service
 
 router = APIRouter()
 
 
-@router.get("/agents")
+@router.get("/agents", response_model=OkResponse[PagedData[AgentResponse]])
 def list_agents(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -57,76 +55,32 @@ def list_agents(
     )
 
 
-@router.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}", response_model=OkResponse[AgentResponse])
 def get_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
+    from agp.services._helpers import _require_agent
     agent = _require_agent(db, agent_id)
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref", "created_at", "updated_at", "last_seen_at")))
 
 
-@router.post("/agents/up")
+@router.post("/agents/up", response_model=OkResponse[AgentResponse])
 def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
-    _require_capability(db, request.capability_id)
-    agent_id = request.agent_id or _new_id("agt")
-    if db.get(Agent, agent_id) is not None:
-        raise HTTPException(status_code=409, detail=f"agent already exists: {agent_id}")
-    if request.assigned_runtime_id is not None:
-        _require_runtime(db, request.assigned_runtime_id)
-    agent = Agent(
-        agent_id=agent_id,
-        capability_id=request.capability_id,
-        assigned_runtime_id=request.assigned_runtime_id,
-        queue_id=f"agent:{agent_id}",
-        status=AgentStatus.PROVISIONING.value,
-        workspace_ref=request.workspace_ref,
-        last_seen_at=utc_now(),
-    )
-    db.add(agent)
-    _create_event(db, agent_id=agent.agent_id, event_type="agent.provisioning", body={"capability_id": agent.capability_id})
-    agent.status = AgentStatus.IDLE.value
-    _create_event(db, agent_id=agent.agent_id, event_type="agent.idle", body={"capability_id": agent.capability_id})
-    db.commit()
+    agent = agent_up_service(db, agent_id=request.agent_id, capability_id=request.capability_id, assigned_runtime_id=request.assigned_runtime_id, workspace_ref=request.workspace_ref)
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 
-@router.patch("/agents/{agent_id}")
+@router.patch("/agents/{agent_id}", response_model=OkResponse[AgentResponse])
 def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends(get_db)) -> dict:
-    agent = _require_agent(db, agent_id)
-    if request.workspace_ref is not None:
-        agent.workspace_ref = request.workspace_ref
-    db.commit()
+    agent = agent_patch_service(db, agent_id=agent_id, workspace_ref=request.workspace_ref)
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 
 @router.post("/agents/{agent_id}/undrain")
 def agent_undrain(agent_id: str, db: Session = Depends(get_db)) -> dict:
-    agent = _require_agent(db, agent_id)
-    if agent.status != AgentStatus.DRAINING.value:
-        raise HTTPException(status_code=409, detail=f"agent is not draining (status={agent.status})")
-    agent.status = AgentStatus.IDLE.value
-    agent.updated_at = utc_now()
-    _create_event(db, agent_id=agent.agent_id, event_type="agent.idle", body={"reason": "undrain"})
-    db.commit()
+    agent = agent_undrain_service(db, agent_id=agent_id)
     return _ok({"agent_id": agent.agent_id, "status": agent.status})
 
 
 @router.post("/agents/{agent_id}/down")
 def agent_down(agent_id: str, request: AgentDownRequest, db: Session = Depends(get_db)) -> dict:
-    agent = _require_agent(db, agent_id)
-    if request.mode == "drain":
-        agent.status = AgentStatus.DRAINING.value
-        event_type = "agent.draining"
-    else:
-        agent.status = AgentStatus.TERMINATED.value
-        event_type = "agent.terminated"
-        if request.mode == "force":
-            running_jobs = db.scalars(
-                select(Job).where(Job.target_agent_id == agent_id, Job.status.in_([JobStatus.RUNNING.value, JobStatus.QUEUED.value]))
-            ).all()
-            for job in running_jobs:
-                job.status = JobStatus.CANCELLED.value
-                job.updated_at = utc_now()
-                _create_event(db, job_id=job.job_id, event_type="job.cancelled", body={"status": job.status})
-    agent.updated_at = utc_now()
-    _create_event(db, agent_id=agent.agent_id, event_type=event_type, body={"mode": request.mode})
-    db.commit()
+    agent = agent_down_service(db, agent_id=agent_id, mode=request.mode)
     return _ok({"agent_id": agent.agent_id, "status": agent.status, "mode": request.mode})

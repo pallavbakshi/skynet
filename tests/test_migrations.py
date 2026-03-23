@@ -61,7 +61,7 @@ class MigrationInitTest(unittest.TestCase):
         self.assertIn("applied", result)
         self.assertIn("current_version", result)
         self.assertIn("engine", result)
-        self.assertEqual(result["engine"], "sqlite_create_all")
+        self.assertEqual(result["engine"], "sqlite")
 
     def test_discover_migrations_finds_sql_files(self) -> None:
         migrations = _discover_migrations()

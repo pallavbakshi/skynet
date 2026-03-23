@@ -2,7 +2,7 @@
 
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agp.db import current_release_version
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
@@ -12,6 +12,7 @@ T = TypeVar("T")
 
 class OkResponse(BaseModel, Generic[T]):
     """Standard API envelope for successful responses."""
+    model_config = ConfigDict(extra="allow")
     ok: bool = True
     data: T
 
@@ -24,6 +25,7 @@ class PageInfo(BaseModel):
 
 class PagedData(BaseModel, Generic[T]):
     """Paginated list data payload."""
+    model_config = ConfigDict(extra="allow")
     items: list[T]
     page: PageInfo
 
@@ -194,56 +196,62 @@ class PageEnvelope(BaseModel):
 
 
 class EventResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     event_id: str
     event_seq: int
     event_type: str
-    created_at: str
+    created_at: Any
     body: dict[str, Any]
 
 
 class AgentResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     agent_id: str
     capability_id: str
-    assigned_runtime_id: str | None
+    assigned_runtime_id: str | None = None
     queue_id: str
-    status: AgentStatus
-    workspace_ref: str | None
+    status: str
+    workspace_ref: str | None = None
 
 
 class RuntimeResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     runtime_id: str
     hostname: str
-    status: RuntimeStatus
-    health_status: HealthStatus
-    metadata: dict[str, Any]
+    status: str
+    health_status: str
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 
 class JobResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     job_id: str
     message_id: str
-    target_agent_id: str | None
+    target_agent_id: str | None = None
     target_queue: str
-    status: JobStatus
+    status: str
     retry_count: int
     max_retries: int
-    latest_run_id: str | None
-    result_artifact_id: str | None
+    latest_run_id: str | None = None
+    result_artifact_id: str | None = None
 
 
 class RunResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     run_id: str
     job_id: str
     agent_id: str
     runtime_id: str
     attempt: int
-    status: RunStatus
+    status: str
 
 
 class LeaseResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
     lease_id: str
     run_id: str
     agent_id: str
     runtime_id: str
     fencing_token: int
-    status: LeaseStatus
-    expires_at: str
+    status: str
+    expires_at: Any

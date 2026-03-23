@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from fastapi import HTTPException
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
@@ -45,6 +44,7 @@ from agp.services._helpers import (
     _require_runtime,
 )
 from agp.services.events import _create_event
+from agp.services.exceptions import BadRequestError, ConflictError, InternalError
 from agp.services.jobs import _fail_exhausted_queued_jobs
 
 _TERMINAL_RUN_STATES = frozenset({
@@ -57,10 +57,7 @@ _TERMINAL_RUN_STATES = frozenset({
 
 def _reject_if_terminal(run: Run) -> None:
     if run.status in _TERMINAL_RUN_STATES:
-        raise HTTPException(
-            status_code=409,
-            detail=f"run {run.run_id} is already terminal (status={run.status})",
-        )
+        raise ConflictError(f"run {run.run_id} is already terminal (status={run.status})")
 
 
 def _active_lease_for_run(db: Session, run_id: str, lease_id: str) -> Lease:
@@ -72,28 +69,28 @@ def _active_lease_for_run(db: Session, run_id: str, lease_id: str) -> Lease:
         )
     )
     if lease is None:
-        raise HTTPException(status_code=409, detail="active lease not found")
+        raise ConflictError("active lease not found")
     return lease
 
 
 def _assert_lease_owner(lease: Lease, runtime_id: str, fencing_token: int) -> None:
     if lease.runtime_id != runtime_id:
-        raise HTTPException(status_code=409, detail="lease runtime mismatch")
+        raise ConflictError("lease runtime mismatch")
     if lease.fencing_token != fencing_token:
-        raise HTTPException(status_code=409, detail="stale fencing token")
+        raise ConflictError("stale fencing token")
 
 
 def _validate_terminal_artifact_roles(artifacts: list, required_roles: set[str]) -> None:
     seen = {item.role for item in artifacts}
     missing = sorted(required_roles - seen)
     if missing:
-        raise HTTPException(status_code=400, detail=f"missing required artifact roles: {', '.join(missing)}")
+        raise BadRequestError(f"missing required artifact roles: {', '.join(missing)}")
 
 
 def _validate_artifact_store_refs(artifacts: list) -> None:
     missing_refs = [item.storage_ref for item in artifacts if not _artifact_store().exists(storage_ref=item.storage_ref)]
     if missing_refs:
-        raise HTTPException(status_code=400, detail=f"missing durable artifacts: {', '.join(missing_refs)}")
+        raise BadRequestError(f"missing durable artifacts: {', '.join(missing_refs)}")
 
 
 def _store_terminal_artifacts(
@@ -206,7 +203,7 @@ def resolve_claim_agent(
         }
         return agent, routing_decision
 
-    raise HTTPException(status_code=400, detail="claim requires agent_id or capability_id")
+    raise BadRequestError("claim requires agent_id or capability_id")
 
 
 def execute_claim(
@@ -234,7 +231,7 @@ def execute_claim(
     job = db.get(Job, delivery.job_id)
     if job is None:
         _queue_backend().release_unclaimed(db, delivery=delivery)
-        raise HTTPException(status_code=500, detail=f"job missing for delivery {delivery.job_id}")
+        raise InternalError(f"job missing for delivery {delivery.job_id}")
     if job.status != JobStatus.QUEUED.value or job.retry_count >= job.max_retries:
         _queue_backend().release_unclaimed(db, delivery=delivery)
         if exhausted_count:
@@ -243,7 +240,7 @@ def execute_claim(
     message = db.get(Message, job.message_id)
     if message is None:
         _queue_backend().release_unclaimed(db, delivery=delivery)
-        raise HTTPException(status_code=500, detail=f"message missing for job {job.job_id}")
+        raise InternalError(f"message missing for job {job.job_id}")
 
     attempt = (db.scalar(select(func.max(Run.attempt)).where(Run.job_id == job.job_id)) or 0) + 1
     run = Run(
@@ -405,9 +402,8 @@ def recovering_run_service(
     db: Session, *, run: Run, lease: Lease, runtime: Runtime, details: dict,
 ) -> dict:
     """Transition running→recovering, extend lease, emit event."""
-    from fastapi import HTTPException
     if run.status != RunStatus.RUNNING.value:
-        raise HTTPException(status_code=409, detail=f"run cannot enter recovering from state {run.status}")
+        raise ConflictError(f"run cannot enter recovering from state {run.status}")
     run.status = RunStatus.RECOVERING.value
     lease.expires_at = utc_now() + timedelta(seconds=30)
     runtime.last_seen_at = utc_now()
@@ -419,9 +415,8 @@ def recovering_run_service(
 
 def resumed_run_service(db: Session, *, run: Run, runtime_id: str, details: dict) -> dict:
     """Transition recovering→running, emit event."""
-    from fastapi import HTTPException
     if run.status != RunStatus.RECOVERING.value:
-        raise HTTPException(status_code=409, detail=f"run cannot resume from state {run.status}")
+        raise ConflictError(f"run cannot resume from state {run.status}")
     run.status = RunStatus.RUNNING.value
     event = _create_event(db, job_id=run.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=runtime_id, event_type="run.resumed", body={"details": details})
     db.commit()

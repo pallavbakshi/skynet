@@ -42,7 +42,8 @@ from agp.api.routes import admin, agents, artifacts, jobs, observability, runs, 
 
 # Middleware and error handlers
 from agp.api.middleware import auth_middleware
-from agp.api.errors import generic_exception_handler, http_exception_handler, validation_exception_handler
+from agp.api.errors import domain_exception_handler, generic_exception_handler, http_exception_handler, validation_exception_handler
+from agp.services.exceptions import DomainError
 
 # Auth settings loader
 from agp.services._helpers import _load_persisted_auth_settings
@@ -55,6 +56,7 @@ def build_app() -> FastAPI:
 
     app.middleware("http")(auth_middleware)
 
+    app.exception_handler(DomainError)(domain_exception_handler)
     app.exception_handler(HTTPException)(http_exception_handler)
     app.exception_handler(RequestValidationError)(validation_exception_handler)
     app.exception_handler(Exception)(generic_exception_handler)

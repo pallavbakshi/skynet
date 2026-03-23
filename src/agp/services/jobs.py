@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -36,11 +35,12 @@ from agp.services._helpers import (
     _write_control_plane_artifact,
 )
 from agp.services.events import _create_event
+from agp.services.exceptions import BadRequestError, ConflictError, InternalError, NotFoundError
 
 
 def _block_job(db: Session, *, job: Job, reason: str) -> None:
     if job.status != JobStatus.QUEUED.value:
-        raise HTTPException(status_code=409, detail=f"job cannot be blocked from state {job.status}")
+        raise ConflictError(f"job cannot be blocked from state {job.status}")
     job.status = JobStatus.BLOCKED.value
     job.updated_at = utc_now()
     _create_event(db, job_id=job.job_id, event_type="job.blocked", body={"reason": reason})
@@ -48,7 +48,7 @@ def _block_job(db: Session, *, job: Job, reason: str) -> None:
 
 def _unblock_job(db: Session, *, job: Job, reason: str) -> None:
     if job.status != JobStatus.BLOCKED.value:
-        raise HTTPException(status_code=409, detail=f"job cannot be unblocked from state {job.status}")
+        raise ConflictError(f"job cannot be unblocked from state {job.status}")
     job.status = JobStatus.QUEUED.value
     job.updated_at = utc_now()
     _create_event(db, job_id=job.job_id, event_type="job.queued", body={"target_queue": job.target_queue, "reason": reason})
@@ -110,13 +110,13 @@ def create_and_enqueue_job(
     if target_type == "agent":
         agent = _require_agent(db, target_id)
         if agent.status == AgentStatus.TERMINATED.value:
-            raise HTTPException(status_code=409, detail=f"agent is terminated: {target_id}")
+            raise ConflictError(f"agent is terminated: {target_id}")
         if agent.status == AgentStatus.DRAINING.value:
-            raise HTTPException(status_code=409, detail=f"agent is draining: {target_id}")
+            raise ConflictError(f"agent is draining: {target_id}")
     elif target_type == "capability":
         _require_capability(db, target_id)
     else:
-        raise HTTPException(status_code=400, detail="target.type must be agent or capability")
+        raise BadRequestError("target.type must be agent or capability")
 
     message = Message(
         message_id=_new_id("msg"),
@@ -234,7 +234,7 @@ def execute_handoff(
                     )
                 ).all()
                 if agent_ancestor_jobs:
-                    raise HTTPException(status_code=409, detail=f"handoff cycle detected: agent {target.id} has ancestor job {agent_ancestor_jobs[0]} in its chain")
+                    raise ConflictError(f"handoff cycle detected: agent {target.id} has ancestor job {agent_ancestor_jobs[0]} in its chain")
 
     handoff = Handoff(handoff_id=_new_id("hnd"), source_job_id=source_job.job_id)
     db.add(handoff)
@@ -272,9 +272,9 @@ def execute_handoff(
     for aid in artifact_ids:
         artifact = db.get(Artifact, aid)
         if artifact is None:
-            raise HTTPException(status_code=400, detail=f"handoff artifact not found: {aid}")
+            raise BadRequestError(f"handoff artifact not found: {aid}")
         if artifact.job_id != source_job.job_id:
-            raise HTTPException(status_code=400, detail=f"artifact {aid} does not belong to source job {source_job.job_id}")
+            raise BadRequestError(f"artifact {aid} does not belong to source job {source_job.job_id}")
         db.add(HandoffArtifact(handoff_id=handoff.handoff_id, artifact_id=aid))
         validated_artifact_ids.append(aid)
     for child_job_id in child_job_ids:

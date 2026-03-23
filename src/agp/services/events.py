@@ -18,11 +18,11 @@ def _next_event_seq(db: Session) -> int:
     """Allocate the next monotonic event sequence number.
 
     On PostgreSQL the database sequence ``events_event_seq_seq`` is
-    authoritative — no process-local counter is needed and the result is
-    safe across multiple server processes.
+    authoritative.  On SQLite the ``_sqlite_sequences`` table provides
+    an equivalent atomic counter.
 
-    On SQLite (dev/test) a process-local counter seeded from
-    ``MAX(event_seq)`` is used as a fallback.
+    Falls back to a process-local counter only when the database
+    sequences are not yet initialized (pre-migration state).
     """
     from agp.db import next_event_seq_db
 
@@ -30,7 +30,7 @@ def _next_event_seq(db: Session) -> int:
     if db_seq is not None:
         return db_seq
 
-    # SQLite fallback: process-local counter
+    # Fallback: process-local counter (pre-migration only)
     global _event_seq_counter
     value = db.scalar(select(func.max(Event.event_seq)))
     db_max = int(value or 0)

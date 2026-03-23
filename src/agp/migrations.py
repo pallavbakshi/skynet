@@ -2,8 +2,8 @@
 
 Tracks applied versions in the ``system_metadata`` table and applies SQL
 files from the ``migrations/`` directory in order.  PostgreSQL environments
-run the real migration SQL; SQLite falls back to ``create_all()`` with ORM
-constraints, since many Postgres-specific constructs are unsupported.
+run the Postgres-dialect SQL; SQLite environments run SQLite-dialect SQL
+(``*.sqlite.sql``).
 """
 
 from __future__ import annotations
@@ -19,6 +19,25 @@ from agp.db import Base, SessionLocal, engine, current_release_version
 
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
+
+
+def _execute_sql(session: Session, sql: str) -> None:
+    """Execute a SQL migration script, handling multi-statement files.
+
+    SQLite's ``cursor.execute()`` cannot run multiple statements in one
+    call, so we split on semicolons (outside of string literals) and
+    execute each statement individually.  Postgres handles the full
+    script in a single ``execute()`` call.
+    """
+    if _is_postgres():
+        session.execute(text(sql))
+        return
+    # SQLite: split and execute statements individually
+    for stmt in sql.split(";"):
+        stmt = stmt.strip()
+        if not stmt or stmt.upper() in ("BEGIN", "COMMIT", "END"):
+            continue
+        session.execute(text(stmt))
 
 
 def _is_postgres() -> bool:
@@ -46,13 +65,28 @@ def _set_schema_version(session: Session, version: str) -> None:
         existing.updated_at = utc_now()
 
 
-def _discover_migrations() -> list[tuple[str, Path]]:
-    """Return sorted (version_tag, path) pairs for SQL migrations."""
+def _discover_migrations(*, dialect: str = "postgres") -> list[tuple[str, Path]]:
+    """Return sorted (version_tag, path) pairs for SQL migrations.
+
+    When dialect is "sqlite", looks for *.sqlite.sql files.
+    When dialect is "postgres", looks for *.sql files excluding *.sqlite.sql.
+    """
     if not _MIGRATIONS_DIR.is_dir():
         return []
+    if dialect == "sqlite":
+        files = sorted(_MIGRATIONS_DIR.glob("*.sqlite.sql"))
+        result = []
+        for f in files:
+            match = re.match(r"^(\d{4}_\w+)\.sqlite\.sql$", f.name)
+            if match:
+                result.append((match.group(1), f))
+        return result
+    # Postgres: *.sql but not *.sqlite.sql
     files = sorted(_MIGRATIONS_DIR.glob("*.sql"))
     result = []
     for f in files:
+        if f.name.endswith(".sqlite.sql"):
+            continue
         match = re.match(r"^(\d{4}_\w+)\.sql$", f.name)
         if match:
             result.append((match.group(1), f))
@@ -69,9 +103,10 @@ def pending_migrations(session: Session) -> list[tuple[str, Path]]:
     """Return migrations not yet applied."""
     current = _current_schema_version(session)
     current_ord = _version_ord(current) if current else -1
+    dialect = "postgres" if _is_postgres() else "sqlite"
     return [
         (tag, path)
-        for tag, path in _discover_migrations()
+        for tag, path in _discover_migrations(dialect=dialect)
         if _version_ord(tag) > current_ord
     ]
 
@@ -79,10 +114,11 @@ def pending_migrations(session: Session) -> list[tuple[str, Path]]:
 def apply_migrations(*, force_create_all: bool = False) -> dict:
     """Apply pending migrations.
 
-    On PostgreSQL, executes SQL migration files in order.
-    On SQLite (or when *force_create_all* is True), uses ``create_all()``
-    to derive schema from ORM models, since SQLite cannot run the
-    Postgres-specific DDL.
+    On PostgreSQL, executes Postgres-dialect SQL migration files.
+    On SQLite, executes SQLite-dialect SQL migration files.
+
+    The *force_create_all* parameter is accepted for backward compatibility
+    but no longer changes behavior — both dialects run real migrations.
 
     Returns a summary dict with keys: applied, current_version, engine.
     """
@@ -90,13 +126,13 @@ def apply_migrations(*, force_create_all: bool = False) -> dict:
 
     session = SessionLocal()
     try:
-        use_sql = _is_postgres() and not force_create_all
+        dialect = "postgres" if _is_postgres() else "sqlite"
         applied: list[str] = []
 
         # Version incompatibility check: reject if DB schema is ahead of code
         current = _current_schema_version(session)
         if current is not None:
-            available = _discover_migrations()
+            available = _discover_migrations(dialect=dialect)
             available_tags = {tag for tag, _ in available}
             current_ord = _version_ord(current)
             max_available_ord = max((_version_ord(t) for t in available_tags), default=0)
@@ -107,31 +143,22 @@ def apply_migrations(*, force_create_all: bool = False) -> dict:
                     f"Upgrade the application or roll back the database."
                 )
 
-        if use_sql:
-            # Postgres path: run raw SQL migrations
-            for tag, path in pending_migrations(session):
-                sql = path.read_text(encoding="utf-8")
-                # Execute each statement (the migration files use BEGIN/COMMIT)
-                session.execute(text(sql))
-                _set_schema_version(session, tag)
-                applied.append(tag)
-            if not applied:
-                # No pending migrations — ensure system_metadata exists
-                current = _current_schema_version(session)
-                if current is None:
-                    # First run — apply all
-                    for tag, path in _discover_migrations():
-                        sql = path.read_text(encoding="utf-8")
-                        session.execute(text(sql))
-                        _set_schema_version(session, tag)
-                        applied.append(tag)
-        else:
-            # SQLite path: create_all with ORM constraints
-            Base.metadata.create_all(bind=engine)
-            latest = _discover_migrations()
-            version = latest[-1][0] if latest else "0001_initial"
-            _set_schema_version(session, version)
-            applied.append(f"create_all({version})")
+        # Both Postgres and SQLite: run SQL migrations
+        for tag, path in pending_migrations(session):
+            sql = path.read_text(encoding="utf-8")
+            _execute_sql(session, sql)
+            _set_schema_version(session, tag)
+            applied.append(tag)
+        if not applied:
+            # No pending migrations — ensure system_metadata exists
+            current = _current_schema_version(session)
+            if current is None:
+                # First run — apply all
+                for tag, path in _discover_migrations(dialect=dialect):
+                    sql = path.read_text(encoding="utf-8")
+                    _execute_sql(session, sql)
+                    _set_schema_version(session, tag)
+                    applied.append(tag)
 
         # Ensure release_version metadata
         release_row = session.get(models.SystemMetadata, "release_version")
@@ -149,7 +176,7 @@ def apply_migrations(*, force_create_all: bool = False) -> dict:
         return {
             "applied": applied,
             "current_version": current,
-            "engine": "postgres" if use_sql else "sqlite_create_all",
+            "engine": "postgres" if _is_postgres() else "sqlite",
         }
     finally:
         session.close()

@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from agp.artifact_store import get_artifact_store
@@ -28,6 +27,7 @@ from agp.models import (
     utc_now,
 )
 from agp.queue_backend import get_queue_backend
+from agp.services.exceptions import BadRequestError, ConflictError, NotFoundError
 
 
 def _new_id(prefix: str) -> str:
@@ -103,28 +103,28 @@ def _ensure_capability_pool(db: Session, capability_id: str) -> CapabilityPool:
 def _require_capability(db: Session, capability_id: str) -> Capability:
     capability = db.get(Capability, capability_id)
     if capability is None:
-        raise HTTPException(status_code=404, detail=f"capability not found: {capability_id}")
+        raise NotFoundError(f"capability not found: {capability_id}")
     return capability
 
 
 def _require_agent(db: Session, agent_id: str) -> Agent:
     agent = db.get(Agent, agent_id)
     if agent is None:
-        raise HTTPException(status_code=404, detail=f"agent not found: {agent_id}")
+        raise NotFoundError(f"agent not found: {agent_id}")
     return agent
 
 
 def _require_runtime(db: Session, runtime_id: str) -> Runtime:
     runtime = db.get(Runtime, runtime_id)
     if runtime is None:
-        raise HTTPException(status_code=404, detail=f"runtime not found: {runtime_id}")
+        raise NotFoundError(f"runtime not found: {runtime_id}")
     return runtime
 
 
 def _require_job(db: Session, job_id: str) -> Job:
     job = db.get(Job, job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+        raise NotFoundError(f"job not found: {job_id}")
     return job
 
 
@@ -195,13 +195,13 @@ def _parse_release_version(value: str) -> tuple[int, int, int]:
         normalized = normalized[1:]
     parts = normalized.split(".")
     if len(parts) < 2 or len(parts) > 3:
-        raise HTTPException(status_code=400, detail=f"invalid release version: {value}")
+        raise BadRequestError(f"invalid release version: {value}")
     try:
         major = int(parts[0])
         minor = int(parts[1])
         patch = int(parts[2]) if len(parts) == 3 else 0
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=f"invalid release version: {value}") from exc
+        raise BadRequestError(f"invalid release version: {value}") from exc
     return major, minor, patch
 
 
@@ -210,11 +210,11 @@ def _assert_supported_runtime_skew(db: Session, runtime_release_version: str) ->
     cp_major, cp_minor, _ = _parse_release_version(control_plane_release)
     rt_major, rt_minor, _ = _parse_release_version(runtime_release_version)
     if rt_major != cp_major:
-        raise HTTPException(status_code=409, detail="unsupported major-version skew")
+        raise ConflictError("unsupported major-version skew")
     if rt_minor > cp_minor:
-        raise HTTPException(status_code=409, detail="runtime release is ahead of control plane")
+        raise ConflictError("runtime release is ahead of control plane")
     if cp_minor - rt_minor > 1:
-        raise HTTPException(status_code=409, detail="runtime release is too far behind control plane")
+        raise ConflictError("runtime release is too far behind control plane")
 
 
 def _queue_for_target(target_type: str, target_id: str) -> str:
@@ -222,7 +222,7 @@ def _queue_for_target(target_type: str, target_id: str) -> str:
         return f"agent:{target_id}"
     if target_type == "capability":
         return f"capability:{target_id}"
-    raise HTTPException(status_code=400, detail=f"unsupported target type: {target_type}")
+    raise BadRequestError(f"unsupported target type: {target_type}")
 
 
 def _capability_queue_for(db: Session, capability_id: str) -> str:

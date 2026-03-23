@@ -301,6 +301,127 @@ class RedisBackendContractTest(AgpTestCase):
         finally:
             session.close()
 
+    def test_phase2_recovery_sql_delivered_missing_redis_inflight(self) -> None:
+        """Crash after SQL marked 'delivered' but before Redis inflight written."""
+        from datetime import datetime, timezone
+        from agp.models import QueueDeliveryRecord
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            # Normal dequeue — marks SQL as "delivered" and writes Redis inflight
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            session.commit()
+            # Simulate crash: remove the Redis inflight entry but leave SQL as "delivered"
+            backend.client.hdel(backend._inflight_hash_key(), delivery.delivery_id)
+            backend.client.srem(backend._inflight_jobs_key(), job.job_id)
+            # Backdate the SQL record so it's past the visibility timeout
+            rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
+            rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            session.commit()
+            # Phase 2 should find the orphaned SQL "delivered" record
+            result = backend.redrive_stale_deliveries(
+                session, visibility_timeout_seconds=0, max_delivery_attempts=3
+            )
+            session.commit()
+            self.assertEqual(result["redriven_deliveries"], 1)
+            # Verify the delivery is back in SQL as "pending"
+            session.refresh(rec)
+            self.assertEqual(rec.state, "pending")
+            # Verify it's back in the Redis queue and can be dequeued
+            d2 = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(d2)
+            self.assertEqual(d2.job_id, job.job_id)
+        finally:
+            session.close()
+
+    def test_phase3_recovery_sql_pending_missing_redis_pending(self) -> None:
+        """Crash after Redis LPOP but before SQL update to 'delivered'."""
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            # Manually simulate the crash window:
+            # Remove job from Redis list and pending set (as if LPOP succeeded)
+            # but SQL still says "pending" (process died before SQL transition)
+            backend.client.lpop(backend._queue_key("agent:agt_q"))
+            backend.client.srem(backend._pending_set_key("agent:agt_q"), job.job_id)
+            # Confirm Redis is empty — dequeue returns None
+            d = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNone(d)
+            # Phase 3 should detect SQL pending with missing Redis entry
+            result = backend.redrive_stale_deliveries(
+                session, visibility_timeout_seconds=0, max_delivery_attempts=3
+            )
+            session.commit()
+            self.assertGreaterEqual(result["redriven_deliveries"], 1)
+            # Now dequeue should work again
+            d2 = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(d2)
+            self.assertEqual(d2.job_id, job.job_id)
+        finally:
+            session.close()
+
+    def test_phase2_dead_letters_after_max_attempts(self) -> None:
+        """Phase 2 recovery dead-letters if delivery_attempt >= max."""
+        from datetime import datetime, timezone
+        from agp.models import QueueDeliveryRecord
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            # Exhaust delivery attempts through normal redrive cycles
+            for _ in range(3):
+                delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+                if delivery is None:
+                    break
+                rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
+                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                session.commit()
+                backend.redrive_stale_deliveries(
+                    session, visibility_timeout_seconds=0, max_delivery_attempts=3
+                )
+                session.commit()
+            # Now create the orphan scenario for phase 2:
+            # Dequeue one more time (attempt 4, should be at limit)
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            if delivery is not None:
+                # Orphan the Redis inflight entry
+                backend.client.hdel(backend._inflight_hash_key(), delivery.delivery_id)
+                backend.client.srem(backend._inflight_jobs_key(), job.job_id)
+                rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
+                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                session.commit()
+                result = backend.redrive_stale_deliveries(
+                    session, visibility_timeout_seconds=0, max_delivery_attempts=3
+                )
+                session.commit()
+                self.assertGreaterEqual(result["dead_lettered_deliveries"], 1)
+                session.refresh(rec)
+                self.assertEqual(rec.state, "dead_lettered")
+            else:
+                # Job was already dead-lettered during earlier cycles
+                from sqlalchemy import select as sa_select
+                rec = session.scalars(
+                    sa_select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job.job_id)
+                ).first()
+                self.assertEqual(rec.state, "dead_lettered")
+        finally:
+            session.close()
+
 
 class ArtifactStoreContractTest(AgpTestCase):
     """LocalFsArtifactStore: write/read/exists lifecycle."""

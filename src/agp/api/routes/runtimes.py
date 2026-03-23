@@ -11,62 +11,17 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
 from agp.enums import HealthStatus, LeaseStatus
-from agp.models import Agent, Job, Lease, Run, Runtime, utc_now
-from agp.schemas import RuntimeRegisterRequest
-from agp.services._helpers import (
-    _assert_supported_runtime_skew,
-    _new_id,
-    _record_health_transition,
-    _require_runtime,
-)
-from agp.services.events import _create_event
+from agp.models import Agent, Job, Lease, Run, Runtime
+from agp.schemas import OkResponse, RuntimeRegisterRequest, RuntimeResponse
+from agp.services._helpers import _require_runtime
+from agp.services.runtimes import register_runtime_service
 
 router = APIRouter()
 
 
-@router.post("/runtimes/register")
+@router.post("/runtimes/register", response_model=OkResponse[RuntimeResponse])
 def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_db)) -> dict:
-    _assert_supported_runtime_skew(db, request.release_version)
-    runtime_id = request.runtime_id or _new_id("rtm")
-    runtime = db.get(Runtime, runtime_id)
-    if runtime is None:
-        runtime = Runtime(
-            runtime_id=runtime_id,
-            hostname=request.hostname,
-            release_version=request.release_version,
-            status="idle",
-            health_status=HealthStatus.HEALTHY.value,
-            metadata_json=request.metadata,
-            last_seen_at=utc_now(),
-            last_heartbeat_at=utc_now(),
-        )
-        db.add(runtime)
-        db.flush()
-        _record_health_transition(
-            db, entity_type="runtime", entity_id=runtime_id,
-            health_status=HealthStatus.HEALTHY.value, reason="registered",
-        )
-        _create_event(
-            db,
-            runtime_id=runtime.runtime_id,
-            event_type="runtime.registered",
-            body={"hostname": runtime.hostname, "release_version": runtime.release_version},
-        )
-    else:
-        previous_health = runtime.health_status
-        runtime.hostname = request.hostname
-        runtime.release_version = request.release_version
-        runtime.metadata_json = request.metadata
-        runtime.status = "idle"
-        runtime.health_status = HealthStatus.HEALTHY.value
-        runtime.last_seen_at = utc_now()
-        runtime.last_heartbeat_at = utc_now()
-        if previous_health != HealthStatus.HEALTHY.value:
-            _record_health_transition(
-                db, entity_type="runtime", entity_id=runtime_id,
-                health_status=HealthStatus.HEALTHY.value, reason="re_registered",
-            )
-    db.commit()
+    runtime = register_runtime_service(db, runtime_id=request.runtime_id, hostname=request.hostname, release_version=request.release_version, metadata=request.metadata)
     return _ok(
         _serialize(
             runtime,

@@ -44,9 +44,8 @@ def is_postgres() -> bool:
 def init_db() -> None:
     """Initialize or migrate the database schema.
 
-    On PostgreSQL, applies pending SQL migrations from ``migrations/``.
-    On SQLite, uses ``create_all()`` from ORM metadata (which now
-    includes CheckConstraints aligned with the migration SQL).
+    On PostgreSQL, applies pending Postgres-dialect SQL migrations.
+    On SQLite, applies pending SQLite-dialect SQL migrations.
     """
     from agp.migrations import apply_migrations
 
@@ -64,11 +63,27 @@ def get_db() -> Generator:
 
 
 def next_event_seq_db(session) -> int | None:
-    """Allocate the next event sequence from the database sequence (Postgres only).
+    """Allocate the next event sequence number from the database.
 
-    Returns the next sequence value, or None if not on PostgreSQL.
+    On PostgreSQL, uses the native sequence ``events_event_seq_seq``.
+    On SQLite, atomically increments the ``_sqlite_sequences`` table
+    (created by the SQLite migration).
+
+    Returns ``None`` only if the sequences table doesn't exist yet
+    (pre-migration state).
     """
-    if not is_postgres():
+    if is_postgres():
+        result = session.execute(text("SELECT nextval('events_event_seq_seq')"))
+        return result.scalar()
+    # SQLite: atomic increment on _sqlite_sequences table
+    try:
+        session.execute(text(
+            "UPDATE _sqlite_sequences SET value = value + 1 WHERE name = 'events_event_seq'"
+        ))
+        row = session.execute(text(
+            "SELECT value FROM _sqlite_sequences WHERE name = 'events_event_seq'"
+        ))
+        val = row.scalar()
+        return val
+    except Exception:
         return None
-    result = session.execute(text("SELECT nextval('events_event_seq_seq')"))
-    return result.scalar()

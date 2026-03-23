@@ -33,3 +33,23 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError) 
 
 async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
     return _error_response(500, "internal_error", str(exc), False)
+
+
+from agp.services.exceptions import DomainError
+
+
+async def domain_exception_handler(_: Request, exc: DomainError) -> JSONResponse:
+    code_map = {
+        400: ("invalid_request", False),
+        401: ("unauthenticated", False),
+        403: ("forbidden", False),
+        404: ("not_found", False),
+        409: ("conflict", False),
+        429: ("rate_limited", True),
+    }
+    code, retryable = code_map.get(exc.status_code, ("internal_error", False))
+    if "stale fencing token" in exc.detail:
+        code = "stale_fencing_token"
+    if "lease" in exc.detail and "expired" in exc.detail:
+        code = "lease_expired"
+    return _error_response(exc.status_code, code, exc.detail, retryable)

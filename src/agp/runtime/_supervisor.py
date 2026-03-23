@@ -118,6 +118,7 @@ class RuntimeSupervisor:
             settings.artifact_backend, self.artifact_root,
             server_url=client.identity.server_url,
         )
+        self._registered = False
 
     def _write_artifact(self, *, job_id: str, payload: ArtifactPayload) -> dict[str, Any]:
         stored = self.artifact_store.write_text(
@@ -194,6 +195,9 @@ class RuntimeSupervisor:
         outcomes: list[dict[str, Any]] = []
         iterations = 0
         stop_event = stop_event or Event()
+        if not self._registered:
+            self.client.register()
+            self._registered = True
         while not stop_event.is_set():
             if max_iterations is not None and iterations >= max_iterations:
                 break
@@ -220,7 +224,9 @@ class RuntimeSupervisor:
         max_local_recoveries: int = 1,
         max_local_recovery_seconds: float = 30.0,
     ) -> dict[str, Any]:
-        self.client.register()
+        if not self._registered:
+            self.client.register()
+            self._registered = True
         _append_runtime_log(
             self.client.identity.runtime_id,
             {

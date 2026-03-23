@@ -12,7 +12,7 @@ from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _seriali
 from agp.db import get_db
 from agp.enums import AgentStatus, JobStatus
 from agp.models import Event, IdempotencyKey, Job, utc_now
-from agp.schemas import HandoffRequest, SendMessageRequest
+from agp.schemas import HandoffRequest, JobResponse, OkResponse, PagedData, SendMessageRequest
 from agp.services._helpers import _require_agent, _require_job
 from agp.services.events import _create_event
 from agp.services.jobs import (
@@ -87,7 +87,7 @@ def send_message(
     return response
 
 
-@router.get("/jobs")
+@router.get("/jobs", response_model=OkResponse[PagedData[JobResponse]])
 def list_jobs(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -120,7 +120,7 @@ def list_jobs(
     ))
 
 
-@router.get("/jobs/{job_id}")
+@router.get("/jobs/{job_id}", response_model=OkResponse[JobResponse])
 def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     return _ok(_serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "created_at", "updated_at")))
