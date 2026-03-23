@@ -1,8 +1,10 @@
 """CLI entrypoint for the AGP scaffold.
 
-Contains both service-side commands (serve, initdb, sweep, etc.) and
-lightweight SDK client commands (send, wait, status, ls, info, nudge,
-etc.) that talk to a running control plane over HTTP.
+Primarily exposes the agent-facing client surface (send, wait, status,
+ls, info, nudge, etc.) that talks to a running control plane over HTTP.
+Operational commands still exist here as hidden compatibility shims so
+older scripts keep working, but the intended operator entrypoint is the
+``skyops`` CLI.
 
 All server-side imports are deferred to command bodies so that
 ``pip install agp`` (without ``[server]``) can still import
@@ -13,7 +15,7 @@ import os
 
 import typer
 
-app = typer.Typer(help="AGP control plane scaffold")
+app = typer.Typer(help="AGP agent CLI.")
 
 
 def _require_server_extra() -> None:
@@ -41,7 +43,7 @@ def _default_server_url() -> str:
     return f"http://{_connectable_host(host)}:{port}"
 
 
-@app.command()
+@app.command(hidden=True)
 def initdb() -> None:
     """Initialize or migrate the database schema."""
     _require_server_extra()
@@ -52,7 +54,7 @@ def initdb() -> None:
     typer.echo("Initialized database schema.")
 
 
-@app.command(name="db-status")
+@app.command(name="db-status", hidden=True)
 def db_status() -> None:
     """Show current schema version and pending migrations."""
     _require_server_extra()
@@ -69,7 +71,7 @@ def db_status() -> None:
         typer.echo("Pending:         (none)")
 
 
-@app.command(name="db-migrate")
+@app.command(name="db-migrate", hidden=True)
 def db_migrate() -> None:
     """Apply pending schema migrations."""
     _require_server_extra()
@@ -85,7 +87,7 @@ def db_migrate() -> None:
     typer.echo(f"Current version: {result['current_version']}")
 
 
-@app.command()
+@app.command(hidden=True)
 def serve(
     host: str = typer.Option(None, help="Bind host (default: AGP_HOST or 127.0.0.1)."),
     port: int = typer.Option(None, help="Bind port (default: AGP_PORT or 7860)."),
@@ -102,7 +104,7 @@ def serve(
     uvicorn.run(build_app(), host=actual_host, port=actual_port)
 
 
-@app.command()
+@app.command(hidden=True)
 def runtime_work_loop(
     runtime_id: str,
     server_url: str = typer.Option(None, help="CP base URL (default: AGP_HOST:AGP_PORT)."),
@@ -163,7 +165,7 @@ def runtime_work_loop(
     typer.echo(payload)
 
 
-@app.command()
+@app.command(hidden=True)
 def sweep_loop(
     interval_seconds: float = 1.0,
     max_iterations: int | None = None,
@@ -184,7 +186,7 @@ def sweep_loop(
         typer.echo(payload)
 
 
-@app.command()
+@app.command(hidden=True)
 def sweep_runtimes_loop(
     interval_seconds: float = 1.0,
     max_iterations: int | None = None,
@@ -413,10 +415,10 @@ def status(
     job_id: str = typer.Argument(None, help="Optional job ID for job-specific status."),
     server_url: str = typer.Option(None, help="CP URL."),
 ) -> None:
-    """Check CP health, or inspect a specific job.
+    """Check agent-facing job state.
 
-    With no arguments: shows control plane health.
     With a job ID: shows full job details + artifacts.
+    With no arguments: performs a lightweight control-plane reachability check.
     """
     if job_id is not None:
         _status_job(job_id, server_url)
@@ -519,7 +521,7 @@ def ls(
     server_url: str = typer.Option(None, help="CP URL."),
     all_agents: bool = typer.Option(False, "--all", help="Include terminated/offline agents."),
 ) -> None:
-    """Service discovery — list active agents and available capabilities."""
+    """List logical agents and available capabilities."""
     from datetime import datetime, timezone
 
     with _make_client(server_url) as client:
@@ -548,6 +550,7 @@ def ls(
         typer.echo(_SEPARATOR)
         typer.echo("      AGP SERVICE DISCOVERY (agp ls)")
         typer.echo(_SEPARATOR)
+        typer.echo("Logical agent view only. Use `skyops runtime ...` for runtime and machine health.")
         typer.echo("")
 
         # ── Active Agents section
@@ -559,17 +562,18 @@ def ls(
         else:
             # Column headers
             typer.echo(
-                f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'JOB_ID':<14s} "
-                f"{'TIME_ON_JOB':<12s} {'CWD'}"
+                f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'RUNTIME':<16s} "
+                f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'WORKSPACE'}"
             )
-            typer.echo("-" * 90)
+            typer.echo("-" * 120)
 
             now = datetime.now(timezone.utc)
             for a in active:
                 agent_id = a["agent_id"]
                 role = cap_names.get(a.get("capability_id", ""), a.get("capability_id", "-"))
                 agent_status = a.get("status", "?").upper()
-                cwd = a.get("workspace_ref") or "-"
+                runtime_id = a.get("assigned_runtime_id") or "-"
+                workspace = a.get("workspace_ref") or "-"
 
                 job = agent_jobs.get(agent_id)
                 if job:
@@ -586,8 +590,8 @@ def ls(
                     time_on_job = "-"
 
                 typer.echo(
-                    f"{agent_id:<20s} {role:<18s} {agent_status:<8s} {job_id:<14s} "
-                    f"{time_on_job:<12s} {cwd}"
+                    f"{agent_id:<20s} {role:<18s} {agent_status:<8s} {runtime_id:<16s} "
+                    f"{job_id:<14s} {time_on_job:<12s} {workspace}"
                 )
 
         typer.echo("")
@@ -680,6 +684,7 @@ def _info_agent(agent: dict, client) -> None:
     typer.echo(_SEPARATOR)
     typer.echo(f"      AGENT INFO: {agent_id}")
     typer.echo(_SEPARATOR)
+    typer.echo("Logical agent view. Use `skyops runtime ...` to inspect the bound runtime directly.")
 
     # Resolve capability name
     cap = None
@@ -692,6 +697,7 @@ def _info_agent(agent: dict, client) -> None:
 
     typer.echo(f"CAPABILITY:   {cap_name}")
     typer.echo(f"STATUS:       {agent.get('status', '?').upper()}")
+    typer.echo(f"RUNTIME:      {agent.get('assigned_runtime_id') or '-'}")
 
     # Current job for busy agents
     now = datetime.now(timezone.utc)
@@ -723,21 +729,6 @@ def _info_agent(agent: dict, client) -> None:
 
     workspace = agent.get("workspace_ref") or "-"
     typer.echo(f"WORKSPACE:    {workspace}")
-
-    # Recent logs (if runtime assigned)
-    runtime_id = agent.get("assigned_runtime_id")
-    if runtime_id:
-        try:
-            logs = client.logs_runtime(runtime_id, limit=5)
-            items = logs.get("items", [])
-            if items:
-                typer.echo("")
-                typer.echo("[RECENT LOGS - Last 5 Lines]")
-                for entry in items:
-                    line = entry if isinstance(entry, str) else entry.get("message", str(entry))
-                    typer.echo(f"> {line}")
-        except Exception:
-            pass
 
     # Capability blueprint summary
     if cap:
@@ -824,7 +815,7 @@ def nudge(
 # ── 8. nudge-loop ────────────────────────────────────────────────────
 
 
-@app.command()
+@app.command(hidden=True)
 def nudge_loop(
     target: str = typer.Argument(..., help="Orchestrator agent ID to deliver nudges to."),
     session: str = typer.Option(None, help="Tmux session name (default: agp-<target>)."),

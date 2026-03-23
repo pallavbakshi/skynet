@@ -119,3 +119,37 @@ def runtime_work_once(
         stop_event.set()
         client.close()
     _emit(payload)
+
+
+@runtime_debug_app.command("work-loop")
+def runtime_work_loop(
+    runtime_id: str = typer.Argument(help="Runtime ID."),
+    server_url: str | None = typer.Option(None, "--server-url", help="Server URL (defaults to config)."),
+    hostname: str | None = typer.Option(None, "--hostname", help="Hostname."),
+    agent_id: str | None = typer.Option(None, "--agent-id", help="Agent ID."),
+    capability_id: str | None = typer.Option(None, "--capability-id", help="Capability ID."),
+    artifact_root: str = typer.Option(".agp-artifacts", "--artifact-root", help="Artifact root."),
+    idle_sleep_seconds: float = typer.Option(0.25, "--idle-sleep-seconds", help="Idle poll sleep."),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Stop after N iterations."),
+    max_local_recoveries: int = typer.Option(1, "--max-local-recoveries", help="Max local recovery attempts."),
+    host_kind: str | None = typer.Option(None, "--host-kind", help="Terminal host kind."),
+    adapter_kind: str | None = typer.Option(None, "--adapter-kind", help="Agent adapter kind."),
+) -> None:
+    """Run the continuous runtime work loop."""
+    from agp.cli import runtime_work_loop as agp_runtime_work_loop
+
+    cfg = load_config()
+    resolved_url = server_url or resolve_server_url(cfg)
+    agp_runtime_work_loop(
+        runtime_id=runtime_id,
+        server_url=resolved_url,
+        hostname=hostname,
+        agent_id=agent_id,
+        capability_id=capability_id,
+        artifact_root=artifact_root,
+        idle_sleep_seconds=idle_sleep_seconds,
+        max_iterations=max_iterations,
+        max_local_recoveries=max_local_recoveries,
+        host_kind=host_kind,
+        adapter_kind=adapter_kind,
+    )

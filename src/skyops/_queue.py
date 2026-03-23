@@ -100,6 +100,17 @@ def sweep_leases() -> None:
         session.close()
 
 
+@sweep_app.command("leases-loop")
+def sweep_leases_loop(
+    interval_seconds: float = typer.Option(1.0, "--interval-seconds", help="Sweep interval in seconds."),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Stop after N iterations."),
+) -> None:
+    """Continuously sweep expired leases."""
+    from agp.cli import sweep_loop as agp_sweep_loop
+
+    agp_sweep_loop(interval_seconds=interval_seconds, max_iterations=max_iterations)
+
+
 @sweep_app.command("runtimes")
 def sweep_runtimes(
     stale_timeout: int = typer.Option(90, "--timeout", help="Stale timeout in seconds."),
@@ -114,6 +125,22 @@ def sweep_runtimes(
         _emit(result)
     finally:
         session.close()
+
+
+@sweep_app.command("runtimes-loop")
+def sweep_runtimes_loop(
+    interval_seconds: float = typer.Option(1.0, "--interval-seconds", help="Sweep interval in seconds."),
+    max_iterations: int | None = typer.Option(None, "--max-iterations", help="Stop after N iterations."),
+    stale_timeout: int | None = typer.Option(None, "--timeout", help="Stale timeout in seconds."),
+) -> None:
+    """Continuously sweep stale runtimes."""
+    from agp.cli import sweep_runtimes_loop as agp_sweep_runtimes_loop
+
+    agp_sweep_runtimes_loop(
+        interval_seconds=interval_seconds,
+        max_iterations=max_iterations,
+        stale_timeout_seconds=stale_timeout,
+    )
 
 
 @sweep_app.command("idle")
