@@ -48,14 +48,23 @@ AGP_REMOTE_SERVER_URL  ?= http://your-server.example.com:7860
 AGP_RUNTIME_ID         ?= rtm_mac
 AGP_RUNTIME_AGENT_ID   ?= agt_local
 
-# Codex model — explicit to avoid provider ambiguity
-AGP_CODEX_MODEL        ?= openai/gpt-5.3-codex
+# Codex launch command. Defaults to the same local path that works when
+# ncodex is started manually on this host; callers can still override it.
+AGP_CODEX_CLI_COMMAND  ?= ncodex -a never -s danger-full-access
 
 # ── Validation helpers ────────────────────────────────────────────────
 define require_env
 	@if [ -z "$($(1))" ]; then \
 		echo "ERROR: $(1) is not set."; \
 		echo "  Set it in .env or export it: export $(1)=..."; \
+		echo "  See .env.example for reference."; \
+		exit 1; \
+	fi
+endef
+
+define require_provider_env
+	@if [ -z "$(OPENAI_API_KEY)" ] && [ -z "$(OPENROUTER_API_KEY)" ]; then \
+		echo "ERROR: set OPENAI_API_KEY or OPENROUTER_API_KEY."; \
 		echo "  See .env.example for reference."; \
 		exit 1; \
 	fi
@@ -231,13 +240,11 @@ ps: ## Show docker compose status
 .PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm runtime-clean runtime-deploy
 
 runtime: ## Start a local runtime (tmux + codex, connects to local CP)
-	$(call require_env,OPENROUTER_API_KEY)
+	$(call require_provider_env)
 	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID))"
-	OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)" \
-	OPENAI_BASE_URL="https://openrouter.ai/api/v1" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_CODEX_TUI_MODE=true \
-	AGP_CODEX_CLI_COMMAND="ncodex -m $(AGP_CODEX_MODEL) -a never -s danger-full-access" \
+	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 	AGP_CODEX_MAX_POLLS=240 \
 	AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
@@ -250,18 +257,16 @@ runtime: ## Start a local runtime (tmux + codex, connects to local CP)
 		--agent-id agt_local
 
 runtime-remote: ## Start a runtime connecting to remote CP
-	$(call require_env,OPENROUTER_API_KEY)
+	$(call require_provider_env)
 	$(call require_env,AGP_REMOTE_SERVER_URL)
 	@echo "Starting runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID))"
-	OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)" \
-	OPENAI_BASE_URL="https://openrouter.ai/api/v1" \
 	AGP_SERVER_URL="$(AGP_REMOTE_SERVER_URL)" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_TMUX_DEFAULT_CWD="$(ROOT)" \
-	AGP_CODEX_CLI_COMMAND="ncodex -m $(AGP_CODEX_MODEL) -a never -s danger-full-access" \
+	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
 	AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
 	AGP_CODEX_IDLE_AFTER=5 \
@@ -272,18 +277,16 @@ runtime-remote: ## Start a runtime connecting to remote CP
 		--agent-id "$(AGP_RUNTIME_AGENT_ID)"
 
 runtime-wezterm: ## Start a WezTerm runtime connecting to remote CP
-	$(call require_env,OPENROUTER_API_KEY)
+	$(call require_provider_env)
 	$(call require_env,AGP_REMOTE_SERVER_URL)
 	@echo "Starting WezTerm runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID))"
-	OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)" \
-	OPENAI_BASE_URL="https://openrouter.ai/api/v1" \
 	AGP_SERVER_URL="$(AGP_REMOTE_SERVER_URL)" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=wezterm \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_WEZTERM_DEFAULT_CWD="$(ROOT)" \
-	AGP_CODEX_CLI_COMMAND="ncodex -m $(AGP_CODEX_MODEL) -a never -s danger-full-access" \
+	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
 	AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
 	AGP_CODEX_IDLE_AFTER=5 \

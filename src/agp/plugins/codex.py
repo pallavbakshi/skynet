@@ -44,13 +44,16 @@ def _runtime_env_prefix() -> str:
     import os
 
     env_pairs: list[tuple[str, str]] = []
+    openai_key = os.environ.get("OPENAI_API_KEY")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if openrouter_key:
+    if openai_key and not openai_base_url:
+        env_pairs.append(("OPENAI_API_KEY", openai_key))
+    elif openrouter_key:
         env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
         env_pairs.append(("OPENAI_BASE_URL", openai_base_url or "https://openrouter.ai/api/v1"))
+        env_pairs.append(("OPENAI_API_KEY", openrouter_key))
     else:
-        openai_key = os.environ.get("OPENAI_API_KEY")
         if openai_key:
             env_pairs.append(("OPENAI_API_KEY", openai_key))
         if openai_base_url:
