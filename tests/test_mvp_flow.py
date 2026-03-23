@@ -132,8 +132,9 @@ class MvpFlowTest(unittest.TestCase):
         reset_event_seq()
         if settings.log_root.exists():
             shutil.rmtree(settings.log_root)
+        from tests._base import _drop_all_tables_sql
         engine.dispose()
-        Base.metadata.drop_all(bind=engine)
+        _drop_all_tables_sql()
         init_db()
         session = SessionLocal()
         try:
@@ -163,7 +164,8 @@ class MvpFlowTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        Base.metadata.drop_all(bind=engine)
+        from tests._base import _drop_all_tables_sql
+        _drop_all_tables_sql()
 
     def test_agent_targeted_job_completes(self) -> None:
         agent = self.client.post("/agents/up", json={"agent_id": "agt_one", "capability_id": "cap_python"})

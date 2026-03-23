@@ -7,6 +7,7 @@ import unittest
 from agp.config import settings
 from agp.db import Base, SessionLocal, engine, init_db
 from agp.migrations import apply_migrations, schema_status, _discover_migrations
+from tests._base import _drop_all_tables_sql
 
 
 _ORIGINAL_DATABASE_URL = settings.database_url
@@ -17,7 +18,7 @@ class MigrationInitTest(unittest.TestCase):
 
     def setUp(self) -> None:
         engine.dispose()
-        Base.metadata.drop_all(bind=engine)
+        _drop_all_tables_sql()
 
     def tearDown(self) -> None:
         settings.database_url = _ORIGINAL_DATABASE_URL
@@ -75,7 +76,7 @@ class CheckConstraintEnforcementTest(unittest.TestCase):
 
     def setUp(self) -> None:
         engine.dispose()
-        Base.metadata.drop_all(bind=engine)
+        _drop_all_tables_sql()
         init_db()
 
     def tearDown(self) -> None:
@@ -126,7 +127,7 @@ class VersionIncompatibilityTest(unittest.TestCase):
 
     def setUp(self) -> None:
         engine.dispose()
-        Base.metadata.drop_all(bind=engine)
+        _drop_all_tables_sql()
         init_db()
 
     def tearDown(self) -> None:

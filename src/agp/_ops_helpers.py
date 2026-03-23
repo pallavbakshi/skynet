@@ -86,9 +86,15 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(db_backup_path, db_path)
     else:
-        Base.metadata.drop_all(bind=engine)
+        # Drop all tables via raw SQL so non-ORM tables (_sqlite_sequences)
+        # are also removed, then re-run migrations to recreate schema.
+        from sqlalchemy import text as _text
+        with engine.connect() as _conn:
+            for _tbl in [r[0] for r in _conn.execute(_text("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")).fetchall()]:
+                _conn.execute(_text(f'DROP TABLE IF EXISTS "{_tbl}"'))
+            _conn.commit()
         from agp.migrations import apply_migrations
-        apply_migrations(force_create_all=True)  # schema only; restore will repopulate data
+        apply_migrations()  # schema only; restore will repopulate data
 
     if settings.artifact_root.exists():
         shutil.rmtree(settings.artifact_root)

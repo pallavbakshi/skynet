@@ -6,6 +6,8 @@ import shutil
 import unittest
 from pathlib import Path
 
+from sqlalchemy import text
+
 from agp.config import settings
 from agp.db import Base, SessionLocal, engine, init_db
 from agp.models import Capability, CapabilityPool, utc_now
@@ -13,6 +15,28 @@ from agp.queue_backend import reset_queue_backend_state
 from agp.artifact_store import reset_artifact_store_state
 from agp.services.events import reset_event_seq
 import agp.queue_backend as queue_backend_module
+
+
+def _drop_all_tables_sql() -> None:
+    """Drop all SQLite tables via raw SQL, including non-ORM tables.
+
+    ``Base.metadata.drop_all()`` only drops tables the ORM knows about.
+    Migration-created tables like ``_sqlite_sequences`` survive that call,
+    which can cause 'table already exists' errors on re-init.  This
+    function drops *everything* so the next ``init_db()`` starts clean.
+    """
+    with engine.connect() as conn:
+        conn.execute(text("PRAGMA writable_schema = ON"))
+        tables = [
+            row[0]
+            for row in conn.execute(
+                text("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            ).fetchall()
+        ]
+        for table in tables:
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table}"'))
+        conn.execute(text("PRAGMA writable_schema = OFF"))
+        conn.commit()
 
 
 class FakeRedisClient:
@@ -90,7 +114,7 @@ class AgpTestCase(unittest.TestCase):
         if settings.log_root.exists():
             shutil.rmtree(settings.log_root)
         engine.dispose()
-        Base.metadata.drop_all(bind=engine)
+        _drop_all_tables_sql()
         init_db()
         self._seed_capability()
 
