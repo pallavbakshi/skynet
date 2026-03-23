@@ -69,8 +69,6 @@ def create_backup_snapshot(*, backup_dir: str | Path) -> dict:
 
 
 def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
-    from agp.db import Base
-
     backup_path = Path(backup_dir)
     manifest_path = backup_path / "manifest.json"
     if not manifest_path.exists():
@@ -86,13 +84,10 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(db_backup_path, db_path)
     else:
-        # Drop all tables via raw SQL so non-ORM tables (_sqlite_sequences)
-        # are also removed, then re-run migrations to recreate schema.
-        from sqlalchemy import text as _text
-        with engine.connect() as _conn:
-            for _tbl in [r[0] for r in _conn.execute(_text("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")).fetchall()]:
-                _conn.execute(_text(f'DROP TABLE IF EXISTS "{_tbl}"'))
-            _conn.commit()
+        for suffix in ("", "-wal", "-shm"):
+            candidate = Path(f"{db_path}{suffix}")
+            if candidate.exists():
+                candidate.unlink()
         from agp.migrations import apply_migrations
         apply_migrations()  # schema only; restore will repopulate data
 

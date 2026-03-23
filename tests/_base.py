@@ -17,16 +17,25 @@ from agp.services.events import reset_event_seq
 import agp.queue_backend as queue_backend_module
 
 
-def _drop_all_tables_sql() -> None:
-    """Drop all SQLite tables via raw SQL, including non-ORM tables.
+def _reset_sqlite_database() -> None:
+    """Reset the SQLite database backing tests.
 
-    ``Base.metadata.drop_all()`` only drops tables the ORM knows about.
-    Migration-created tables like ``_sqlite_sequences`` survive that call,
-    which can cause 'table already exists' errors on re-init.  This
-    function drops *everything* so the next ``init_db()`` starts clean.
+    The migration lifecycle now owns schema creation, so the most reliable
+    reset is to remove the SQLite database files entirely after disposing
+    pooled connections. This avoids table-ordering, foreign-key, and WAL
+    lock issues from in-place teardown.
     """
+    prefix = "sqlite+pysqlite:///"
+    if settings.database_url.startswith(prefix):
+        db_path = Path(settings.database_url.removeprefix(prefix))
+        for suffix in ("", "-wal", "-shm"):
+            path = Path(f"{db_path}{suffix}")
+            if path.exists():
+                path.unlink()
+        return
+
     with engine.connect() as conn:
-        conn.execute(text("PRAGMA writable_schema = ON"))
+        conn.execute(text("PRAGMA foreign_keys = OFF"))
         tables = [
             row[0]
             for row in conn.execute(
@@ -35,8 +44,13 @@ def _drop_all_tables_sql() -> None:
         ]
         for table in tables:
             conn.execute(text(f'DROP TABLE IF EXISTS "{table}"'))
-        conn.execute(text("PRAGMA writable_schema = OFF"))
+        conn.execute(text("PRAGMA foreign_keys = ON"))
         conn.commit()
+
+
+def _drop_all_tables_sql() -> None:
+    """Backward-compatible alias for older test modules."""
+    _reset_sqlite_database()
 
 
 class FakeRedisClient:
@@ -114,7 +128,7 @@ class AgpTestCase(unittest.TestCase):
         if settings.log_root.exists():
             shutil.rmtree(settings.log_root)
         engine.dispose()
-        _drop_all_tables_sql()
+        _reset_sqlite_database()
         init_db()
         self._seed_capability()
 

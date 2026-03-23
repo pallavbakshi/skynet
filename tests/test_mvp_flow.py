@@ -132,9 +132,9 @@ class MvpFlowTest(unittest.TestCase):
         reset_event_seq()
         if settings.log_root.exists():
             shutil.rmtree(settings.log_root)
-        from tests._base import _drop_all_tables_sql
+        from tests._base import _reset_sqlite_database
         engine.dispose()
-        _drop_all_tables_sql()
+        _reset_sqlite_database()
         init_db()
         session = SessionLocal()
         try:
@@ -164,8 +164,8 @@ class MvpFlowTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client.close()
-        from tests._base import _drop_all_tables_sql
-        _drop_all_tables_sql()
+        from tests._base import _reset_sqlite_database
+        _reset_sqlite_database()
 
     def test_agent_targeted_job_completes(self) -> None:
         agent = self.client.post("/agents/up", json={"agent_id": "agt_one", "capability_id": "cap_python"})
@@ -1329,9 +1329,13 @@ class MvpFlowTest(unittest.TestCase):
         db_path = Path(settings.database_url.removeprefix("sqlite+pysqlite:///"))
         if db_path.exists():
             db_path.unlink()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{db_path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
         if settings.artifact_root.exists():
             shutil.rmtree(settings.artifact_root)
-        Base.metadata.create_all(bind=engine)
+        init_db()
 
         missing = self.client.get(f"/jobs/{inline_sent['job_id']}")
         self.assertEqual(missing.status_code, 404)
@@ -1455,9 +1459,13 @@ class MvpFlowTest(unittest.TestCase):
         db_path = Path(settings.database_url.removeprefix("sqlite+pysqlite:///"))
         if db_path.exists():
             db_path.unlink()
+        for suffix in ("-wal", "-shm"):
+            sidecar = Path(f"{db_path}{suffix}")
+            if sidecar.exists():
+                sidecar.unlink()
         if settings.artifact_root.exists():
             shutil.rmtree(settings.artifact_root)
-        Base.metadata.create_all(bind=engine)
+        init_db()
 
         recovered = restore_and_recover_snapshot(backup_dir=backup_dir)
         self.assertTrue(recovered["ok"])
