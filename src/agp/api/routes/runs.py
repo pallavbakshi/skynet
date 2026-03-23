@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import _ok, _serialize
 from agp.db import get_db
 from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
-from agp.models import Run
+from agp.models import Run, utc_now
 from agp.schemas import (
     CancelRunRequest,
     ClaimRunRequest,
@@ -52,12 +52,22 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     if runtime.status == RuntimeStatus.DEGRADED.value:
         raise HTTPException(status_code=409, detail="runtime is degraded")
 
+    # Idle polling is still a liveness signal. Refresh runtime freshness
+    # before we try to claim work so the sweeper does not mark an active
+    # poller stale merely because it is between jobs.
+    now = utc_now()
+    runtime.last_seen_at = now
+    runtime.last_heartbeat_at = now
+    runtime.updated_at = now
+
     agent, routing_decision = resolve_claim_agent(db, runtime=runtime, agent_id=request.agent_id, capability_id=request.capability_id)
     if agent is None:
+        db.commit()
         return _ok({"claimed": False, "agent_id": request.agent_id})
 
     result = execute_claim(db, agent=agent, runtime=runtime, lease_ttl_seconds=request.lease_ttl_seconds, routing_decision=routing_decision)
     if not result.claimed:
+        db.commit()
         return _ok({"claimed": False, "agent_id": agent.agent_id})
 
     return _ok({

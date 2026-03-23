@@ -2558,6 +2558,37 @@ class MvpFlowTest(unittest.TestCase):
         finally:
             session.close()
 
+    def test_idle_claim_poll_refreshes_runtime_activity(self) -> None:
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_poll", "hostname": "localhost"})
+        self.client.post(
+            "/agents/up",
+            json={"agent_id": "agt_poll", "capability_id": "cap_python", "assigned_runtime_id": "rtm_poll"},
+        )
+
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_poll")
+            assert runtime is not None
+            runtime.last_seen_at = utc_now() - timedelta(seconds=600)
+            runtime.last_heartbeat_at = utc_now() - timedelta(seconds=600)
+            session.commit()
+        finally:
+            session.close()
+
+        claim = self.client.post("/runs/claim", json={"runtime_id": "rtm_poll", "agent_id": "agt_poll"})
+        self.assertEqual(claim.status_code, 200)
+        self.assertFalse(claim.json()["data"]["claimed"])
+
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_poll")
+            assert runtime is not None
+            self.assertIsNotNone(runtime.last_heartbeat_at)
+            result = sweep_stale_runtimes(session, now=utc_now(), stale_timeout_seconds=90, degraded_timeout_seconds=45)
+            self.assertEqual(result["offline_runtimes"], 0)
+        finally:
+            session.close()
+
     def test_stale_runtime_degrades_agent_with_active_lease(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_stale_busy", "hostname": "localhost"})
         self.client.post(

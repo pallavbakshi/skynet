@@ -1,391 +1,364 @@
-# Remote E2E Test Guide
+# Remote Runtime E2E Test
 
-Two tested topologies for cross-machine AGP end-to-end testing between a Mac
-and an Ubuntu server (`user` / `skunkwork` at `your-server.example.com`).
+This runbook covers the topology we actually use:
 
-| Topology | Control Plane | Runtime | Tunnel |
-|----------|--------------|---------|--------|
-| [A. Local CP, remote runtime](#a-local-cp-remote-runtime) | Mac | Ubuntu (user) | `ssh -R` (reverse) |
-| [B. Remote CP, local runtime](#b-remote-cp-local-runtime) | Ubuntu (user) | Mac | `ssh -L` (forward) |
+- control plane on Ubuntu server `user` at `your-server.example.com`
+- runtime on the Mac
+- Codex session on the Mac via `tmux` or `WezTerm`
+- artifacts uploaded back to the Ubuntu control plane over HTTP
 
----
+The default path below uses `tmux` and `make runtime-remote`.
 
-## Prerequisites
+## Topology
+
+```text
+┌─────────────────────────┐                  ┌─────────────────────────┐
+│ Ubuntu server (user)      │                  │ Mac                     │
+│ your-server.example.com            │                  │                         │
+│                         │  claim / hb /    │ agp runtime-work-loop   │
+│ agp serve               │◄────────────────►│ tmux or WezTerm         │
+│ agp sweep-loop          │   artifact HTTP  │ ncodex / codex          │
+│ agp sweep-runtimes-loop │                  │                         │
+│ .agp-artifacts/         │                  │ local checkout          │
+└─────────────────────────┘                  └─────────────────────────┘
+```
+
+## Assumptions
+
+### Ubuntu (`user`)
+
+- repo at `~/projects/skynet`
+- virtualenv exists at `.venv`
+- firewall allows `7860/tcp`
+- `make local-serve` works
 
 ### Mac
-- AGP installed: `uv run agp --help`
-- SSH access: `ssh user@your-server.example.com`
-- `codex` CLI >= 0.116.0 (`codex --version`)
-- tmux installed
-- `OPENROUTER_API_KEY` or `OPENAI_API_KEY` in shell env
 
-### Ubuntu (user)
-- AGP repo at `~/projects/skynet` with `uv run agp` working
-- `codex` CLI >= 0.116.0 (install: `sudo npm install -g @openai/codex`)
-- Do NOT use `ncodex` 0.0.0 — it has broken OpenRouter auth
-- tmux installed
-- `OPENAI_API_KEY` or `OPENROUTER_API_KEY` in shell env
-- `~/.codex/config.toml` with model + project trust configured
+- repo at `~/projects/skynet`
+- virtualenv exists at `.venv`
+- `tmux` or `wezterm` installed
+- at least one provider key is set:
+  - `OPENAI_API_KEY`, or
+  - `OPENROUTER_API_KEY`
+- your manual Codex command works before you involve AGP
 
-See [openrouter-runtime-setup.md](openrouter-runtime-setup.md) for Codex
-provider config if using OpenRouter.
-
----
-
-## A. Local CP, remote runtime
-
-Control plane on Mac, runtime executes on Ubuntu via tmux + codex.
-
-### Architecture
-
-```
-┌─────────────────────┐      reverse SSH tunnel      ┌─────────────────────────┐
-│  Mac (local)        │◄── ssh -R 7860:lo:7860 ─────│  Ubuntu (user)            │
-│                     │                              │                         │
-│  CP :7860           │  ◄── claim / heartbeat ───── │  agp runtime-work-loop  │
-│  SQLite + sweepers  │  ◄── artifact upload ──────  │  tmux + codex           │
-│  .agp-artifacts/    │                              │                         │
-└─────────────────────┘                              └─────────────────────────┘
-```
-
-### Step-by-step
-
-#### 1. Start local control plane
+Recommended manual check on the Mac:
 
 ```bash
-make local-reset && make local-initdb && make local-serve
-# Verify: curl -s http://127.0.0.1:7860/health
+ncodex -a never -s danger-full-access "What is 2 + 2? Reply with just the number."
 ```
 
-#### 2. Open reverse SSH tunnel
+If your working manual command is different, override
+`AGP_CODEX_CLI_COMMAND` when starting the runtime.
 
-In a separate terminal:
+## One-Time Setup
 
-```bash
-ssh -N -R 7860:127.0.0.1:7860 user@your-server.example.com
+On Ubuntu, create `skyops.local.toml` so the seeded agent points at the Mac
+workspace path instead of a Linux path:
+
+```toml
+[agents.agt_local]
+workspace_ref = "/Users/<mac-user>/projects/skynet"
 ```
 
-This makes `localhost:7860` on the remote forward back to your local CP.
+Do not commit that file.
 
-Verify:
+## 1. Start The Control Plane On Ubuntu
 
-```bash
-ssh user@your-server.example.com "curl -s http://127.0.0.1:7860/health"
-# → {"ok":true,"data":{"status":"ok",...}}
-```
-
-#### 3. Seed + register + send
+On Ubuntu:
 
 ```bash
-CP=http://127.0.0.1:7860
-
-curl -s -X POST $CP/capabilities/seed \
-  -H "Content-Type: application/json" \
-  -d '{"capability_id":"cap_python","name":"Python Tester","version":"v1"}'
-
-curl -s -X POST $CP/runtimes/register \
-  -H "Content-Type: application/json" \
-  -d '{"runtime_id":"rtm_sg","hostname":"skunkwork","metadata":{}}'
-
-curl -s -X POST $CP/agents/up \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"agt_sg","capability_id":"cap_python","assigned_runtime_id":"rtm_sg"}'
-
-curl -s -X POST $CP/messages/send \
-  -H "Content-Type: application/json" \
-  -d '{"target":{"type":"agent","id":"agt_sg"},"message":{"text":"What is the capital of France? Reply with just the city name.","metadata":{}}}'
-# Note the job_id from the response
-```
-
-#### 4. Start runtime on remote
-
-```bash
-ssh user@your-server.example.com
 cd ~/projects/skynet
-
-AGP_ARTIFACT_BACKEND=http \
-AGP_CODEX_TUI_MODE=true \
-AGP_CODEX_CLI_COMMAND="codex -m gpt-5.4 -a never -s danger-full-access" \
-AGP_CODEX_MAX_POLLS=240 \
-AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
-AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
-AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
-AGP_CODEX_IDLE_AFTER=5 \
-uv run agp runtime-work-loop rtm_sg \
-  --server-url http://127.0.0.1:7860 \
-  --host-kind tmux \
-  --adapter-kind codex \
-  --agent-id agt_sg \
-  --max-iterations 2 \
-  --idle-sleep-seconds 2.0
 ```
 
-#### 5. Verify (from Mac)
-
 ```bash
-# Job status
-curl -s http://127.0.0.1:7860/jobs/<JOB_ID> | python3 -m json.tool
-
-# Result (artifacts stored locally via HTTP upload)
-cat .agp-artifacts/rtm_sg/<JOB_ID>/result.txt
-
-# Event trace
-curl -s http://127.0.0.1:7860/jobs/<JOB_ID>/events | python3 -m json.tool
-
-# Remote tmux pane
-ssh user@your-server.example.com "tmux capture-pane -t agp-agt_sg -p | tail -20"
+source .venv/bin/activate
 ```
 
-#### 6. Clean up
+```bash
+make stop
+```
 
 ```bash
-ssh user@your-server.example.com "tmux kill-session -t agp-agt_sg; pkill -f runtime-work-loop"
-pkill -f "ssh -N -R 7860"
 make local-reset
 ```
 
----
-
-## B. Remote CP, local runtime
-
-Control plane on Ubuntu, runtime executes on Mac via tmux + codex.
-
-### Architecture
-
-```
-┌─────────────────────────┐      forward SSH tunnel     ┌─────────────────────┐
-│  Ubuntu (user)            │                              │  Mac (local)        │
-│                         │                              │                     │
-│  CP :7860               │  ◄── claim / heartbeat ───── │  agp runtime-work-  │
-│  SQLite + sweepers      │  ◄── artifact upload ──────  │  loop               │
-│  .agp-artifacts/        │──── ssh -L 7860:lo:7860 ───►│  tmux + codex       │
-└─────────────────────────┘                              └─────────────────────┘
+```bash
+make local-initdb
 ```
 
-### Step-by-step
-
-#### 1. Start control plane on remote
+If `ufw` is enabled:
 
 ```bash
-ssh user@your-server.example.com
-cd ~/projects/skynet
-
-make local-reset && make local-initdb && make local-serve
-# Verify: curl -s http://127.0.0.1:7860/health
+sudo ufw allow 7860/tcp
 ```
 
-Leave this SSH session open (CP runs in foreground).
+Start the control plane and sweepers:
 
-#### 2. Open forward SSH tunnel (from Mac)
+```bash
+make local-serve
+```
 
-In a terminal on Mac:
+Seed after the control plane is healthy:
+
+```bash
+make local-seed
+```
+
+In a second Ubuntu shell, verify health:
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+curl -s http://127.0.0.1:7860/health | python3 -m json.tool
+```
+
+```bash
+curl -s http://your-server.example.com:7860/health | python3 -m json.tool
+```
+
+Expected result:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "status": "ok",
+    "components": {
+      "api": "ok",
+      "db": "ok"
+    }
+  }
+}
+```
+
+## 2. Verify Reachability From The Mac
+
+On the Mac:
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+curl -s http://your-server.example.com:7860/health | python3 -m json.tool
+```
+
+Do not start the runtime until this works.
+
+## 3. Start The Runtime On The Mac
+
+### Default tmux path
+
+On the Mac:
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+Clean up any prior runtime worker or terminal session:
+
+```bash
+make runtime-clean
+```
+
+Start the remote runtime:
+
+```bash
+make runtime-remote
+```
+
+Current defaults from the `Makefile`:
+
+- `AGP_REMOTE_SERVER_URL=http://your-server.example.com:7860`
+- `AGP_RUNTIME_ID=rtm_mac`
+- `AGP_RUNTIME_AGENT_ID=agt_local`
+- `AGP_CODEX_CLI_COMMAND="ncodex -a never -s danger-full-access"`
+
+If your working local Codex command is different:
+
+```bash
+AGP_CODEX_CLI_COMMAND="codex -a never -s danger-full-access" make runtime-remote
+```
+
+### WezTerm alternative
+
+If you want WezTerm instead of tmux:
+
+```bash
+make runtime-wezterm
+```
+
+## 4. Send A Smoke Job
+
+From Ubuntu:
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+python -m agp send agt_local "What is 2 + 2? Reply with just the number." --server-url http://your-server.example.com:7860
+```
+
+That prints a `JOB_ID`.
+
+Wait for completion:
+
+```bash
+python -m agp wait <JOB_ID> --server-url http://your-server.example.com:7860
+```
+
+List jobs if needed:
+
+```bash
+python -m agp jobs --server-url http://your-server.example.com:7860
+```
+
+## 5. Verify The Result
+
+### Control-plane view on Ubuntu
+
+```bash
+python -m agp status <JOB_ID> --server-url http://your-server.example.com:7860
+```
+
+For the default runtime id `rtm_mac`, the result artifact is stored on Ubuntu at:
+
+```bash
+cat .agp-artifacts/rtm_mac/<JOB_ID>/result.txt
+```
+
+Expected output for the smoke prompt:
+
+```text
+4
+```
+
+### Terminal view on the Mac
+
+If you used `tmux`:
+
+```bash
+tmux capture-pane -t agp-agt_local -p | tail -40
+```
+
+If you used WezTerm:
+
+```bash
+wezterm cli list --format json
+```
+
+## 6. Cleanup
+
+### Mac
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+make runtime-clean
+```
+
+### Ubuntu
+
+```bash
+cd ~/projects/skynet
+```
+
+```bash
+source .venv/bin/activate
+```
+
+```bash
+make stop
+```
+
+## Optional: SSH Tunnel Instead Of Opening Port 7860
+
+If you do not want to expose `7860/tcp` publicly, use an SSH tunnel from the
+Mac:
 
 ```bash
 ssh -N -L 7860:127.0.0.1:7860 user@your-server.example.com
 ```
 
-This makes `localhost:7860` on your Mac forward to the remote CP.
-
-Verify locally:
+Then start the runtime against the tunneled address:
 
 ```bash
-curl -s http://127.0.0.1:7860/health
-# → {"ok":true,"data":{"status":"ok",...}}
+AGP_REMOTE_SERVER_URL=http://127.0.0.1:7860 make runtime-remote
 ```
 
-#### 3. Seed + register + send (from Mac)
-
-All curls hit `localhost:7860` which tunnels to the remote CP:
+In that mode, send and wait commands should also use:
 
 ```bash
-CP=http://127.0.0.1:7860
-
-curl -s -X POST $CP/capabilities/seed \
-  -H "Content-Type: application/json" \
-  -d '{"capability_id":"cap_python","name":"Python Tester","version":"v1"}'
-
-curl -s -X POST $CP/runtimes/register \
-  -H "Content-Type: application/json" \
-  -d '{"runtime_id":"rtm_mac","hostname":"'$(hostname)'","metadata":{}}'
-
-curl -s -X POST $CP/agents/up \
-  -H "Content-Type: application/json" \
-  -d '{"agent_id":"agt_mac","capability_id":"cap_python","assigned_runtime_id":"rtm_mac"}'
-
-curl -s -X POST $CP/messages/send \
-  -H "Content-Type: application/json" \
-  -d '{"target":{"type":"agent","id":"agt_mac"},"message":{"text":"What is the capital of France? Reply with just the city name.","metadata":{}}}'
-# Note the job_id
+--server-url http://127.0.0.1:7860
 ```
-
-#### 4. Start runtime on Mac
-
-```bash
-cd ~/projects/skynet
-
-AGP_ARTIFACT_BACKEND=http \
-AGP_CODEX_TUI_MODE=true \
-AGP_CODEX_CLI_COMMAND="ncodex -m openai/gpt-5.3-codex -a never -s danger-full-access" \
-AGP_CODEX_MAX_POLLS=240 \
-AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
-AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
-AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
-AGP_CODEX_IDLE_AFTER=5 \
-uv run agp runtime-work-loop rtm_mac \
-  --server-url http://127.0.0.1:7860 \
-  --host-kind tmux \
-  --adapter-kind codex \
-  --agent-id agt_mac \
-  --max-iterations 2 \
-  --idle-sleep-seconds 2.0
-```
-
-> On Mac, `ncodex` with OpenRouter works because `~/.config/codex/config.toml`
-> has the `[model_providers.openrouter]` block configured. On the remote,
-> use `codex` 0.116.0 with the native OpenAI key instead.
-
-#### 5. Verify
-
-```bash
-# Job status (through the tunnel)
-curl -s http://127.0.0.1:7860/jobs/<JOB_ID> | python3 -m json.tool
-
-# Result — artifacts were uploaded via HTTP to the remote CP
-# They are stored on the REMOTE disk, not locally
-ssh user@your-server.example.com "cat ~/projects/skynet/.agp-artifacts/rtm_mac/<JOB_ID>/result.txt"
-
-# Event trace
-curl -s http://127.0.0.1:7860/jobs/<JOB_ID>/events | python3 -m json.tool
-
-# Local tmux pane
-tmux capture-pane -t agp-agt_mac -p | tail -20
-```
-
-#### 6. Clean up
-
-```bash
-# Local
-tmux kill-session -t agp-agt_mac 2>/dev/null
-pkill -f runtime-work-loop
-pkill -f "ssh -N -L 7860"
-
-# Remote
-ssh user@your-server.example.com "cd ~/projects/skynet && make local-reset"
-```
-
----
-
-## Quick-repeat blocks
-
-### Topology A: local CP, remote runtime
-
-```bash
-# T1: local CP
-make local-reset && make local-initdb && make local-serve
-
-# T2: tunnel
-ssh -N -R 7860:127.0.0.1:7860 user@your-server.example.com
-
-# T1: seed + send
-CP=http://127.0.0.1:7860
-curl -s -X POST $CP/capabilities/seed -H "Content-Type: application/json" \
-  -d '{"capability_id":"cap_python","name":"Python Tester","version":"v1"}'
-curl -s -X POST $CP/runtimes/register -H "Content-Type: application/json" \
-  -d '{"runtime_id":"rtm_sg","hostname":"skunkwork","metadata":{}}'
-curl -s -X POST $CP/agents/up -H "Content-Type: application/json" \
-  -d '{"agent_id":"agt_sg","capability_id":"cap_python","assigned_runtime_id":"rtm_sg"}'
-curl -s -X POST $CP/messages/send -H "Content-Type: application/json" \
-  -d '{"target":{"type":"agent","id":"agt_sg"},"message":{"text":"What is 2+2? Just the number.","metadata":{}}}'
-
-# T3: remote runtime
-ssh user@your-server.example.com "cd ~/projects/skynet && \
-  AGP_ARTIFACT_BACKEND=http AGP_CODEX_TUI_MODE=true \
-  AGP_CODEX_CLI_COMMAND='codex -m gpt-5.4 -a never -s danger-full-access' \
-  AGP_CODEX_MAX_POLLS=240 AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
-  AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
-  AGP_CODEX_IDLE_AFTER=5 \
-  uv run agp runtime-work-loop rtm_sg \
-    --server-url http://127.0.0.1:7860 \
-    --host-kind tmux --adapter-kind codex \
-    --agent-id agt_sg --max-iterations 2"
-
-# Verify
-cat .agp-artifacts/rtm_sg/*/result.txt
-```
-
-### Topology B: remote CP, local runtime
-
-```bash
-# T1: remote CP
-ssh user@your-server.example.com "cd ~/projects/skynet && make local-reset && make local-initdb && make local-serve"
-# (leave this running or use: ssh -t user@your-server.example.com "cd ~/projects/skynet && make local-serve")
-
-# T2: tunnel
-ssh -N -L 7860:127.0.0.1:7860 user@your-server.example.com
-
-# T1 (local): seed + send
-CP=http://127.0.0.1:7860
-curl -s -X POST $CP/capabilities/seed -H "Content-Type: application/json" \
-  -d '{"capability_id":"cap_python","name":"Python Tester","version":"v1"}'
-curl -s -X POST $CP/runtimes/register -H "Content-Type: application/json" \
-  -d '{"runtime_id":"rtm_mac","hostname":"'$(hostname)'","metadata":{}}'
-curl -s -X POST $CP/agents/up -H "Content-Type: application/json" \
-  -d '{"agent_id":"agt_mac","capability_id":"cap_python","assigned_runtime_id":"rtm_mac"}'
-curl -s -X POST $CP/messages/send -H "Content-Type: application/json" \
-  -d '{"target":{"type":"agent","id":"agt_mac"},"message":{"text":"What is 2+2? Just the number.","metadata":{}}}'
-
-# T3 (local): runtime
-cd ~/projects/skynet
-AGP_ARTIFACT_BACKEND=http AGP_CODEX_TUI_MODE=true \
-AGP_CODEX_CLI_COMMAND="ncodex -m openai/gpt-5.3-codex -a never -s danger-full-access" \
-AGP_CODEX_MAX_POLLS=240 AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
-AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
-AGP_CODEX_IDLE_AFTER=5 \
-uv run agp runtime-work-loop rtm_mac \
-  --server-url http://127.0.0.1:7860 \
-  --host-kind tmux --adapter-kind codex \
-  --agent-id agt_mac --max-iterations 2
-
-# Verify
-ssh user@your-server.example.com "cat ~/projects/skynet/.agp-artifacts/rtm_mac/*/result.txt"
-```
-
----
-
-## Key differences between topologies
-
-| | A (local CP) | B (remote CP) |
-|---|---|---|
-| CP runs on | Mac | Ubuntu (user) |
-| Runtime runs on | Ubuntu (user) | Mac |
-| SSH tunnel | `ssh -R` (reverse) | `ssh -L` (forward) |
-| Artifacts stored on | Mac (local disk) | Ubuntu (remote disk) |
-| Codex CLI | `codex` 0.116.0 (remote) | `ncodex` (local, OpenRouter) |
-| Model | `gpt-5.4` (direct OpenAI) | `openai/gpt-5.3-codex` (OpenRouter) |
-| Read result from | `cat .agp-artifacts/...` | `ssh user cat .agp-artifacts/...` |
-
----
 
 ## Troubleshooting
 
-| Problem | Cause | Fix |
-|---------|-------|-----|
-| Can't reach CP through tunnel | Tunnel not open or wrong direction | `-R` for remote runtime, `-L` for local runtime |
-| `404` on `/runs/claim` | Agent not registered | Run `agents/up` curl before starting runtime |
-| Codex 401 / WebSocket 404 | Old codex or missing config | Use `codex` 0.116.0+, check config.toml |
-| `ncodex` version 0.0.0 | Dev build, broken auth | Use `codex` instead: `sudo npm install -g @openai/codex` |
-| Port 7860 already in use | Leftover CP or other process | `lsof -i :7860` then kill, or `make local-reset` |
-| Artifacts not found locally | Backend set to `localfs` | Must use `AGP_ARTIFACT_BACKEND=http` on the runtime side |
-| Artifacts not found on remote | Backend set to `localfs` | Same — `http` backend uploads to CP over the tunnel |
-| API key in transcript | Inline env in shell command | Known issue — treat transcripts as sensitive |
+| Problem | Likely cause | Fix |
+|---|---|---|
+| `curl http://your-server.example.com:7860/health` times out from the Mac | Ubuntu ingress blocked | `sudo ufw allow 7860/tcp`, then retest |
+| `make runtime-remote` sits there with no output | Normal idle worker loop | Send a job; the runtime is long-lived |
+| Job is accepted but never finishes | Codex CLI path on the Mac is wrong | Run your manual `ncodex` or `codex` command first, then set `AGP_CODEX_CLI_COMMAND` to match it |
+| Runtime starts but claims nothing | Wrong agent id | Keep `AGP_RUNTIME_AGENT_ID=agt_local` or reseed a matching agent |
+| Codex opens in the wrong directory | Wrong `workspace_ref` on Ubuntu seed config | Fix `skyops.local.toml`, then `make local-reset && make local-initdb && make local-seed` |
+| No result artifact on Ubuntu | Runtime not using HTTP artifact backend | `make runtime-remote` and `make runtime-wezterm` already set `AGP_ARTIFACT_BACKEND=http` |
+| `tmux capture-pane` shows provider env vars | tmux transcript contains launch env | Treat tmux transcript artifacts as sensitive |
 
-### Known issue: secrets in transcript
+## Known Good Path
 
-The codex adapter injects API keys inline in the tmux `send-keys` command,
-so they appear in the `transcript_log` artifact:
+This is the shortest happy path after one-time setup:
 
+### Ubuntu
+
+```bash
+source .venv/bin/activate
+make stop
+make local-reset
+make local-initdb
+sudo ufw allow 7860/tcp
+make local-serve
+make local-seed
 ```
-OPENAI_API_KEY=sk-proj-... codex -m gpt-5.4 -a never ...
+
+### Mac
+
+```bash
+source .venv/bin/activate
+make runtime-clean
+make runtime-remote
 ```
 
-Until this is fixed upstream, treat transcript artifacts as sensitive.
+### Ubuntu
+
+```bash
+source .venv/bin/activate
+python -m agp send agt_local "What is 2 + 2? Reply with just the number." --server-url http://your-server.example.com:7860
+python -m agp wait <JOB_ID> --server-url http://your-server.example.com:7860
+cat .agp-artifacts/rtm_mac/<JOB_ID>/result.txt
+```
