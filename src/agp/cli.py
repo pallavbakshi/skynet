@@ -577,6 +577,145 @@ def down(
         typer.echo(f"STATUS:     {result_status}")
 
 
+# ── 0c. interrupt ────────────────────────────────────────────────────
+
+
+@app.command()
+def interrupt(
+    target: str = typer.Argument(..., help="Agent ID or Job ID to interrupt."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    purge: bool = typer.Option(False, "--purge", help="Also cancel all queued jobs for the agent."),
+) -> None:
+    """Halt active execution on an agent or cancel a specific job.
+
+    TARGET can be an Agent ID (interrupts its active job) or a Job ID
+    (cancels that specific job).  Use --purge with an agent target to
+    also empty the agent's pending queue.
+    """
+    import httpx as _httpx
+
+    with _make_client(server_url) as client:
+        # Detect target type: try agent first, fall back to job
+        is_agent = True
+        try:
+            agent = client.get_agent(target)
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                is_agent = False
+            else:
+                raise
+
+        if is_agent:
+            _interrupt_agent(client, target, purge=purge)
+        else:
+            if purge:
+                typer.echo("Warning: --purge is ignored when targeting a job.", err=True)
+            _interrupt_job(client, target)
+
+
+def _interrupt_agent(client, agent_id: str, *, purge: bool) -> None:
+    import httpx as _httpx
+
+    typer.echo(f"[..] Locating agent {agent_id}...")
+
+    try:
+        result = client.agent_interrupt(agent_id, purge=purge)
+    except _httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 409:
+            try:
+                detail = exc.response.json().get("error", {}).get("message", str(exc))
+            except Exception:
+                detail = str(exc)
+            _print_banner("ERROR", "Interrupt Failed")
+            typer.echo(f"FATAL: {detail}")
+            raise typer.Exit(1)
+        if exc.response.status_code == 404:
+            _print_banner("ERROR", "Interrupt Failed")
+            typer.echo(f"FATAL: Agent not found: {agent_id}")
+            raise typer.Exit(1)
+        raise
+
+    halted = result.get("halted_job_id")
+    dropped = result.get("dropped_job_ids", [])
+    remaining = result.get("remaining_queue_size", 0)
+    new_status = result.get("status", "idle").upper()
+
+    if halted:
+        typer.echo(f"[..] Sending SIGTERM to active process ({halted})...")
+        typer.echo("[..] Executing Clean Slate protocol on workspace...")
+
+    if purge and dropped:
+        typer.echo(f"[..] Purging {len(dropped)} pending jobs from the queue...")
+
+    if purge:
+        _print_banner("SUCCESS", "Agent Purged and Reset")
+    else:
+        _print_banner("SUCCESS", "Execution Interrupted")
+
+    typer.echo(f"AGENT:        {agent_id}")
+    if halted:
+        status_note = "CANCELLED" if purge else "Status updated to CANCELLED"
+        typer.echo(f"HALTED JOB:   {halted} ({status_note})")
+    else:
+        typer.echo("HALTED JOB:   (none — no active execution)")
+
+    if purge and dropped:
+        typer.echo(f"DROPPED JOBS: {', '.join(dropped)}")
+
+    typer.echo(f"NEW STATUS:   {new_status} ({remaining} jobs in queue)")
+    if remaining > 0 and not purge:
+        typer.echo("")
+        typer.echo("Next queued job will be claimed on the runtime's next poll cycle.")
+    elif purge:
+        typer.echo("")
+        typer.echo("Agent is completely reset and ready for immediate, fresh tasking.")
+
+
+def _interrupt_job(client, job_id: str) -> None:
+    import httpx as _httpx
+
+    typer.echo(f"[..] Locating job {job_id}...")
+
+    try:
+        result = client.interrupt(job_id)
+    except _httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            _print_banner("ERROR", "Interrupt Failed")
+            typer.echo(f"FATAL: Not found: {job_id}")
+            typer.echo("Neither an agent nor a job was found with this ID.")
+            raise typer.Exit(1)
+        if exc.response.status_code == 409:
+            try:
+                detail = exc.response.json().get("error", {}).get("message", str(exc))
+            except Exception:
+                detail = str(exc)
+            _print_banner("ERROR", "Interrupt Failed")
+            typer.echo(f"FATAL: {detail}")
+            raise typer.Exit(1)
+        raise
+
+    job_status = result.get("status", "cancelled")
+
+    if job_status == "cancelled":
+        _print_banner("SUCCESS", "Job Removed from Queue")
+        typer.echo(f"JOB_ID:       {job_id}")
+        typer.echo(f"STATUS:       CANCELLED")
+        typer.echo("")
+        typer.echo(
+            "Notice: This job was in the queue and had not yet started execution."
+            " The active job was not affected."
+        )
+    else:
+        _print_banner("SUCCESS", "Job Interrupt Requested")
+        typer.echo(f"JOB_ID:       {job_id}")
+        typer.echo(f"STATUS:       {job_status.upper()}")
+        typer.echo("")
+        typer.echo(
+            "Notice: The job is currently running. An interrupt signal has been sent."
+            " The runtime will cancel execution at the next checkpoint."
+        )
+
+
 # ── 1. send ──────────────────────────────────────────────────────────
 
 

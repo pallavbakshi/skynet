@@ -469,6 +469,20 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def agent_interrupt(
+        self,
+        agent_id: str,
+        *,
+        purge: bool = False,
+    ) -> dict:
+        """Interrupt active execution on an agent, optionally purging its queue."""
+        response = self._client.post(
+            f"/agents/{agent_id}/interrupt",
+            json={"purge": purge},
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
     def agent_undrain(self, agent_id: str) -> dict:
         """Lift draining status and return the agent to IDLE."""
         response = self._client.post(f"/agents/{agent_id}/undrain")

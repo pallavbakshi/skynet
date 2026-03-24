@@ -79,6 +79,10 @@ class AgentDownRequest(BaseModel):
     mode: Literal["drain", "terminate", "force"] = "drain"
 
 
+class AgentInterruptRequest(BaseModel):
+    purge: bool = False
+
+
 class RuntimeRegisterRequest(BaseModel):
     runtime_id: str | None = None
     hostname: str

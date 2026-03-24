@@ -97,7 +97,7 @@ import agp.queue_backend as queue_backend_module
 
 from agp.sweeper import SweeperService
 
-from _base import FakeRedisClient
+from tests._base import FakeRedisClient
 
 
 class _FakeWebhookResponse:
@@ -212,4 +212,4 @@ class MvpFlowTestBase(unittest.TestCase):
             return self.cli_runner.invoke(cli_app, args)
 
 
-__all__ = [name for name in globals() if name not in {"__builtins__", "__all__"}]
+__all__ = [name for name in globals() if not name.startswith("__")]

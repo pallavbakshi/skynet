@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
 from agp.models import Agent
-from agp.schemas import AgentDownRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
-from agp.services.agents import agent_down_service, agent_patch_service, agent_undrain_service, agent_up_service
+from agp.schemas import AgentDownRequest, AgentInterruptRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
+from agp.services.agents import agent_down_service, agent_interrupt_service, agent_patch_service, agent_undrain_service, agent_up_service
 
 router = APIRouter()
 
@@ -78,6 +78,12 @@ def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends
 def agent_undrain(agent_id: str, db: Session = Depends(get_db)) -> dict:
     agent = agent_undrain_service(db, agent_id=agent_id)
     return _ok({"agent_id": agent.agent_id, "status": agent.status})
+
+
+@router.post("/agents/{agent_id}/interrupt")
+def agent_interrupt(agent_id: str, request: AgentInterruptRequest = AgentInterruptRequest(), db: Session = Depends(get_db)) -> dict:
+    result = agent_interrupt_service(db, agent_id=agent_id, purge=request.purge)
+    return _ok(result)
 
 
 @router.post("/agents/{agent_id}/down")

@@ -1114,3 +1114,414 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         lease_released = [e for e in events_resp if e["event_type"] == "lease.released"]
         self.assertTrue(len(lease_released) >= 1)
         self.assertIn("previous_status", lease_released[0]["body"])
+
+    # ── agp interrupt tests ──────────────────────────────────────────
+
+    def test_agent_interrupt_cancels_active_job(self) -> None:
+        """Scenario A: interrupt an agent with an active running job."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_int", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_int",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_int"},
+            "message": {"text": "active work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_int", "agent_id": "agt_int",
+        })
+
+        resp = self.client.post("/agents/agt_int/interrupt", json={"purge": False})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["agent_id"], "agt_int")
+        self.assertEqual(data["halted_job_id"], job_id)
+        self.assertEqual(data["dropped_job_ids"], [])
+        self.assertEqual(data["status"], "idle")
+
+        # Job should be cancelled
+        job = self.client.get(f"/jobs/{job_id}").json()["data"]
+        self.assertEqual(job["status"], "cancelled")
+
+    def test_agent_interrupt_with_purge_empties_queue(self) -> None:
+        """Scenario B: interrupt with --purge cancels active + all queued."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_purge", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_purge", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_purge",
+        })
+        # Send 3 jobs — first will be claimed, other 2 stay queued
+        job_ids = []
+        for i in range(3):
+            r = self.client.post("/messages/send", json={
+                "target": {"type": "agent", "id": "agt_purge"},
+                "message": {"text": f"task {i}"},
+            })
+            job_ids.append(r.json()["data"]["job_id"])
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_purge", "agent_id": "agt_purge",
+        })
+
+        resp = self.client.post("/agents/agt_purge/interrupt", json={"purge": True})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["halted_job_id"], job_ids[0])
+        self.assertEqual(len(data["dropped_job_ids"]), 2)
+        self.assertIn(job_ids[1], data["dropped_job_ids"])
+        self.assertIn(job_ids[2], data["dropped_job_ids"])
+        self.assertEqual(data["remaining_queue_size"], 0)
+
+        # All jobs should be cancelled
+        for jid in job_ids:
+            job = self.client.get(f"/jobs/{jid}").json()["data"]
+            self.assertEqual(job["status"], "cancelled")
+
+    def test_agent_interrupt_no_active_job_is_noop(self) -> None:
+        """Interrupt on idle agent with no active job succeeds gracefully."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_idle_int", "capability_id": "cap_python",
+        })
+        resp = self.client.post("/agents/agt_idle_int/interrupt")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertIsNone(data["halted_job_id"])
+        self.assertEqual(data["dropped_job_ids"], [])
+        self.assertEqual(data["status"], "idle")
+
+    def test_agent_interrupt_terminated_agent_rejected(self) -> None:
+        """Cannot interrupt a terminated agent."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_term_int", "capability_id": "cap_python",
+        })
+        self.client.post("/agents/agt_term_int/down", json={"mode": "terminate"})
+
+        resp = self.client.post("/agents/agt_term_int/interrupt")
+        self.assertEqual(resp.status_code, 409)
+
+    def test_agent_interrupt_releases_lease_and_idles_runtime(self) -> None:
+        """Interrupt releases the active lease and transitions runtime to IDLE."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_int_rt", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_int_rt", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_int_rt",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_int_rt"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_int_rt", "agent_id": "agt_int_rt",
+        })
+        # Runtime should be busy after claim
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_int_rt")
+            self.assertEqual(runtime.status, "busy")
+        finally:
+            session.close()
+
+        self.client.post("/agents/agt_int_rt/interrupt")
+
+        session = SessionLocal()
+        try:
+            runtime = session.get(Runtime, "rtm_int_rt")
+            self.assertEqual(runtime.status, "idle")
+            # Lease should be released
+            lease = session.scalars(
+                select(Lease).where(Lease.runtime_id == "rtm_int_rt")
+            ).first()
+            self.assertEqual(lease.status, "released")
+        finally:
+            session.close()
+
+    def test_agent_interrupt_preserves_draining_status(self) -> None:
+        """Interrupt on a draining agent keeps DRAINING status, doesn't reset to IDLE."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_drain_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_drain_int", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_drain_int",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_drain_int"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_drain_int", "agent_id": "agt_drain_int",
+        })
+        # Put agent in draining
+        self.client.post("/agents/agt_drain_int/down", json={"mode": "drain"})
+
+        resp = self.client.post("/agents/agt_drain_int/interrupt")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["status"], "draining")
+
+    def test_agent_interrupt_event_audit_trail(self) -> None:
+        """Interrupt creates agent.interrupted event with correct body."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_evt_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_evt_int", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_evt_int",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_evt_int"},
+            "message": {"text": "work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_evt_int", "agent_id": "agt_evt_int",
+        })
+
+        self.client.post("/agents/agt_evt_int/interrupt", json={"purge": True})
+
+        # Check for agent.interrupted event
+        session = SessionLocal()
+        try:
+            events = session.scalars(
+                select(Event).where(Event.event_type == "agent.interrupted")
+            ).all()
+            int_events = [e for e in events if e.body_json.get("halted_job_id") == job_id]
+            self.assertEqual(len(int_events), 1)
+            body = int_events[0].body_json
+            self.assertEqual(body["halted_job_id"], job_id)
+            self.assertTrue(body["purge"])
+        finally:
+            session.close()
+
+    def test_job_interrupt_queued_job_via_api(self) -> None:
+        """Scenario C: interrupting a queued (not yet running) job cancels it directly."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_jint", "capability_id": "cap_python",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_jint"},
+            "message": {"text": "queued work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+
+        resp = self.client.post(f"/jobs/{job_id}/interrupt")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["status"], "cancelled")
+
+    def test_cli_interrupt_agent_happy_path(self) -> None:
+        """CLI: agp interrupt <agent_id> produces correct output."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_cli_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_cli_int", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_cli_int",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_cli_int"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_cli_int", "agent_id": "agt_cli_int",
+        })
+
+        result = self._cli_invoke(["interrupt", "agt_cli_int"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Execution Interrupted", result.output)
+        self.assertIn("HALTED JOB:", result.output)
+        self.assertIn("agt_cli_int", result.output)
+
+    def test_cli_interrupt_agent_with_purge(self) -> None:
+        """CLI: agp interrupt <agent_id> --purge shows dropped jobs."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_cli_purge", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_cli_purge", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_cli_purge",
+        })
+        for i in range(3):
+            self.client.post("/messages/send", json={
+                "target": {"type": "agent", "id": "agt_cli_purge"},
+                "message": {"text": f"task {i}"},
+            })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_cli_purge", "agent_id": "agt_cli_purge",
+        })
+
+        result = self._cli_invoke(["interrupt", "agt_cli_purge", "--purge"])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Agent Purged and Reset", result.output)
+        self.assertIn("DROPPED JOBS:", result.output)
+        self.assertIn("Purging", result.output)
+
+    def test_cli_interrupt_job_target(self) -> None:
+        """CLI: agp interrupt <job_id> cancels queued job with correct output."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_cli_jint", "capability_id": "cap_python",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_cli_jint"},
+            "message": {"text": "queued task"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+
+        result = self._cli_invoke(["interrupt", job_id])
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("Job Removed from Queue", result.output)
+        self.assertIn(job_id, result.output)
+        self.assertIn("not yet started execution", result.output)
+
+    def test_cli_interrupt_nonexistent_target(self) -> None:
+        """CLI: agp interrupt <nonexistent> fails with clear error."""
+        result = self._cli_invoke(["interrupt", "nonexistent_thing"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not found", result.output.lower())
+
+    def test_agent_interrupt_purge_no_active_job_clears_queue(self) -> None:
+        """Purge with no active job but queued jobs cancels the backlog."""
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_purge_idle", "capability_id": "cap_python",
+        })
+        job_ids = []
+        for i in range(3):
+            r = self.client.post("/messages/send", json={
+                "target": {"type": "agent", "id": "agt_purge_idle"},
+                "message": {"text": f"task {i}"},
+            })
+            job_ids.append(r.json()["data"]["job_id"])
+
+        resp = self.client.post("/agents/agt_purge_idle/interrupt", json={"purge": True})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertIsNone(data["halted_job_id"])
+        self.assertEqual(len(data["dropped_job_ids"]), 3)
+        self.assertEqual(data["remaining_queue_size"], 0)
+        for jid in job_ids:
+            job = self.client.get(f"/jobs/{jid}").json()["data"]
+            self.assertEqual(job["status"], "cancelled")
+
+    def test_agent_interrupt_capability_routed_active_job(self) -> None:
+        """Interrupt finds and cancels a capability-routed job via Run join."""
+        from agp.db import SessionLocal
+        from agp.models import Capability, utc_now as _utc_now
+        session = SessionLocal()
+        try:
+            session.add(Capability(
+                capability_id="cap_route_int",
+                name="Route Int Tester",
+                version="v1",
+                image_ref="python:3.12",
+                model_ref="gpt-5.4",
+                resource_tier="small",
+                permission_profile="default",
+                queue_mode="capability_pool",
+                runtime_requirements_json={},
+                created_at=_utc_now(),
+                updated_at=_utc_now(),
+            ))
+            session.commit()
+        finally:
+            session.close()
+
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_route_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_route_int", "capability_id": "cap_route_int",
+            "assigned_runtime_id": "rtm_route_int",
+        })
+        send_resp = self.client.post("/messages/send", json={
+            "target": {"type": "capability", "id": "cap_route_int"},
+            "message": {"text": "capability work"},
+        })
+        job_id = send_resp.json()["data"]["job_id"]
+        # Job is capability-routed: target_agent_id is NULL
+        job_data = self.client.get(f"/jobs/{job_id}").json()["data"]
+        self.assertIsNone(job_data["target_agent_id"])
+
+        # Claim it via the capability pool
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_route_int", "agent_id": "agt_route_int",
+            "capability_id": "cap_route_int",
+        })
+
+        # Interrupt the agent — should find the capability-routed job via Path 2
+        resp = self.client.post("/agents/agt_route_int/interrupt")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()["data"]
+        self.assertEqual(data["halted_job_id"], job_id)
+
+        job = self.client.get(f"/jobs/{job_id}").json()["data"]
+        self.assertEqual(job["status"], "cancelled")
+
+    def test_agent_interrupt_double_is_idempotent(self) -> None:
+        """Calling interrupt twice is a no-op on the second call."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_dbl_int", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_dbl_int", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_dbl_int",
+        })
+        self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_dbl_int"},
+            "message": {"text": "work"},
+        })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_dbl_int", "agent_id": "agt_dbl_int",
+        })
+
+        resp1 = self.client.post("/agents/agt_dbl_int/interrupt")
+        self.assertEqual(resp1.status_code, 200)
+        self.assertIsNotNone(resp1.json()["data"]["halted_job_id"])
+
+        resp2 = self.client.post("/agents/agt_dbl_int/interrupt")
+        self.assertEqual(resp2.status_code, 200)
+        self.assertIsNone(resp2.json()["data"]["halted_job_id"])
+        self.assertEqual(resp2.json()["data"]["status"], "idle")
+
+    def test_agent_interrupt_remaining_queue_count(self) -> None:
+        """Interrupt without purge reports correct remaining queue size."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_rem", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_rem", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_rem",
+        })
+        for i in range(4):
+            self.client.post("/messages/send", json={
+                "target": {"type": "agent", "id": "agt_rem"},
+                "message": {"text": f"task {i}"},
+            })
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_rem", "agent_id": "agt_rem",
+        })
+
+        resp = self.client.post("/agents/agt_rem/interrupt", json={"purge": False})
+        data = resp.json()["data"]
+        self.assertEqual(data["remaining_queue_size"], 3)
+        self.assertEqual(data["status"], "idle")
+
+    def test_agent_interrupt_delivery_records_cleaned(self) -> None:
+        """Interrupt acks dangling delivery records for cancelled jobs."""
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_dlv", "hostname": "localhost"})
+        self.client.post("/agents/up", json={
+            "agent_id": "agt_dlv", "capability_id": "cap_python",
+            "assigned_runtime_id": "rtm_dlv",
+        })
+        job_ids = []
+        for i in range(3):
+            r = self.client.post("/messages/send", json={
+                "target": {"type": "agent", "id": "agt_dlv"},
+                "message": {"text": f"task {i}"},
+            })
+            job_ids.append(r.json()["data"]["job_id"])
+        self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_dlv", "agent_id": "agt_dlv",
+        })
+
+        self.client.post("/agents/agt_dlv/interrupt", json={"purge": True})
+
+        session = SessionLocal()
+        try:
+            for jid in job_ids:
+                deliveries = session.scalars(
+                    select(QueueDeliveryRecord).where(
+                        QueueDeliveryRecord.job_id == jid,
+                    )
+                ).all()
+                for d in deliveries:
+                    self.assertNotIn(d.state, ("pending", "delivered"),
+                                     f"Delivery for {jid} still in {d.state}")
+        finally:
+            session.close()
