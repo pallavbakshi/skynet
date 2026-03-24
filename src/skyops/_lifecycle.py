@@ -10,7 +10,7 @@ from pathlib import Path
 
 import typer
 
-from skyops.config import SkyopsConfig, load_config
+from skyops.config import SkyopsConfig, build_agp_env, load_config
 from skyops._client import resolve_server_url, _connectable_host
 from skyops._status import _probe_tcp, _probe_http_health
 from skyops._pidfile import pid_dir, write_pidfile, list_pidfiles, signal_and_wait
@@ -104,18 +104,12 @@ def _start_bg(
 
 
 def _agp_process_env(cfg: SkyopsConfig) -> dict[str, str]:
-    env = os.environ.copy()
-    env["AGP_DATABASE_URL"] = cfg.database.url
+    env = build_agp_env(cfg)
     env["AGP_REDIS_URL"] = cfg.redis.url
     env["AGP_S3_ENDPOINT_URL"] = cfg.s3.endpoint_url
     env["AGP_S3_ACCESS_KEY_ID"] = cfg.s3.access_key_id
     env["AGP_S3_SECRET_ACCESS_KEY"] = cfg.s3.secret_access_key
     env["AGP_S3_BUCKET"] = cfg.s3.bucket
-    if cfg.security.operator_token:
-        env["AGP_OPERATOR_BEARER_TOKEN"] = cfg.security.operator_token
-        env["AGP_OPERATOR_TOKEN"] = cfg.security.operator_token
-    if cfg.security.runtime_token:
-        env["AGP_RUNTIME_BEARER_TOKEN"] = cfg.security.runtime_token
     return env
 
 

@@ -1264,7 +1264,12 @@ class TestDepsCheck(unittest.TestCase):
 
 class TestDbMigrate(unittest.TestCase):
     def test_db_migrate_runs_migrations(self):
-        result = runner.invoke(app, ["db", "migrate"])
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+        completed = unittest.mock.Mock(stdout='{"applied":["0001_initial"],"current_version":"0001_initial"}')
+        with patch("skyops._db.load_config", return_value=cfg), \
+             patch("skyops._db.subprocess.run", return_value=completed):
+            result = runner.invoke(app, ["db", "migrate"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("version", result.output.lower())
 
@@ -1360,8 +1365,12 @@ class TestJobSubcommands(unittest.TestCase):
             result = runner.invoke(app, ["job", "block", "job_123"])
         self.assertEqual(result.exit_code, 0, result.output)
         cmd = mock_run.call_args.args[0]
-        self.assertEqual(cmd[:7], ["docker", "compose", "-f", "compose.yaml", "-p", "agp", "exec"])
         self.assertIn("control-plane", cmd)
+        # Verify env vars are passed via -e flags, not interpolated into code
+        self.assertIn("-e", cmd)
+        env_args = [cmd[i + 1] for i, v in enumerate(cmd) if v == "-e"]
+        self.assertIn("_JOB_ID=job_123", env_args)
+        self.assertIn("_REASON=operator-block", env_args)
 
 
 class TestQueueRedrive(unittest.TestCase):

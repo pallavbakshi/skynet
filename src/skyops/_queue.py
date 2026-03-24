@@ -8,7 +8,7 @@ import subprocess
 import typer
 from sqlalchemy import func, select
 
-from skyops.config import load_config
+from skyops.config import SkyopsConfig, load_config
 
 queue_app = typer.Typer(help="Queue management commands.")
 job_app = typer.Typer(help="Job management commands.")
@@ -19,15 +19,21 @@ def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
 
 
-def _docker_exec_python(code: str) -> None:
-    cfg = load_config()
+def _docker_exec_python(
+    cfg: SkyopsConfig,
+    code: str,
+    *,
+    env: dict[str, str] | None = None,
+) -> None:
     cmd = [
         "docker", "compose",
         "-f", cfg.stack.compose_file,
         "-p", cfg.stack.project_name,
-        "exec", "-T", "control-plane",
-        "python", "-c", code,
+        "exec", "-T",
     ]
+    for key, value in (env or {}).items():
+        cmd.extend(["-e", f"{key}={value}"])
+    cmd.extend(["control-plane", "python", "-c", code])
     subprocess.run(cmd, check=True, timeout=30)
 
 
@@ -177,6 +183,7 @@ def queue_reconstruct() -> None:
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
+            cfg,
             "import json; "
             "from agp._ops_helpers import reconstruct_queue_from_state; "
             "print(json.dumps(reconstruct_queue_from_state(), indent=2, sort_keys=True, default=str))"
@@ -197,16 +204,18 @@ def queue_redrive(
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
-            "import json; "
+            cfg,
+            "import json, os; "
             "from agp.config import settings; "
             "from agp.db import SessionLocal; "
             "from agp.queue_backend import get_queue_backend; "
-            f"backend=get_queue_backend(settings.queue_backend); "
+            "backend=get_queue_backend(settings.queue_backend); "
             "session=SessionLocal(); "
-            f"result=backend.redrive_stale_deliveries(session, visibility_timeout_seconds={visibility_timeout}, max_delivery_attempts={max_attempts}); "
+            "result=backend.redrive_stale_deliveries(session, visibility_timeout_seconds=int(os.environ['_VIS_TIMEOUT']), max_delivery_attempts=int(os.environ['_MAX_ATTEMPTS'])); "
             "session.commit(); "
             "session.close(); "
-            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))",
+            env={"_VIS_TIMEOUT": str(visibility_timeout), "_MAX_ATTEMPTS": str(max_attempts)},
         )
         return
     from agp.config import settings
@@ -236,14 +245,17 @@ def job_block(
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
+            cfg,
+            "import os; "
             "from agp.control_plane import _block_job, _require_job; "
             "from agp.db import SessionLocal; "
             "session=SessionLocal(); "
-            f"job=_require_job(session, job_id={job_id!r}); "
-            f"_block_job(session, job=job, reason={reason!r}); "
+            "job=_require_job(session, job_id=os.environ['_JOB_ID']); "
+            "_block_job(session, job=job, reason=os.environ['_REASON']); "
             "session.commit(); "
             "session.close(); "
-            f"print('Job {job_id} blocked.')"
+            "print(f'Job {os.environ[\"_JOB_ID\"]} blocked.')",
+            env={"_JOB_ID": job_id, "_REASON": reason},
         )
         return
     from agp.control_plane import _block_job, _require_job
@@ -268,14 +280,17 @@ def job_unblock(
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
+            cfg,
+            "import os; "
             "from agp.control_plane import _unblock_job, _require_job; "
             "from agp.db import SessionLocal; "
             "session=SessionLocal(); "
-            f"job=_require_job(session, job_id={job_id!r}); "
-            f"_unblock_job(session, job=job, reason={reason!r}); "
+            "job=_require_job(session, job_id=os.environ['_JOB_ID']); "
+            "_unblock_job(session, job=job, reason=os.environ['_REASON']); "
             "session.commit(); "
             "session.close(); "
-            f"print('Job {job_id} unblocked.')"
+            "print(f'Job {os.environ[\"_JOB_ID\"]} unblocked.')",
+            env={"_JOB_ID": job_id, "_REASON": reason},
         )
         return
     from agp.control_plane import _unblock_job, _require_job
@@ -297,13 +312,14 @@ def sweep_leases() -> None:
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
+            cfg,
             "import json; "
             "from agp.control_plane import sweep_expired_leases; "
             "from agp.db import SessionLocal; "
             "session=SessionLocal(); "
             "result=sweep_expired_leases(session); "
             "session.close(); "
-            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))",
         )
         return
     from agp.control_plane import sweep_expired_leases
@@ -336,13 +352,15 @@ def sweep_runtimes(
     cfg = load_config()
     if cfg.stack.mode == "docker":
         _docker_exec_python(
-            "import json; "
+            cfg,
+            "import json, os; "
             "from agp.control_plane import sweep_stale_runtimes; "
             "from agp.db import SessionLocal; "
             "session=SessionLocal(); "
-            f"result=sweep_stale_runtimes(session, stale_timeout_seconds={stale_timeout}); "
+            "result=sweep_stale_runtimes(session, stale_timeout_seconds=int(os.environ['_STALE_TIMEOUT'])); "
             "session.close(); "
-            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))",
+            env={"_STALE_TIMEOUT": str(stale_timeout)},
         )
         return
     from agp.control_plane import sweep_stale_runtimes

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 
 import typer
 
-from skyops.config import SkyopsConfig, load_config
+from skyops.config import SkyopsConfig, build_agp_env, load_config
 
 db_app = typer.Typer(help="Database and data seeding commands.")
 
@@ -40,25 +39,15 @@ with engine.begin() as conn:
     payload["schema_version"] = row[0] if row else None
     for table in tables:
         try:
+            # table names come from the hardcoded list above, not user input
             payload["counts"][table] = conn.execute(
-                text(f"SELECT count(*) FROM {table}")
+                text('SELECT count(*) FROM "' + table + '"')
             ).scalar()
         except Exception:
             payload["counts"][table] = None
 
 print(json.dumps(payload))
 """.strip()
-
-
-def _agp_env(cfg: SkyopsConfig) -> dict[str, str]:
-    env = os.environ.copy()
-    env["AGP_DATABASE_URL"] = cfg.database.url
-    if cfg.security.operator_token:
-        env["AGP_OPERATOR_BEARER_TOKEN"] = cfg.security.operator_token
-        env["AGP_OPERATOR_TOKEN"] = cfg.security.operator_token
-    if cfg.security.runtime_token:
-        env["AGP_RUNTIME_BEARER_TOKEN"] = cfg.security.runtime_token
-    return env
 
 
 def _python_json(cfg: SkyopsConfig, code: str) -> dict[str, object]:
@@ -68,7 +57,7 @@ def _python_json(cfg: SkyopsConfig, code: str) -> dict[str, object]:
         text=True,
         check=True,
         timeout=30,
-        env=_agp_env(cfg),
+        env=build_agp_env(cfg),
     )
     return json.loads(result.stdout)
 
@@ -84,7 +73,7 @@ def db_init() -> None:
             subprocess.run(cmd, check=True, timeout=30)
         else:
             typer.echo("Running: agp initdb")
-            subprocess.run(["agp", "initdb"], check=True, env=_agp_env(cfg), timeout=30)
+            subprocess.run(["agp", "initdb"], check=True, env=build_agp_env(cfg), timeout=30)
     except subprocess.TimeoutExpired as exc:
         typer.echo(f"Database init timed out: {exc}", err=True)
         raise typer.Exit(1) from exc

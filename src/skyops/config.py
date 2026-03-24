@@ -354,6 +354,23 @@ class SkyopsConfig:
 _SECRET_KEYS = {"operator_token", "runtime_token", "secret_access_key", "access_key_id"}
 
 
+def build_agp_env(cfg: SkyopsConfig) -> dict[str, str]:
+    """Build a base environment dict with DB URL and security tokens from *cfg*.
+
+    Callers that need extra keys (Redis, S3, etc.) should update the returned dict.
+    """
+    import os
+
+    env = os.environ.copy()
+    env["AGP_DATABASE_URL"] = cfg.database.url
+    if cfg.security.operator_token:
+        env["AGP_OPERATOR_BEARER_TOKEN"] = cfg.security.operator_token
+        env["AGP_OPERATOR_TOKEN"] = cfg.security.operator_token
+    if cfg.security.runtime_token:
+        env["AGP_RUNTIME_BEARER_TOKEN"] = cfg.security.runtime_token
+    return env
+
+
 def _mask(d: dict[str, Any]) -> None:
     for key, val in d.items():
         if isinstance(val, dict):
