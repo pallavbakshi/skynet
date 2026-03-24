@@ -321,6 +321,62 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         self.assertEqual(result.artifacts[-1].content, "4")
         self.assertEqual(result.summary["mode"], "tui")
 
+    def test_codex_adapter_tui_completes_when_response_returns_to_prompt(self) -> None:
+        class PromptReturnHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "ncodex " in text:
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a Delegate to agt_local\n"
+                        "\u2022 LOCAL_OK\n"
+                        "\n"
+                        "\u203a Write tests for @filename\n"
+                        "  gpt-5.3-codex default · 100% left · /app\n"
+                    )
+
+            def read_visible(self, session):
+                self.reads += 1
+                base = super().read_visible(session)
+                # Simulate a repainting Codex status bar after the response.
+                return base + f"\n  gpt-5.3-codex default · 100% left · /app tick {self.reads}\n"
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_prompt_return"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="ncodex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = PromptReturnHost()
+        session = host.get_or_create_session(agent_id="agt_prompt_return")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_prompt_return",
+            "job": {"job_id": "job_prompt_return"},
+            "run": {"run_id": "run_prompt_return"},
+            "message": {"text": "delegate and summarize"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(result.artifacts[-1].content, "LOCAL_OK")
+
     def test_codex_adapter_marker_mode_still_works(self) -> None:
         class CodexHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
@@ -365,6 +421,52 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         with self.assertRaises(RecoverableExecutionError) as ctx:
             adapter.ensure_bootstrapped(host=host, session=session, claimed={})
         self.assertIn("did not become ready", str(ctx.exception))
+
+    def test_codex_adapter_detects_onboarding_prompt(self) -> None:
+        adapter = CodexAdapter(tui_mode=True)
+        screen = (
+            "Welcome to Codex, OpenAI's command-line coding agent\n"
+            "1. Sign in with ChatGPT\n"
+            "2. Sign in with Device Code\n"
+            "3. Provide your own API key\n"
+            "Press Enter to continue\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(screen))
+
+    def test_codex_adapter_prefers_api_key_on_onboarding_when_key_present(self) -> None:
+        adapter = CodexAdapter(tui_mode=True)
+        screen = (
+            "Welcome to Codex, OpenAI's command-line coding agent\n"
+            "1. Sign in with ChatGPT\n"
+            "2. Sign in with Device Code\n"
+            "3. Provide your own API key\n"
+            "Press Enter to continue\n"
+        )
+        with patch.dict("os.environ", {"OPENAI_API_KEY": "sk-test"}, clear=False):
+            self.assertEqual(adapter._gate_response(screen), "3")
+
+    def test_codex_adapter_prefers_chatgpt_login_on_onboarding_without_key(self) -> None:
+        adapter = CodexAdapter(tui_mode=True)
+        screen = (
+            "Welcome to Codex, OpenAI's command-line coding agent\n"
+            "1. Sign in with ChatGPT\n"
+            "2. Sign in with Device Code\n"
+            "3. Provide your own API key\n"
+            "Press Enter to continue\n"
+        )
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(adapter._gate_response(screen), "1")
+
+    def test_codex_adapter_keeps_existing_model_on_upgrade_prompt(self) -> None:
+        adapter = CodexAdapter(tui_mode=True)
+        screen = (
+            "Introducing GPT-5.4\n"
+            "Choose how you'd like Codex to proceed.\n"
+            "1. Try new model\n"
+            "2. Use existing model\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(screen))
+        self.assertEqual(adapter._gate_response(screen), "2")
 
     def test_codex_adapter_tui_detects_shell_returned_during_execution(self) -> None:
         call_count = {"n": 0}

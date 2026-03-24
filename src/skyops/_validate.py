@@ -149,7 +149,8 @@ def smoke() -> None:
 @validate_app.command("k8s-smoke")
 def k8s_smoke(
     cluster_name: str = typer.Option("agp-phase3", "--cluster", help="Kind cluster name."),
-    image: str = typer.Option("agp:latest", "--image", help="Docker image to build and load."),
+    control_plane_image: str = typer.Option("agp-control-plane:latest", "--control-plane-image", help="Control-plane Docker image to build and load."),
+    runtime_image: str = typer.Option("agp-runtime:latest", "--runtime-image", help="Runtime Docker image to build and load."),
     overlay: str = typer.Option("k8s/overlays/kind", "--overlay", help="Kustomize overlay path."),
     timeout: int = typer.Option(180, "--timeout", help="Timeout in seconds for each wait step."),
     skip_build: bool = typer.Option(False, "--skip-build", help="Skip image build."),
@@ -157,7 +158,7 @@ def k8s_smoke(
 ) -> None:
     """Full kind cluster lifecycle + smoke test.
 
-    Creates a kind cluster, builds the image, deploys, waits for bootstrap,
+    Creates a kind cluster, builds the images, deploys, waits for bootstrap,
     runs a smoke job, and validates it succeeds.
     """
     kctl = ["kubectl"]
@@ -168,14 +169,16 @@ def k8s_smoke(
     subprocess.run(["kind", "create", "cluster", "--name", cluster_name], check=True)
 
     if not skip_build:
-        typer.echo(f"[2/7] Building image: {image}...")
-        subprocess.run(["docker", "build", "-t", image, "."], check=True)
+        typer.echo(f"[2/7] Building images: {control_plane_image}, {runtime_image}...")
+        subprocess.run(["docker", "build", "--target", "agp-control-plane", "-t", control_plane_image, "."], check=True)
+        subprocess.run(["docker", "build", "--target", "agp-runtime", "-t", runtime_image, "."], check=True)
     else:
         typer.echo("[2/7] Skipping image build.")
 
     if not skip_load:
-        typer.echo("[3/7] Loading image into kind cluster...")
-        subprocess.run(["kind", "load", "docker-image", image, "--name", cluster_name], check=True)
+        typer.echo("[3/7] Loading images into kind cluster...")
+        subprocess.run(["kind", "load", "docker-image", control_plane_image, "--name", cluster_name], check=True)
+        subprocess.run(["kind", "load", "docker-image", runtime_image, "--name", cluster_name], check=True)
     else:
         typer.echo("[3/7] Skipping image load.")
 
@@ -285,7 +288,7 @@ spec:
                 name: agp-config
             - secretRef:
                 name: agp-secrets
-""".format(image=image)
+""".format(image=control_plane_image)
     subprocess.run(kctl + ["delete", "job", "agp-smoke", "--namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
     subprocess.run(kctl + ["apply", "-f", "-"], input=smoke_manifest, text=True, check=True)
 

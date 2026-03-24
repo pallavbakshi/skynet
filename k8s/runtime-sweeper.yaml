@@ -14,7 +14,7 @@ spec:
     spec:
       containers:
         - name: runtime-sweeper
-          image: agp:latest
+          image: agp-control-plane:latest
           command:
             - sh
             - -lc

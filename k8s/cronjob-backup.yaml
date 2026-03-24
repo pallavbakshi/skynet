@@ -31,7 +31,7 @@ spec:
                   mountPath: /pgdump
           containers:
             - name: upload
-              image: agp:latest
+              image: agp-control-plane:latest
               command:
                 - python
                 - /app/scripts/k8s_backup_create.py

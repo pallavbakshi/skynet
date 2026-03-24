@@ -6,6 +6,7 @@ services:
   control-plane:
     build:
       context: .
+      target: agp-control-plane
     command:
       - sh
       - -lc
@@ -37,6 +38,7 @@ services:
   bootstrap:
     build:
       context: .
+      target: agp-control-plane
     command: ["python", "scripts/bootstrap_local_stack.py"]
     environment:
       AGP_DATABASE_URL: sqlite+pysqlite:////data/agp.db
@@ -62,22 +64,7 @@ services:
   runtime:
     build:
       context: .
-    command:
-      - python
-      - -m
-      - agp
-      - runtime-work-loop
-      - rtm_local
-      - --server-url
-      - http://control-plane:7860
-      - --hostname
-      - runtime-1
-      - --agent-id
-      - agt_local
-      - --artifact-root
-      - /artifacts
-      - --idle-sleep-seconds
-      - "1"
+      target: agp-runtime
     environment:
       AGP_DATABASE_URL: sqlite+pysqlite:////data/agp.db
       AGP_QUEUE_BACKEND: redis
@@ -86,6 +73,14 @@ services:
       AGP_ARTIFACT_BACKEND: registryfs
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_SERVER_URL: http://control-plane:7860
+      AGP_RUNTIME_ID: rtm_local
+      AGP_RUNTIME_HOSTNAME: runtime-1
+      AGP_RUNTIME_AGENT_ID: agt_local
+      AGP_RUNTIME_TERMINAL_HOST_KIND: inprocess
+      AGP_RUNTIME_AGENT_ADAPTER_KIND: default
+      AGP_CODEX_TUI_MODE: "false"
+      AGP_RUNTIME_IDLE_SLEEP_SECONDS: "1"
     volumes:
       - agp_data:/data
       - agp_artifacts:/artifacts
@@ -99,6 +94,7 @@ services:
   lease-sweeper:
     build:
       context: .
+      target: agp-control-plane
     command: ["python", "-m", "agp", "sweep-loop", "--interval-seconds", "5"]
     environment:
       AGP_DATABASE_URL: sqlite+pysqlite:////data/agp.db
@@ -119,6 +115,7 @@ services:
   runtime-sweeper:
     build:
       context: .
+      target: agp-control-plane
     command: ["python", "-m", "agp", "sweep-runtimes-loop", "--interval-seconds", "10"]
     environment:
       AGP_DATABASE_URL: sqlite+pysqlite:////data/agp.db

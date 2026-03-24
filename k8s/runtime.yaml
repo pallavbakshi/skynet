@@ -14,16 +14,31 @@ spec:
     spec:
       containers:
         - name: runtime
-          image: agp:latest
+          image: agp-runtime:latest
           command:
             - sh
             - -lc
-            - python /app/scripts/wait_for_http.py http://control-plane:7860/health --timeout 180 && python -m agp runtime-work-loop rtm_local --server-url http://control-plane:7860 --hostname runtime-1 --agent-id agt_local --artifact-root /artifacts --idle-sleep-seconds 1
+            - python /app/scripts/wait_for_http.py http://control-plane:7860/health --timeout 180 && exec agp-runtime-entrypoint
           envFrom:
             - configMapRef:
                 name: agp-config
             - secretRef:
                 name: agp-secrets
+          env:
+            - name: AGP_RUNTIME_ID
+              value: rtm_local
+            - name: AGP_RUNTIME_HOSTNAME
+              value: runtime-1
+            - name: AGP_RUNTIME_AGENT_ID
+              value: agt_local
+            - name: AGP_RUNTIME_TERMINAL_HOST_KIND
+              value: inprocess
+            - name: AGP_RUNTIME_AGENT_ADAPTER_KIND
+              value: default
+            - name: AGP_CODEX_TUI_MODE
+              value: "false"
+            - name: AGP_RUNTIME_IDLE_SLEEP_SECONDS
+              value: "1"
           volumeMounts:
             - name: data
               mountPath: /data

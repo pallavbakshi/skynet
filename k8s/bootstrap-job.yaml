@@ -12,7 +12,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: bootstrap
-          image: agp:latest
+          image: agp-control-plane:latest
           command:
             - python
             - scripts/bootstrap_local_stack.py

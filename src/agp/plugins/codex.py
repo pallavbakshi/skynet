@@ -1,6 +1,7 @@
 """Codex CLI agent adapter plugin."""
 from __future__ import annotations
 import json
+import os
 import shlex
 from time import monotonic, sleep
 from typing import Any
@@ -41,8 +42,6 @@ _NOISE_INFIXES = (
 
 
 def _runtime_env_prefix() -> str:
-    import os
-
     env_pairs: list[tuple[str, str]] = []
     openai_key = os.environ.get("OPENAI_API_KEY")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
@@ -149,6 +148,36 @@ def _clean_codex_tui_output(text: str) -> str:
     return "\n".join(response_lines)
 
 
+def _parse_codex_turns(text: str) -> list[dict[str, Any]]:
+    """Parse visible Codex TUI output into prompt/response turns."""
+    stripped = _strip_ansi(text)
+    lines = stripped.splitlines()
+    turns: list[dict[str, Any]] = []
+    current_prompt = ""
+    response_lines: list[str] = []
+    in_response = False
+
+    for line in lines:
+        s = line.strip()
+        if s.startswith(_PROMPT_MARKER):
+            if in_response and response_lines:
+                turns.append({"prompt": current_prompt, "response": list(response_lines)})
+            current_prompt = s.removeprefix(_PROMPT_MARKER).strip()
+            response_lines = []
+            in_response = False
+        elif s.startswith(_RESPONSE_MARKER):
+            in_response = True
+            content = s.removeprefix(_RESPONSE_MARKER).strip()
+            if content:
+                response_lines.append(content)
+        elif in_response and not _is_noise_line(line):
+            response_lines.append(s)
+
+    if in_response and response_lines:
+        turns.append({"prompt": current_prompt, "response": list(response_lines)})
+    return turns
+
+
 class CodexAdapter(AgentAdapter):
     def __init__(
         self,
@@ -249,6 +278,10 @@ class CodexAdapter(AgentAdapter):
     # be auto-dismissed.  For numbered menus, the adapter sends the
     # preferred choice; for simple confirmations it sends Enter.
     _GATE_PATTERNS = (
+        "welcome to codex",
+        "sign in with chatgpt",
+        "sign in with device code",
+        "provide your own api key",
         "trust the contents",
         "do you trust",
         "press enter to continue",
@@ -258,6 +291,9 @@ class CodexAdapter(AgentAdapter):
         "permission",
         "allow",
         "approaching rate limits",
+        "introducing gpt-5.4",
+        "try new model",
+        "use existing model",
         "switch to gpt-",
         "press enter to confirm or esc",
     )
@@ -266,15 +302,36 @@ class CodexAdapter(AgentAdapter):
     # Maps a recognisable phrase to the number key to send.
     _GATE_CHOICES = {
         "approaching rate limits": "3",  # "Keep current model (never show again)"
+        "introducing gpt-5.4": "2",  # Use existing model
+        "try new model": "2",
         "switch to gpt-": "3",
     }
 
+    @staticmethod
+    def _preferred_auth_choice() -> str:
+        """Choose the safest onboarding path for the current runtime env."""
+        if os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY"):
+            return "3"  # Provide your own API key
+        if os.environ.get("CODEX_PREFER_DEVICE_CODE", "").lower() in {"1", "true", "yes"}:
+            return "2"
+        return "1"
+
+    def _looks_like_onboarding_prompt(self, text: str) -> bool:
+        lower = text.lower()
+        return (
+            "welcome to codex" in lower
+            and "sign in with chatgpt" in lower
+            and "provide your own api key" in lower
+        )
+
     def _looks_like_gate_prompt(self, text: str) -> bool:
         lower = text.lower()
-        return any(pat in lower for pat in self._GATE_PATTERNS)
+        return self._looks_like_onboarding_prompt(text) or any(pat in lower for pat in self._GATE_PATTERNS)
 
     def _gate_response(self, text: str) -> str:
         """Return the key to send for a gate prompt (a number for menus, empty for Enter)."""
+        if self._looks_like_onboarding_prompt(text):
+            return self._preferred_auth_choice()
         lower = text.lower()
         for phrase, choice in self._GATE_CHOICES.items():
             if phrase in lower:
@@ -329,6 +386,36 @@ class CodexAdapter(AgentAdapter):
             return payload
         return None
 
+    @staticmethod
+    def _normalise_visible_screen(raw: str) -> str:
+        lines = raw.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        lines = [ln.rstrip() for ln in lines]
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
+
+    def _looks_like_completed_turn(self, text: str) -> bool:
+        """Return True when Codex has answered and returned to a fresh prompt."""
+        turns = _parse_codex_turns(text)
+        if not turns:
+            return False
+        meaningful: list[str] = []
+        for raw in _strip_ansi(text).splitlines():
+            s = raw.strip()
+            if not s:
+                continue
+            if _is_noise_line(raw):
+                continue
+            meaningful.append(s.lower())
+        if not meaningful:
+            return False
+        last = meaningful[-1]
+        if not last.startswith(_PROMPT_MARKER.lower()):
+            return False
+        # Ignore the original task prompt; require a completed response turn
+        # and then a fresh prompt after it.
+        return any(turn["response"] for turn in turns)
+
     def execute_run(
         self,
         *,
@@ -381,31 +468,44 @@ class CodexAdapter(AgentAdapter):
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)
 
-        # Wait for idle, verify Codex produced a response, and auto-dismiss
-        # any gate prompts (like rate-limit dialogs) that appear mid-run.
+        # Verify Codex produced a response, and auto-dismiss any gate prompts
+        # (including first-run onboarding) that appear mid-run.
         timeout = self.idle_timeout_seconds or 180.0
         deadline = monotonic() + timeout
+        prev_screen = ""
+        unchanged = 0
+        was_busy = False
         while monotonic() < deadline:
-            remaining = max(deadline - monotonic(), 1.0)
-            idle = host.wait_for_idle(
-                session,
-                poll_seconds=self.idle_poll_seconds,
-                idle_after=self.idle_after,
-                timeout_seconds=remaining,
-                on_poll=_poll_hook,
-            )
-            if not idle:
-                raise RecoverableExecutionError("codex tui did not become idle within timeout")
-
+            _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
+            snap = self._normalise_visible_screen(screen)
             if self._looks_like_shell_returned(screen):
                 raise RecoverableExecutionError("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
                 host.send_text(session, self._gate_response(screen), enter=True)
+                prev_screen = snap
+                unchanged = 0
+                was_busy = True
+                sleep(self.idle_poll_seconds)
                 continue
-            if _RESPONSE_MARKER in screen:
+
+            if snap == prev_screen:
+                unchanged += 1
+            else:
+                unchanged = 0
+                was_busy = True
+            prev_screen = snap
+
+            if self._looks_like_completed_turn(screen):
+                break
+
+            if _RESPONSE_MARKER in screen and unchanged >= max(1, self.idle_after - 1):
                 break
             sleep(self.idle_poll_seconds)
+        else:
+            if not prev_screen.strip():
+                raise RecoverableExecutionError("codex tui produced no output after dispatch")
+            raise RecoverableExecutionError("codex tui did not become idle within timeout")
 
         # Use the visible screen for TUI output — scrollback deltas are
         # unreliable because TUI apps repaint the entire screen.

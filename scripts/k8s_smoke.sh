@@ -95,10 +95,12 @@ if [[ -f "${SMOKE_KUBECONFIG}" ]]; then
 fi
 
 if [[ "${SKIP_IMAGE_BUILD}" != "true" ]]; then
-  "${DOCKER[@]}" build -t agp:latest .
+  "${DOCKER[@]}" build --target agp-control-plane -t agp-control-plane:latest .
+  "${DOCKER[@]}" build --target agp-runtime -t agp-runtime:latest .
 fi
 if [[ "${SKIP_IMAGE_LOAD}" != "true" ]]; then
-  kind_run load docker-image agp:latest --name "${KIND_CLUSTER_NAME}"
+  kind_run load docker-image agp-control-plane:latest --name "${KIND_CLUSTER_NAME}"
+  kind_run load docker-image agp-runtime:latest --name "${KIND_CLUSTER_NAME}"
 fi
 
 bash ./scripts/generate_k8s_dev_secret.sh "${TMP_SECRET_PATCH}" >/dev/null
@@ -160,7 +162,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: smoke
-          image: agp:latest
+          image: agp-control-plane:latest
           imagePullPolicy: Never
           command:
             - python

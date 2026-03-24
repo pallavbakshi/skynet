@@ -120,7 +120,9 @@ fi
 if command -v ncodex >/dev/null 2>&1; then
   ok "ncodex already installed"
 elif command -v codex >/dev/null 2>&1; then
-  ok "codex already installed (ncodex not found — install via: npm install -g @anthropic-ai/ncodex)"
+  ok "codex already installed"
+elif command -v claude >/dev/null 2>&1; then
+  ok "claude already installed"
 else
   npm install -g @openai/codex 2>/dev/null && ok "codex installed" || \
     sudo npm install -g @openai/codex 2>/dev/null && ok "codex installed" || \

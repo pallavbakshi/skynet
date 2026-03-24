@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import Mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from agp.config import settings
 from agp.db import Base, SessionLocal, engine, init_db
-from agp.migrations import apply_migrations, schema_status, _discover_migrations
+from agp.migrations import (
+    apply_migrations,
+    schema_status,
+    _current_schema_version,
+    _discover_migrations,
+    _resolve_migrations_dir,
+)
 from tests._base import _reset_sqlite_database
 
 
@@ -120,6 +129,36 @@ class CheckConstraintEnforcementTest(unittest.TestCase):
         finally:
             session.rollback()
             session.close()
+
+
+class MigrationSessionRecoveryTest(unittest.TestCase):
+    """Verify migration helpers recover cleanly from pre-schema probes."""
+
+    def test_current_schema_version_rolls_back_failed_probe(self) -> None:
+        session = Mock()
+        session.execute.side_effect = RuntimeError("system_metadata missing")
+
+        result = _current_schema_version(session)
+
+        self.assertIsNone(result)
+        session.rollback.assert_called_once_with()
+
+    def test_resolve_migrations_dir_falls_back_to_cwd_when_installed_layout_lacks_bundle(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            (tmp / "migrations").mkdir()
+            anchor = tmp / "site-packages" / "agp" / "migrations.py"
+            anchor.parent.mkdir(parents=True)
+            anchor.write_text("# stub", encoding="utf-8")
+            old_cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(tmp)
+                resolved = _resolve_migrations_dir(anchor)
+            finally:
+                os.chdir(old_cwd)
+            self.assertEqual(resolved, tmp / "migrations")
 
 
 class VersionIncompatibilityTest(unittest.TestCase):

@@ -18,7 +18,21 @@ from sqlalchemy.orm import Session
 from agp.db import Base, SessionLocal, engine, current_release_version
 
 
-_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
+def _resolve_migrations_dir(anchor: Path | None = None) -> Path:
+    """Locate the migrations directory across source and installed layouts."""
+    anchor = (anchor or Path(__file__)).resolve()
+    candidates = [
+        anchor.parent.parent.parent / "migrations",  # source checkout: src/agp/migrations.py -> repo/migrations
+        Path.cwd() / "migrations",  # invoked from repo root or mounted app dir
+        Path("/app/migrations"),  # Docker image layout
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+_MIGRATIONS_DIR = _resolve_migrations_dir()
 
 
 def _execute_sql(session: Session, sql: str) -> None:
@@ -51,6 +65,7 @@ def _current_schema_version(session: Session) -> str | None:
         ).fetchone()
         return row[0] if row else None
     except Exception:
+        session.rollback()
         return None
 
 
