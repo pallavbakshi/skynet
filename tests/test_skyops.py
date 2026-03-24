@@ -15,6 +15,7 @@ from skyops.config import (
     _deep_merge,
     load_config,
 )
+from skyops._runtime_deploy import _build_docker_run
 
 
 runner = CliRunner()
@@ -77,6 +78,204 @@ class TestSkyopsConfig(unittest.TestCase):
         display = cfg.to_display_dict(mask_secrets=False)
         self.assertEqual(display["security"]["operator_token"], "super-secret-token")
 
+    def test_resolve_agent_workspace_from_profile(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server": {
+                    "mount_sources": {
+                        "repo_worktree_a": "/srv/worktrees/feature-a",
+                        "shared_docs": "/srv/shared-docs",
+                    }
+                }
+            },
+            "workspace_profiles": {
+                "feature_a": {
+                    "workspace_ref": "/workspace/wt-feature-a",
+                    "mounts": [
+                        "@repo_worktree_a:/workspace/wt-feature-a",
+                        "@shared_docs:/workspace/shared-docs",
+                    ],
+                }
+            },
+            "agents": {
+                "agt_feature_a": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "feature_a",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_feature_a", host_profile="server")
+        self.assertEqual(resolved["workspace_ref"], "/workspace/wt-feature-a")
+        self.assertEqual(
+            resolved["mounts"],
+            [
+                "/srv/worktrees/feature-a:/workspace/wt-feature-a",
+                "/srv/shared-docs:/workspace/shared-docs",
+            ],
+        )
+
+    def test_resolve_agent_workspace_allows_agent_mount_overrides(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server": {
+                    "mount_sources": {
+                        "repo": "/srv/repo",
+                        "shared_docs": "/srv/shared-docs",
+                    }
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@repo:/workspace/main"],
+                }
+            },
+            "agents": {
+                "agt_orc": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                    "mounts": ["@shared_docs:/workspace/shared-docs"],
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_orc", host_profile="server")
+        self.assertEqual(resolved["workspace_ref"], "/workspace/main")
+        self.assertEqual(
+            resolved["mounts"],
+            [
+                "/srv/repo:/workspace/main",
+                "/srv/shared-docs:/workspace/shared-docs",
+            ],
+        )
+
+    def test_resolve_agent_workspace_git_override_uses_host_git_root(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server": {
+                    "git_root": "/srv/agp/git",
+                    "mount_sources": {
+                        "shared_docs": "/srv/shared-docs",
+                    },
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "mode": "shared_fs",
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@shared_docs:/workspace/shared-docs"],
+                    "repo_url": "git@github.com:example/skynet.git",
+                    "repo_ref": "master",
+                }
+            },
+            "agents": {
+                "agt_git": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                    "workspace_mode": "git",
+                    "repo_ref": "feature-a",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_git", host_profile="server")
+        self.assertEqual(resolved["workspace_mode"], "git")
+        self.assertEqual(resolved["workspace_ref"], "/workspace/main")
+        self.assertEqual(
+            resolved["mounts"],
+            [
+                "/srv/agp/git/agt_git:/workspace/main",
+                "/srv/shared-docs:/workspace/shared-docs",
+            ],
+        )
+        self.assertTrue(any('git clone "git@github.com:example/skynet.git"' in cmd for cmd in resolved["prepare_commands"]))
+        self.assertTrue(any('checkout "feature-a"' in cmd for cmd in resolved["prepare_commands"]))
+
+    def test_resolve_agent_workspace_worktree_override_uses_host_roots(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server": {
+                    "git_root": "/srv/agp/git",
+                    "worktree_root": "/srv/agp/worktrees",
+                    "mount_sources": {
+                        "shared_docs": "/srv/shared-docs",
+                    },
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@shared_docs:/workspace/shared-docs"],
+                    "repo_url": "git@github.com:example/skynet.git",
+                    "repo_ref": "master",
+                    "repo_name": "skynet",
+                }
+            },
+            "agents": {
+                "agt_feature_a": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                    "workspace_mode": "worktree",
+                    "worktree_name": "feature-a",
+                    "repo_ref": "feature-a",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_feature_a", host_profile="server")
+        self.assertEqual(resolved["workspace_mode"], "worktree")
+        self.assertEqual(
+            resolved["mounts"],
+            [
+                "/srv/agp/worktrees/feature-a:/workspace/main",
+                "/srv/agp/git:/srv/agp/git",
+                "/srv/agp/worktrees:/srv/agp/worktrees",
+                "/srv/shared-docs:/workspace/shared-docs",
+            ],
+        )
+        self.assertTrue(any('worktree add "/srv/agp/worktrees/feature-a" "feature-a"' in cmd for cmd in resolved["prepare_commands"]))
+
+    def test_worktree_override_does_not_inherit_profile_mount_at_workspace_target(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server": {
+                    "git_root": "/srv/agp/git",
+                    "worktree_root": "/srv/agp/worktrees",
+                    "mount_sources": {
+                        "repo": "/srv/repo",
+                        "shared_docs": "/srv/shared-docs",
+                    },
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": [
+                        "@repo:/workspace/main",
+                        "@shared_docs:/workspace/shared-docs",
+                    ],
+                    "repo_url": "git@github.com:example/skynet.git",
+                    "repo_name": "skynet",
+                }
+            },
+            "agents": {
+                "agt_feature_a": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                    "workspace_mode": "worktree",
+                    "worktree_name": "feature-a",
+                    "repo_ref": "feature-a",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_feature_a", host_profile="server")
+        self.assertEqual(
+            resolved["mounts"],
+            [
+                "/srv/agp/worktrees/feature-a:/workspace/main",
+                "/srv/agp/git:/srv/agp/git",
+                "/srv/agp/worktrees:/srv/agp/worktrees",
+                "/srv/shared-docs:/workspace/shared-docs",
+            ],
+        )
+
 
 class TestLoadConfig(unittest.TestCase):
     def test_load_from_file(self, tmp_path=None):
@@ -128,6 +327,71 @@ class TestLoadConfig(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             with self.assertRaises(FileNotFoundError):
                 load_config(Path(td) / "does-not-exist.toml")
+
+    def test_load_workspace_profiles(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text(textwrap.dedent("""\
+                [host_profiles.default.mount_sources]
+                repo = "/host/repo"
+
+                [workspace_profiles.main]
+                workspace_ref = "/workspace/main"
+                mounts = ["@repo:/workspace/main"]
+
+                [agents.agt_local]
+                capability_id = "cap_python"
+                workspace_profile = "main"
+            """))
+            cfg = load_config(toml_path)
+            resolved = cfg.resolve_agent_workspace("agt_local", host_profile="default")
+            self.assertEqual(resolved["workspace_ref"], "/workspace/main")
+            self.assertEqual(resolved["mounts"], ["/host/repo:/workspace/main"])
+
+
+class TestRuntimeDeploy(unittest.TestCase):
+    def test_build_docker_run_includes_mounts_and_workspace_env(self):
+        cmd = _build_docker_run(
+            runtime_id="rtm_orc",
+            server_url="http://control-plane:7860",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_orc",
+            runtime_token="",
+            image="agp-runtime:latest",
+            workspace_ref="/workspace/main",
+            mounts=[
+                "/host/repo:/workspace/main",
+                "/host/shared-docs:/workspace/shared-docs",
+            ],
+        )
+        self.assertIn("-e AGP_RUNTIME_AGENT_ID=agt_orc", cmd)
+        self.assertIn("-e AGP_TMUX_DEFAULT_CWD=/workspace/main", cmd)
+        self.assertIn("-e AGP_WEZTERM_DEFAULT_CWD=/workspace/main", cmd)
+        self.assertIn("-v /host/repo:/workspace/main", cmd)
+        self.assertIn("-v /host/shared-docs:/workspace/shared-docs", cmd)
+        self.assertTrue(cmd.strip().endswith("agp-runtime:latest"))
+
+    def test_runtime_deploy_script_can_include_prepare_commands(self):
+        from skyops._runtime_deploy import _build_script
+
+        script = _build_script(
+            runtime_id="rtm_feature_a",
+            server_url="http://control-plane:7860",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_feature_a",
+            runtime_token="",
+            prepare_commands=[
+                'mkdir -p "/srv/agp/git" "/srv/agp/worktrees"',
+                'git -C "/srv/agp/git/skynet" fetch --all --prune',
+            ],
+        )
+        self.assertIn("# --- Prepare workspace ---", script)
+        self.assertIn('mkdir -p "/srv/agp/git" "/srv/agp/worktrees"', script)
+        self.assertIn('git -C "/srv/agp/git/skynet" fetch --all --prune', script)
 
 
 class TestInitCommand(unittest.TestCase):

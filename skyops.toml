@@ -31,6 +31,35 @@ capability_id = "cap_python"
 # workspace_ref is machine-specific — set it in skyops.local.toml:
 #   [agents.agt_local]
 #   workspace_ref = "/path/to/your/checkout"
+# workspace_profile is optional and lets deployment resolve shared mounts:
+#   [agents.agt_local]
+#   workspace_profile = "main"
+# workspace_mode can override the profile default for a specific agent:
+#   [agents.agt_feature_a]
+#   workspace_profile = "main"
+#   workspace_mode = "worktree"
+#   worktree_name = "feature-a"
+#   repo_url = "git@github.com:your-org/skynet.git"
+#   repo_ref = "feature-a"
+
+[workspace_profiles.main]
+# mode defaults to shared_fs. Other modes: git, worktree
+mode = "shared_fs"
+# workspace_ref is the default cwd inside the runtime
+workspace_ref = "/workspace/main"
+# mounts are runtime/deployment concerns, not control-plane state.
+# Use @name:/container/path to resolve machine-specific source paths via host_profiles.
+mounts = [
+  "@repo:/workspace/main",
+]
+
+[host_profiles.default]
+# used by `skyops runtime deploy --host-profile default`
+git_root = "/var/lib/agp/git"
+worktree_root = "/var/lib/agp/worktrees"
+
+[host_profiles.default.mount_sources]
+repo = "/absolute/path/to/checkout"
 
 [capabilities.cap_python]
 name = "python"

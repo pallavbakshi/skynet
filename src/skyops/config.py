@@ -71,6 +71,23 @@ class RuntimeConfig:
 
 
 @dataclass
+class WorkspaceProfileConfig:
+    mode: str = "shared_fs"
+    workspace_ref: str = ""
+    mounts: list[str] = field(default_factory=list)
+    repo_url: str = ""
+    repo_ref: str = "master"
+    repo_name: str = ""
+
+
+@dataclass
+class HostProfileConfig:
+    mount_sources: dict[str, str] = field(default_factory=dict)
+    git_root: str = ""
+    worktree_root: str = ""
+
+
+@dataclass
 class MonitoringConfig:
     prometheus: bool = True
     grafana: bool = True
@@ -90,6 +107,8 @@ class SkyopsConfig:
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
     agents: dict[str, dict[str, str]] = field(default_factory=dict)
     capabilities: dict[str, dict[str, str]] = field(default_factory=dict)
+    workspace_profiles: dict[str, WorkspaceProfileConfig] = field(default_factory=dict)
+    host_profiles: dict[str, HostProfileConfig] = field(default_factory=dict)
 
     # Where the config was loaded from (set after load)
     _config_path: Path | None = field(default=None, repr=False)
@@ -108,7 +127,178 @@ class SkyopsConfig:
             monitoring=_build(MonitoringConfig, data.get("monitoring", {})),
             agents=data.get("agents", {}),
             capabilities=data.get("capabilities", {}),
+            workspace_profiles={
+                name: _build(WorkspaceProfileConfig, raw)
+                for name, raw in data.get("workspace_profiles", {}).items()
+            },
+            host_profiles={
+                name: _build(
+                    HostProfileConfig,
+                    {
+                        "mount_sources": raw.get("mount_sources", {}),
+                        "git_root": raw.get("git_root", ""),
+                        "worktree_root": raw.get("worktree_root", ""),
+                    },
+                )
+                for name, raw in data.get("host_profiles", {}).items()
+            },
         )
+
+    def resolve_workspace_profile(self, name: str) -> WorkspaceProfileConfig:
+        profile = self.workspace_profiles.get(name)
+        if profile is None:
+            raise KeyError(f"workspace profile not found: {name}")
+        return profile
+
+    def resolve_host_profile(self, name: str) -> HostProfileConfig:
+        profile = self.host_profiles.get(name)
+        if profile is None:
+            raise KeyError(f"host profile not found: {name}")
+        return profile
+
+    def resolve_agent_workspace(
+        self, agent_id: str, *, host_profile: str | None = None
+    ) -> dict[str, Any]:
+        agent = dict(self.agents.get(agent_id, {}))
+        profile_name = agent.get("workspace_profile")
+        profile = self.resolve_workspace_profile(profile_name) if profile_name else WorkspaceProfileConfig()
+        resolved_host = self.resolve_host_profile(host_profile) if host_profile else HostProfileConfig()
+        mode = agent.get("workspace_mode") or profile.mode or "shared_fs"
+        workspace_ref = agent.get("workspace_ref") or profile.workspace_ref or None
+        mounts: list[str] = []
+        prepare_commands: list[str] = []
+
+        if mode == "shared_fs":
+            mounts.extend(self._resolve_mounts(profile.mounts, resolved_host))
+            self._merge_supplemental_mounts(
+                mounts,
+                self._resolve_mounts(agent.get("mounts", []) or [], resolved_host),
+            )
+        elif mode == "git":
+            if not workspace_ref:
+                raise ValueError(f"agent {agent_id} git workspace requires workspace_ref")
+            if not resolved_host.git_root:
+                raise ValueError(f"agent {agent_id} git workspace requires host_profile.git_root")
+            repo_url = agent.get("repo_url") or profile.repo_url
+            repo_ref = agent.get("repo_ref") or profile.repo_ref or "master"
+            if not repo_url:
+                raise ValueError(f"agent {agent_id} git workspace requires repo_url")
+            repo_name = agent.get("repo_name") or profile.repo_name or agent_id
+            host_path = f"{resolved_host.git_root.rstrip('/')}/{repo_name}"
+            mounts.append(f"{host_path}:{workspace_ref}")
+            self._merge_supplemental_mounts(
+                mounts,
+                self._resolve_mounts(profile.mounts, resolved_host),
+                exclude_target=workspace_ref,
+            )
+            self._merge_supplemental_mounts(
+                mounts,
+                self._resolve_mounts(agent.get("mounts", []) or [], resolved_host),
+                exclude_target=workspace_ref,
+            )
+            prepare_commands.extend(
+                [
+                    f'mkdir -p "{resolved_host.git_root}"',
+                    f'if [ ! -d "{host_path}/.git" ]; then git clone "{repo_url}" "{host_path}"; fi',
+                    f'git -C "{host_path}" fetch --all --prune',
+                    (
+                        f'git -C "{host_path}" checkout "{repo_ref}"'
+                        f' || git -C "{host_path}" checkout -b "{repo_ref}" "origin/{repo_ref}"'
+                    ),
+                ]
+            )
+        elif mode == "worktree":
+            if not workspace_ref:
+                raise ValueError(f"agent {agent_id} worktree workspace requires workspace_ref")
+            if not resolved_host.git_root or not resolved_host.worktree_root:
+                raise ValueError(
+                    f"agent {agent_id} worktree workspace requires host_profile.git_root and worktree_root"
+                )
+            repo_url = agent.get("repo_url") or profile.repo_url
+            repo_ref = agent.get("repo_ref") or profile.repo_ref or "master"
+            if not repo_url:
+                raise ValueError(f"agent {agent_id} worktree workspace requires repo_url")
+            repo_name = agent.get("repo_name") or profile.repo_name or profile_name or "repo"
+            worktree_name = agent.get("worktree_name") or agent_id
+            repo_path = f"{resolved_host.git_root.rstrip('/')}/{repo_name}"
+            worktree_path = f"{resolved_host.worktree_root.rstrip('/')}/{worktree_name}"
+            mounts.append(f"{worktree_path}:{workspace_ref}")
+            self._merge_supplemental_mounts(mounts, [f"{resolved_host.git_root}:{resolved_host.git_root}"])
+            self._merge_supplemental_mounts(mounts, [f"{resolved_host.worktree_root}:{resolved_host.worktree_root}"])
+            self._merge_supplemental_mounts(
+                mounts,
+                self._resolve_mounts(profile.mounts, resolved_host),
+                exclude_target=workspace_ref,
+            )
+            self._merge_supplemental_mounts(
+                mounts,
+                self._resolve_mounts(agent.get("mounts", []) or [], resolved_host),
+                exclude_target=workspace_ref,
+            )
+            prepare_commands.extend(
+                [
+                    f'mkdir -p "{resolved_host.git_root}" "{resolved_host.worktree_root}"',
+                    f'if [ ! -d "{repo_path}/.git" ]; then git clone "{repo_url}" "{repo_path}"; fi',
+                    f'git -C "{repo_path}" fetch --all --prune',
+                    (
+                        f'if [ ! -e "{worktree_path}/.git" ]; then '
+                        f'git -C "{repo_path}" worktree add "{worktree_path}" "{repo_ref}"; '
+                        f'else git -C "{worktree_path}" fetch --all --prune; '
+                        f'git -C "{worktree_path}" checkout "{repo_ref}"'
+                        f' || git -C "{worktree_path}" checkout -b "{repo_ref}" "origin/{repo_ref}"; fi'
+                    ),
+                ]
+            )
+        else:
+            raise ValueError(f"unsupported workspace mode: {mode}")
+        return {
+            "agent_id": agent_id,
+            "workspace_profile": profile_name,
+            "workspace_mode": mode,
+            "host_profile": host_profile,
+            "workspace_ref": workspace_ref,
+            "mounts": mounts,
+            "prepare_commands": prepare_commands,
+        }
+
+    def _resolve_mounts(
+        self, mounts: list[str], host_profile: HostProfileConfig
+    ) -> list[str]:
+        resolved: list[str] = []
+        for mount in mounts:
+            if not isinstance(mount, str):
+                continue
+            if mount.startswith("@"):
+                source_name, sep, target = mount[1:].partition(":")
+                if not sep or not target:
+                    raise ValueError(f"invalid symbolic mount: {mount}")
+                source_path = host_profile.mount_sources.get(source_name)
+                if not source_path:
+                    raise ValueError(f"mount source not found for {mount}")
+                resolved.append(f"{source_path}:{target}")
+            else:
+                resolved.append(mount)
+        return resolved
+
+    def _merge_supplemental_mounts(
+        self,
+        current: list[str],
+        incoming: list[str],
+        *,
+        exclude_target: str | None = None,
+    ) -> list[str]:
+        for mount in incoming:
+            if exclude_target and self._mount_target(mount) == exclude_target:
+                continue
+            if mount not in current:
+                current.append(mount)
+        return current
+
+    def _mount_target(self, mount: str) -> str:
+        parts = mount.split(":")
+        if len(parts) < 2:
+            return ""
+        return parts[-1]
 
     def to_display_dict(self, *, mask_secrets: bool = True) -> dict[str, Any]:
         """Return a nested dict suitable for display, with secrets masked."""

@@ -43,6 +43,19 @@ runtime_token = ""
 
 [agents.agt_local]
 capability_id = "cap_python"
+workspace_profile = "main"
+
+[workspace_profiles.main]
+mode = "shared_fs"
+workspace_ref = "/workspace/main"
+mounts = ["@repo:/workspace/main"]
+
+[host_profiles.default]
+git_root = "/var/lib/agp/git"
+worktree_root = "/var/lib/agp/worktrees"
+
+[host_profiles.default.mount_sources]
+repo = "/absolute/path/to/checkout"
 
 [capabilities.cap_python]
 name = "python"

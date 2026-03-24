@@ -12,6 +12,10 @@ fi
 : "${AGP_RUNTIME_ID:?AGP_RUNTIME_ID must be set}"
 : "${AGP_SERVER_URL:?AGP_SERVER_URL must be set}"
 
+if command -v git >/dev/null 2>&1; then
+  git config --global --add safe.directory '*' >/dev/null 2>&1 || true
+fi
+
 HOST_KIND="${AGP_RUNTIME_TERMINAL_HOST_KIND:-tmux}"
 ADAPTER_KIND="${AGP_RUNTIME_AGENT_ADAPTER_KIND:-codex}"
 HOSTNAME_ARG="${AGP_RUNTIME_HOSTNAME:-$(hostname)}"

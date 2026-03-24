@@ -31,6 +31,48 @@ def _build_command(
     return " ".join(parts)
 
 
+def _build_docker_run(
+    *,
+    runtime_id: str,
+    server_url: str,
+    host_kind: str,
+    adapter_kind: str,
+    agent_id: str | None,
+    runtime_token: str,
+    image: str,
+    workspace_ref: str | None,
+    mounts: list[str],
+) -> str:
+    """Build a docker run command for an interactive runtime."""
+    parts = [
+        "docker run --rm -it",
+        f"--name {runtime_id}",
+        f"-e AGP_SERVER_URL={server_url}",
+        f"-e AGP_RUNTIME_ID={runtime_id}",
+        f"-e AGP_RUNTIME_TERMINAL_HOST_KIND={host_kind}",
+        f"-e AGP_RUNTIME_AGENT_ADAPTER_KIND={adapter_kind}",
+        "-e AGP_ARTIFACT_BACKEND=http",
+    ]
+    if runtime_token:
+        parts.append(f"-e AGP_RUNTIME_BEARER_TOKEN={runtime_token}")
+    if agent_id:
+        parts.append(f"-e AGP_RUNTIME_AGENT_ID={agent_id}")
+    if workspace_ref:
+        parts.append(f"-e AGP_TMUX_DEFAULT_CWD={workspace_ref}")
+        parts.append(f"-e AGP_WEZTERM_DEFAULT_CWD={workspace_ref}")
+    for mount in mounts:
+        parts.append(f"-v {mount}")
+    parts.append(image)
+    return " \\\n  ".join(parts)
+
+
+def _build_prepare_script(prepare_commands: list[str]) -> str:
+    if not prepare_commands:
+        return ""
+    lines = ["# --- Prepare workspace ---", *prepare_commands, ""]
+    return "\n".join(lines)
+
+
 def _build_script(
     runtime_id: str,
     server_url: str,
@@ -38,6 +80,7 @@ def _build_script(
     adapter_kind: str,
     agent_id: str | None,
     runtime_token: str,
+    prepare_commands: list[str],
 ) -> str:
     """Build a self-contained bash deployment script."""
     cmd = _build_command(runtime_id, server_url, host_kind, adapter_kind, agent_id)
@@ -62,6 +105,8 @@ def _build_script(
     token_export = ""
     if runtime_token:
         token_export = f'export AGP_RUNTIME_BEARER_TOKEN="{runtime_token}"'
+
+    prepare_block = _build_prepare_script(prepare_commands)
 
     return textwrap.dedent(f"""\
         #!/usr/bin/env bash
@@ -91,6 +136,7 @@ def _build_script(
         export AGP_PORT="{agp_port}"
         {token_export}
 
+        {prepare_block}\
         # --- Run the work loop ---
         exec {cmd}
     """)
@@ -149,7 +195,9 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
         host_kind: str | None = typer.Option(None, "--host-kind", help="Terminal host kind (defaults to config runtime.host_kind)."),
         adapter_kind: str | None = typer.Option(None, "--adapter-kind", help="Agent adapter kind (defaults to config runtime.adapter_kind)."),
         agent_id: str | None = typer.Option(None, "--agent-id", help="Agent ID to bind to."),
-        fmt: str = typer.Option("command", "--format", help="Output format: command, script, or systemd."),
+        host_profile: str | None = typer.Option(None, "--host-profile", help="Host profile name for resolving mounts and git/worktree roots."),
+        image: str = typer.Option("agp-runtime:latest", "--image", help="Runtime image to use for docker-run format."),
+        fmt: str = typer.Option("command", "--format", help="Output format: command, script, systemd, or docker-run."),
     ) -> None:
         """Generate a ready-to-run deployment script for a runtime."""
         cfg = load_config()
@@ -157,6 +205,14 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
         resolved_host_kind = host_kind or cfg.runtime.host_kind
         resolved_adapter_kind = adapter_kind or cfg.runtime.adapter_kind
         runtime_token = cfg.security.runtime_token
+        workspace_ref: str | None = None
+        mounts: list[str] = []
+        prepare_commands: list[str] = []
+        if agent_id:
+            workspace = cfg.resolve_agent_workspace(agent_id, host_profile=host_profile)
+            workspace_ref = workspace["workspace_ref"]
+            mounts = workspace["mounts"]
+            prepare_commands = workspace["prepare_commands"]
 
         if fmt == "command":
             typer.echo(
@@ -169,7 +225,7 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
             typer.echo(
                 _build_script(
                     runtime_id, resolved_url, resolved_host_kind,
-                    resolved_adapter_kind, agent_id, runtime_token,
+                    resolved_adapter_kind, agent_id, runtime_token, prepare_commands,
                 )
             )
         elif fmt == "systemd":
@@ -179,6 +235,20 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
                     resolved_adapter_kind, agent_id, runtime_token,
                 )
             )
+        elif fmt == "docker-run":
+            typer.echo(
+                _build_docker_run(
+                    runtime_id=runtime_id,
+                    server_url=resolved_url,
+                    host_kind=resolved_host_kind,
+                    adapter_kind=resolved_adapter_kind,
+                    agent_id=agent_id,
+                    runtime_token=runtime_token,
+                    image=image,
+                    workspace_ref=workspace_ref,
+                    mounts=mounts,
+                )
+            )
         else:
-            typer.echo(f"Unknown format: {fmt}. Use command, script, or systemd.", err=True)
+            typer.echo(f"Unknown format: {fmt}. Use command, script, systemd, or docker-run.", err=True)
             raise typer.Exit(1)
