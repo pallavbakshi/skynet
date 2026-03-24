@@ -64,6 +64,7 @@ services:
       AGP_BOOTSTRAP_CAPABILITY_ID: cap_python
       AGP_BOOTSTRAP_AGENT_ID: agt_local
       AGP_BOOTSTRAP_RUNTIME_ID: rtm_local
+      AGP_BOOTSTRAP_WORKSPACE_REF: /workspace/main
     volumes:
       - agp_artifacts:/artifacts
       - agp_logs:/logs
@@ -87,13 +88,20 @@ services:
       AGP_RUNTIME_ID: rtm_local
       AGP_RUNTIME_HOSTNAME: runtime-1
       AGP_RUNTIME_AGENT_ID: agt_local
-      AGP_RUNTIME_TERMINAL_HOST_KIND: inprocess
-      AGP_RUNTIME_AGENT_ADAPTER_KIND: default
-      AGP_CODEX_TUI_MODE: "false"
+      AGP_RUNTIME_TERMINAL_HOST_KIND: ${AGP_RUNTIME_TERMINAL_HOST_KIND:-tmux}
+      AGP_RUNTIME_AGENT_ADAPTER_KIND: ${AGP_RUNTIME_AGENT_ADAPTER_KIND:-codex}
+      AGP_CODEX_TUI_MODE: ${AGP_CODEX_TUI_MODE:-true}
+      AGP_CODEX_CLI_COMMAND: ${AGP_CODEX_CLI_COMMAND:-codex -a never -s danger-full-access}
+      AGP_TMUX_DEFAULT_CWD: /workspace/main
       AGP_RUNTIME_IDLE_SLEEP_SECONDS: "1"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
       - agp_artifacts:/artifacts
       - agp_logs:/logs
+      - ${AGP_RUNTIME_WORKSPACE_SOURCE:-.}:/workspace/main
     depends_on:
       control-plane:
         condition: service_healthy

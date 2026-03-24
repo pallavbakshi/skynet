@@ -166,10 +166,11 @@ def _platform_summary(cfg: SkyopsConfig) -> list[str]:
 
         with build_client(cfg) as client:
             summary = client.observability_summary()
-            total = summary.get("total_jobs", 0)
-            active_runs = summary.get("active_runs", 0)
-            queued = summary.get("queued_jobs", 0)
-            lines.append(f"  Platform:  {total} jobs total, {active_runs} running, {queued} queued")
+            job_counts = summary.get("jobs", {}) or {}
+            total = sum(int(value or 0) for value in job_counts.values())
+            running = int(job_counts.get("running", 0) or 0)
+            queued = int(summary.get("queue", {}).get("depth", job_counts.get("queued", 0)) or 0)
+            lines.append(f"  Platform:  {total} jobs total, {running} running, {queued} queued")
 
             agents = client.list_agents(limit=200)
             agent_names = [a["agent_id"] for a in agents.get("items", []) if a.get("status") == "active"]

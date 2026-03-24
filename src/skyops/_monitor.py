@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from typing import Any
 
 import typer
 
@@ -20,6 +21,44 @@ def _client():
 
 def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+
+
+def _run_output(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(args, capture_output=True, text=True, check=False)
+
+
+def _docker_runtime_container(project: str, compose_file: str, runtime_id: str, runtime_hostname: str | None = None) -> str | None:
+    result = _run_output("docker", "compose", "-f", compose_file, "-p", project, "ps", "-q")
+    if result.returncode != 0:
+        return None
+    container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    for container_id in container_ids:
+        inspect = _run_output("docker", "inspect", container_id)
+        if inspect.returncode != 0:
+            continue
+        try:
+            payload = json.loads(inspect.stdout)
+        except json.JSONDecodeError:
+            continue
+        if not payload:
+            continue
+        data = payload[0]
+        env = data.get("Config", {}).get("Env", []) or []
+        env_map: dict[str, str] = {}
+        for item in env:
+            if "=" not in item:
+                continue
+            key, value = item.split("=", 1)
+            env_map[key] = value
+        if env_map.get("AGP_RUNTIME_ID") == runtime_id:
+            return container_id
+        if runtime_hostname and (
+            env_map.get("AGP_RUNTIME_HOSTNAME") == runtime_hostname
+            or data.get("Config", {}).get("Hostname") == runtime_hostname
+            or data.get("Name", "").lstrip("/") == runtime_hostname
+        ):
+            return container_id
+    return None
 
 
 @monitor_app.command("metrics")
@@ -59,6 +98,24 @@ def trace(
     _emit(result)
 
 
+@monitor_app.command("events")
+def events(
+    job_id: str = typer.Argument(help="Job ID to show raw events for."),
+    limit: int = typer.Option(200, "--limit", "-l", help="Max events per page."),
+) -> None:
+    """Show the raw ordered event stream for a job."""
+    items: list[dict] = []
+    cursor: str | None = None
+    with _client() as client:
+        while True:
+            page = client.get_job_events(job_id, limit=limit, cursor=cursor)
+            items.extend(page.get("items", []))
+            cursor = page.get("page", {}).get("next_cursor")
+            if not cursor:
+                break
+    _emit({"job_id": job_id, "items": items, "count": len(items)})
+
+
 @logs_app.command("control-plane")
 def logs_control_plane(
     limit: int = typer.Option(100, "--limit", "-l", help="Max log entries."),
@@ -91,12 +148,25 @@ def logs_runtime(
     """Show runtime logs."""
     cfg = load_config()
     if follow and cfg.stack.mode == "docker":
-        cmd = [
-            "docker", "compose",
-            "-f", cfg.stack.compose_file,
-            "-p", cfg.stack.project_name,
-            "logs", "--follow", "runtime",
-        ]
+        runtime_data: dict[str, Any] | None = None
+        try:
+            with _client() as client:
+                runtime_data = client.get_runtime(runtime_id)
+        except Exception:
+            runtime_data = None
+        container_id = _docker_runtime_container(
+            cfg.stack.project_name,
+            cfg.stack.compose_file,
+            runtime_id,
+            runtime_hostname=runtime_data.get("hostname") if runtime_data else None,
+        )
+        if container_id is None:
+            typer.echo(
+                f"Could not map runtime {runtime_id} to a Docker container in compose project {cfg.stack.project_name}.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        cmd = ["docker", "logs", "--follow", container_id]
         subprocess.run(cmd)
         return
 

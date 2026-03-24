@@ -235,6 +235,7 @@ def _build_systemd(
     agent_id: str | None,
     runtime_token: str,
     workspace_ref: str | None,
+    prepare_commands: list[str],
 ) -> str:
     """Build a systemd unit file."""
     cmd = _build_command(runtime_id, server_url, host_kind, adapter_kind, agent_id)
@@ -256,6 +257,11 @@ def _build_systemd(
         env_lines.append(_systemd_env_line("AGP_WEZTERM_DEFAULT_CWD", workspace_ref))
 
     env_block = "\n".join(env_lines)
+    exec_start_pre = "\n".join(
+        f"ExecStartPre=/bin/sh -lc {shlex.quote(command)}" for command in prepare_commands
+    )
+    if exec_start_pre:
+        exec_start_pre += "\n"
 
     return textwrap.dedent(f"""\
         [Unit]
@@ -264,7 +270,7 @@ def _build_systemd(
 
         [Service]
         Type=simple
-        ExecStart={cmd}
+        {exec_start_pre}ExecStart={cmd}
         Restart=on-failure
         RestartSec=5
         {env_block}
@@ -298,7 +304,11 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
         mounts: list[str] = []
         prepare_commands: list[str] = []
         if agent_id:
-            workspace = cfg.resolve_agent_workspace(agent_id, host_profile=host_profile)
+            try:
+                workspace = cfg.resolve_agent_workspace(agent_id, host_profile=host_profile)
+            except (KeyError, ValueError) as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from exc
             workspace_ref = workspace["workspace_ref"]
             mounts = workspace["mounts"]
             prepare_commands = workspace["prepare_commands"]
@@ -322,7 +332,7 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
             typer.echo(
                 _build_systemd(
                     runtime_id, resolved_url, resolved_host_kind,
-                    resolved_adapter_kind, agent_id, runtime_token, workspace_ref,
+                    resolved_adapter_kind, agent_id, runtime_token, workspace_ref, prepare_commands,
                 )
             )
         elif fmt == "docker-run":

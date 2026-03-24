@@ -9,13 +9,39 @@ import socket
 import typer
 
 from skyops.config import load_config
-from skyops._client import resolve_server_url
+from skyops._client import build_profile, build_client
 
 runtime_debug_app = typer.Typer(help="Runtime debugging commands.")
 
 
 def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+
+
+@runtime_debug_app.command("list")
+def runtime_list(
+    status: str | None = typer.Option(None, "--status", help="Filter by runtime status."),
+    health_status: str | None = typer.Option(None, "--health", help="Filter by runtime health status."),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max results."),
+    cursor: str | None = typer.Option(None, "--cursor", help="Pagination cursor."),
+) -> None:
+    """List runtimes known to the control plane."""
+    with build_client() as client:
+        result = client.list_runtimes(status=status, health_status=health_status, limit=limit, cursor=cursor)
+    _emit(result)
+
+
+@runtime_debug_app.command("inspect")
+def runtime_inspect(
+    runtime_id: str = typer.Argument(help="Runtime ID to inspect."),
+) -> None:
+    """Show detailed runtime state."""
+    with build_client() as client:
+        result = client.get_runtime(runtime_id)
+    if result is None:
+        typer.echo(f"Runtime not found: {runtime_id}", err=True)
+        raise typer.Exit(1)
+    _emit(result)
 
 
 @runtime_debug_app.command("register")
@@ -29,10 +55,11 @@ def runtime_register(
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
     runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
+    server_url = build_profile(cfg).server_url
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
-        server_url=resolve_server_url(cfg),
+        server_url=server_url,
         token=runtime_token,
     )
     client = RuntimeClient(identity)
@@ -56,10 +83,11 @@ def runtime_claim(
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
     runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
+    server_url = build_profile(cfg).server_url
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
         hostname=actual_hostname,
-        server_url=resolve_server_url(cfg),
+        server_url=server_url,
         token=runtime_token,
     )
     client = RuntimeClient(identity)
@@ -87,7 +115,7 @@ def runtime_work_once(
     from agp.runtime import RuntimeSupervisor
 
     cfg = load_config()
-    resolved_url = server_url or resolve_server_url(cfg)
+    resolved_url = server_url or build_profile(cfg).server_url
     actual_hostname = hostname or socket.gethostname()
     runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
     client = RuntimeClient(
@@ -139,17 +167,25 @@ def runtime_work_loop(
     from agp.cli import runtime_work_loop as agp_runtime_work_loop
 
     cfg = load_config()
-    resolved_url = server_url or resolve_server_url(cfg)
-    agp_runtime_work_loop(
-        runtime_id=runtime_id,
-        server_url=resolved_url,
-        hostname=hostname,
-        agent_id=agent_id,
-        capability_id=capability_id,
-        artifact_root=artifact_root,
-        idle_sleep_seconds=idle_sleep_seconds,
-        max_iterations=max_iterations,
-        max_local_recoveries=max_local_recoveries,
-        host_kind=host_kind,
-        adapter_kind=adapter_kind,
-    )
+    resolved_url = server_url or build_profile(cfg).server_url
+    previous_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN")
+    configured_token = cfg.security.runtime_token or None
+    if previous_token is None and configured_token:
+        os.environ["AGP_RUNTIME_BEARER_TOKEN"] = configured_token
+    try:
+        agp_runtime_work_loop(
+            runtime_id=runtime_id,
+            server_url=resolved_url,
+            hostname=hostname,
+            agent_id=agent_id,
+            capability_id=capability_id,
+            artifact_root=artifact_root,
+            idle_sleep_seconds=idle_sleep_seconds,
+            max_iterations=max_iterations,
+            max_local_recoveries=max_local_recoveries,
+            host_kind=host_kind,
+            adapter_kind=adapter_kind,
+        )
+    finally:
+        if previous_token is None:
+            os.environ.pop("AGP_RUNTIME_BEARER_TOKEN", None)

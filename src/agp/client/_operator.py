@@ -231,13 +231,24 @@ class AgpClient:
         return response.json()["data"]
 
     def resolve_capability_by_name(self, name: str) -> dict | None:
-        """Find a capability by display name. Returns None if not found."""
+        """Find a capability by display name.
+
+        Returns None if not found and raises ValueError if the name is ambiguous.
+        """
         data = self.list_capabilities(name=name)
         items = data.get("items", [])
-        for item in items:
-            if item.get("name") == name:
-                return item
-        return None
+        matches = [item for item in items if item.get("name") == name]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValueError(
+                "capability name is ambiguous: "
+                + ", ".join(
+                    f"{item.get('capability_id')} ({item.get('name')}:{item.get('version')})"
+                    for item in matches
+                )
+            )
+        return matches[0]
 
     def list_deliveries(
         self,
@@ -258,6 +269,20 @@ class AgpClient:
         if cursor is not None:
             params["cursor"] = cursor
         response = self._client.get("/queue/deliveries", params=params)
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def get_job_events(
+        self,
+        job_id: str,
+        *,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._client.get(f"/jobs/{job_id}/events", params=params)
         response.raise_for_status()
         return response.json()["data"]
 
@@ -355,6 +380,25 @@ class AgpClient:
         response = self._client.get(f"/runtimes/{runtime_id}")
         if response.status_code == 404:
             return None
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def list_runtimes(
+        self,
+        *,
+        status: str | None = None,
+        health_status: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        if health_status is not None:
+            params["health_status"] = health_status
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._client.get("/runtimes", params=params)
         response.raise_for_status()
         return response.json()["data"]
 

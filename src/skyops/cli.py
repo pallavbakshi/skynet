@@ -24,6 +24,7 @@ from skyops._validate import validate_app
 from skyops._runtime_debug import runtime_debug_app
 from skyops._runtime_deploy import register_deploy_command
 from skyops._agent_debug import agent_debug_app
+from skyops._workspace import workspace_app
 
 register_deploy_command(runtime_debug_app)
 
@@ -62,6 +63,7 @@ app.add_typer(sweep_app, name="sweep")
 app.add_typer(validate_app)
 app.add_typer(runtime_debug_app, name="runtime")
 app.add_typer(agent_debug_app, name="agent")
+app.add_typer(workspace_app, name="workspace")
 
 if __name__ == "__main__":
     app()

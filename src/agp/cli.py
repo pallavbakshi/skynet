@@ -403,6 +403,10 @@ def up(
         typer.echo(f"[..] Provisioning capability '{capability_name}'...")
         try:
             cap = client.resolve_capability_by_name(capability_name)
+        except ValueError as exc:
+            _print_banner("ERROR", "Provisioning Failed")
+            typer.echo(f"FATAL: {exc}")
+            raise typer.Exit(1)
         except Exception as exc:
             _print_banner("ERROR", "Provisioning Failed")
             typer.echo(f"FATAL: Could not reach control plane: {exc}")

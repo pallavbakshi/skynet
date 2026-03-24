@@ -166,19 +166,28 @@ class SkyopsConfig:
     def resolve_agent_workspace(
         self, agent_id: str, *, host_profile: str | None = None
     ) -> dict[str, Any]:
+        if agent_id not in self.agents:
+            raise KeyError(f"agent not found: {agent_id}")
         agent = dict(self.agents.get(agent_id, {}))
         profile_name = agent.get("workspace_profile")
         profile = self.resolve_workspace_profile(profile_name) if profile_name else WorkspaceProfileConfig()
+        mode = agent.get("workspace_mode") or profile.mode or "shared_fs"
+        requires_host_profile = mode in {"git", "worktree"} or any(
+            isinstance(mount, str) and mount.startswith("@")
+            for mount in [*profile.mounts, *(agent.get("mounts", []) or [])]
+        )
         resolved_host_name = host_profile or self.default_host_profile_name()
+        if requires_host_profile and resolved_host_name is None and len(self.host_profiles) > 1:
+            raise ValueError("host_profile is required when multiple host_profiles are configured")
         resolved_host = (
             self.resolve_host_profile(resolved_host_name)
             if resolved_host_name
             else HostProfileConfig()
         )
-        mode = agent.get("workspace_mode") or profile.mode or "shared_fs"
         workspace_ref = agent.get("workspace_ref") or profile.workspace_ref or None
         mounts: list[str] = []
         prepare_commands: list[str] = []
+        managed_mount_targets: list[str] = []
 
         if mode == "shared_fs":
             mounts.extend(self._resolve_mounts(profile.mounts, resolved_host))
@@ -198,6 +207,7 @@ class SkyopsConfig:
             repo_name = agent.get("repo_name") or profile.repo_name or agent_id
             host_path = f"{resolved_host.git_root.rstrip('/')}/{repo_name}"
             mounts.append(f"{host_path}:{workspace_ref}")
+            managed_mount_targets.append(workspace_ref)
             self._merge_supplemental_mounts(
                 mounts,
                 self._resolve_mounts(profile.mounts, resolved_host),
@@ -237,6 +247,7 @@ class SkyopsConfig:
             mounts.append(f"{worktree_path}:{workspace_ref}")
             self._merge_supplemental_mounts(mounts, [f"{resolved_host.git_root}:{resolved_host.git_root}"])
             self._merge_supplemental_mounts(mounts, [f"{resolved_host.worktree_root}:{resolved_host.worktree_root}"])
+            managed_mount_targets.extend([workspace_ref, resolved_host.git_root, resolved_host.worktree_root])
             self._merge_supplemental_mounts(
                 mounts,
                 self._resolve_mounts(profile.mounts, resolved_host),
@@ -270,10 +281,13 @@ class SkyopsConfig:
             "host_profile": resolved_host_name,
             "workspace_ref": workspace_ref,
             "mounts": mounts,
+            "managed_mount_targets": managed_mount_targets,
             "prepare_commands": prepare_commands,
         }
 
     def resolve_agent_workspace_ref(self, agent_id: str) -> str | None:
+        if agent_id not in self.agents:
+            raise KeyError(f"agent not found: {agent_id}")
         agent = dict(self.agents.get(agent_id, {}))
         profile_name = agent.get("workspace_profile")
         profile = self.resolve_workspace_profile(profile_name) if profile_name else WorkspaceProfileConfig()

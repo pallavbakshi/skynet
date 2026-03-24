@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 
+import httpx
 import typer
 
 from skyops._client import build_client
@@ -69,6 +70,50 @@ def list_agents(
     """List agents."""
     with _client() as client:
         result = client.list_agents(status=status, capability_id=capability, limit=limit)
+    _emit(result)
+
+
+@dispatch_app.command("capabilities")
+def list_capabilities(
+    name: str | None = typer.Option(None, "--name", "-n", help="Filter by capability name."),
+    limit: int = typer.Option(50, "--limit", "-l", help="Max results."),
+) -> None:
+    """List capabilities."""
+    with _client() as client:
+        result = client.list_capabilities(name=name, limit=limit)
+    _emit(result)
+
+
+@dispatch_app.command("capability")
+def inspect_capability(
+    target: str = typer.Argument(help="Capability ID or display name."),
+) -> None:
+    """Inspect a capability by ID or display name."""
+    with _client() as client:
+        try:
+            result = client.get_capability(target)
+        except httpx.HTTPStatusError as exc:
+            if exc.response is None or exc.response.status_code != 404:
+                raise
+            items = [
+                item
+                for item in client.list_capabilities(name=target, limit=100).get("items", [])
+                if item.get("name") == target
+            ]
+            if not items:
+                typer.echo(f"Capability not found: {target}", err=True)
+                raise typer.Exit(1)
+            if len(items) > 1:
+                typer.echo(
+                    "Capability name is ambiguous; use a capability_id. Matches: "
+                    + ", ".join(
+                        f"{item.get('capability_id')} ({item.get('name')}:{item.get('version')})"
+                        for item in items
+                    ),
+                    err=True,
+                )
+                raise typer.Exit(1)
+            result = client.get_capability(items[0]["capability_id"])
     _emit(result)
 
 

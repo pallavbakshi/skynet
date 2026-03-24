@@ -23,6 +23,10 @@ def _bootstrap_runtime_id() -> str | None:
     return os.environ.get("AGP_BOOTSTRAP_RUNTIME_ID") or None
 
 
+def _bootstrap_workspace_ref() -> str | None:
+    return os.environ.get("AGP_BOOTSTRAP_WORKSPACE_REF") or None
+
+
 def wait_for_health(timeout_seconds: float = 60.0) -> None:
     profile = AgpProfile.load()
     deadline = time.monotonic() + timeout_seconds
@@ -87,10 +91,12 @@ def ensure_agent() -> None:
                 if assigned_runtime_id:
                     if client.get_runtime(assigned_runtime_id) is None:
                         assigned_runtime_id = None
+                workspace_ref = _bootstrap_workspace_ref()
                 client.register_agent(
                     _bootstrap_agent_id(),
                     _bootstrap_capability_id(),
                     assigned_runtime_id=assigned_runtime_id,
+                    workspace_ref=workspace_ref,
                 )
                 return
             except Exception as exc:

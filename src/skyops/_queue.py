@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 
 import typer
+from sqlalchemy import func, select
+
+from skyops.config import load_config
 
 queue_app = typer.Typer(help="Queue management commands.")
 job_app = typer.Typer(help="Job management commands.")
@@ -13,6 +17,146 @@ sweep_app = typer.Typer(help="One-shot sweep operations.")
 
 def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+
+
+def _redis_list(client, key: str) -> list[str]:
+    return list(getattr(client, "lrange", lambda k, s, e: [])(key, 0, -1))
+
+
+def _redis_set_members(client, key: str) -> list[str]:
+    smembers = getattr(client, "smembers", None)
+    if callable(smembers):
+        values = smembers(key)
+        return sorted(str(value) for value in values)
+    return sorted(list(getattr(client, "sets", {}).get(key, set())))
+
+
+def _redis_scan_keys(client, pattern: str) -> list[str]:
+    scan_iter = getattr(client, "scan_iter", None)
+    if callable(scan_iter):
+        return sorted(str(value) for value in scan_iter(match=pattern))
+    prefixes = pattern.rstrip("*")
+    values = set(getattr(client, "lists", {}).keys())
+    values.update(getattr(client, "sets", {}).keys())
+    values.update(getattr(client, "hashes", {}).keys())
+    return sorted(key for key in values if key.startswith(prefixes))
+
+
+def _inspect_queue_state() -> dict[str, object]:
+    from agp.config import settings
+    from agp.db import SessionLocal
+    from agp.models import Job, QueueDeliveryRecord
+    from agp.queue_backend import RedisQueueBackend, InMemoryBrokerQueueBackend, get_queue_backend
+
+    backend = get_queue_backend(settings.queue_backend)
+    session = SessionLocal()
+    try:
+        delivery_counts = dict(
+            session.execute(
+                select(QueueDeliveryRecord.state, func.count())
+                .group_by(QueueDeliveryRecord.state)
+            ).all()
+        )
+        queue_rows = session.execute(
+            select(
+                QueueDeliveryRecord.target_queue,
+                QueueDeliveryRecord.state,
+                func.count(),
+            ).group_by(QueueDeliveryRecord.target_queue, QueueDeliveryRecord.state)
+        ).all()
+        queue_summary: dict[str, dict[str, int]] = {}
+        for target_queue, state, count in queue_rows:
+            queue_summary.setdefault(target_queue, {})[state] = int(count)
+        result: dict[str, object] = {
+            "backend": settings.queue_backend,
+            "deliveries": delivery_counts,
+            "queues": queue_summary,
+        }
+
+        if isinstance(backend, InMemoryBrokerQueueBackend):
+            result["transport"] = {
+                "queues": {name: list(values) for name, values in backend._queues.items()},
+                "inflight": {
+                    delivery_id: {
+                        "job_id": item.job_id,
+                        "target_queue": item.target_queue,
+                        "delivery_attempt": item.delivery_attempt,
+                    }
+                    for delivery_id, item in backend._inflight.items()
+                },
+                "dead_lettered_jobs": sorted(backend._dead_lettered_jobs),
+            }
+        elif isinstance(backend, RedisQueueBackend):
+            target_queues = {
+                row[0]
+                for row in session.execute(
+                    select(Job.target_queue).distinct().where(Job.target_queue.is_not(None))
+                ).all()
+                if row[0]
+            }
+            target_queues.update(queue_summary.keys())
+            queue_prefix = f"{backend.key_prefix}:queue:"
+            pending_suffix = ":pending"
+            for key in _redis_scan_keys(backend.client, f"{queue_prefix}*"):
+                if not key.startswith(queue_prefix):
+                    continue
+                target_queue = key.removeprefix(queue_prefix)
+                if target_queue.endswith(pending_suffix):
+                    target_queue = target_queue[: -len(pending_suffix)]
+                if target_queue:
+                    target_queues.add(target_queue)
+            inflight_keys = list(getattr(backend.client, "hkeys", lambda name: [])(backend._inflight_hash_key()))
+            inflight_payloads = {
+                delivery_id: json.loads(backend.client.hget(backend._inflight_hash_key(), delivery_id) or "{}")
+                for delivery_id in inflight_keys
+            }
+            for payload in inflight_payloads.values():
+                target_queue = payload.get("target_queue")
+                if target_queue:
+                    target_queues.add(str(target_queue))
+            transport_queues: dict[str, dict[str, object]] = {}
+            for target_queue in sorted(target_queues):
+                queue_key = backend._queue_key(target_queue)
+                pending_key = backend._pending_set_key(target_queue)
+                queue_items = _redis_list(backend.client, queue_key)
+                pending_items = _redis_set_members(backend.client, pending_key)
+                transport_queues[target_queue] = {
+                    "redis_queue_len": len(queue_items),
+                    "redis_queue_items": queue_items,
+                    "redis_pending_count": len(pending_items),
+                    "redis_pending_items": pending_items,
+                }
+            dead_lettered_jobs = _redis_set_members(backend.client, backend._dead_lettered_jobs_key())
+            result["transport"] = {
+                "queues": transport_queues,
+                "inflight": inflight_payloads,
+                "dead_lettered_jobs": dead_lettered_jobs,
+            }
+        return result
+    finally:
+        session.close()
+
+
+@queue_app.command("inspect")
+def queue_inspect() -> None:
+    """Inspect queue transport and delivery state."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        cmd = [
+            "docker", "compose",
+            "-f", cfg.stack.compose_file,
+            "-p", cfg.stack.project_name,
+            "exec", "-T", "control-plane",
+            "python", "-c",
+            (
+                "import json; "
+                "from skyops._queue import _inspect_queue_state; "
+                "print(json.dumps(_inspect_queue_state(), indent=2, sort_keys=True, default=str))"
+            ),
+        ]
+        subprocess.run(cmd, check=True)
+        return
+    _emit(_inspect_queue_state())
 
 
 @queue_app.command("reconstruct")

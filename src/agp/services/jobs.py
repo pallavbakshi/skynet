@@ -41,6 +41,7 @@ from agp.services.exceptions import BadRequestError, ConflictError, InternalErro
 def _block_job(db: Session, *, job: Job, reason: str) -> None:
     if job.status != JobStatus.QUEUED.value:
         raise ConflictError(f"job cannot be blocked from state {job.status}")
+    _queue_backend().remove_jobs(db, target_queue=job.target_queue, job_ids=[job.job_id])
     job.status = JobStatus.BLOCKED.value
     job.updated_at = utc_now()
     _create_event(db, job_id=job.job_id, event_type="job.blocked", body={"reason": reason})
@@ -51,6 +52,7 @@ def _unblock_job(db: Session, *, job: Job, reason: str) -> None:
         raise ConflictError(f"job cannot be unblocked from state {job.status}")
     job.status = JobStatus.QUEUED.value
     job.updated_at = utc_now()
+    _queue_backend().enqueue_job(db, job=job)
     _create_event(db, job_id=job.job_id, event_type="job.queued", body={"target_queue": job.target_queue, "reason": reason})
 
 

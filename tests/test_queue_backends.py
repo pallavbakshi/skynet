@@ -17,6 +17,7 @@ from agp.queue_backend import (
     QueueDelivery,
 )
 import agp.queue_backend as queue_backend_module
+from agp.services.jobs import _block_job, _unblock_job
 
 from tests._base import AgpTestCase, FakeRedisClient
 
@@ -435,6 +436,35 @@ class RedisBackendContractTest(AgpTestCase):
                     sa_select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job.job_id)
                 ).first()
                 self.assertEqual(rec.state, "dead_lettered")
+        finally:
+            session.close()
+
+    def test_block_and_unblock_keep_redis_transport_consistent(self) -> None:
+        session = SessionLocal()
+        try:
+            from agp.config import settings
+            from agp.queue_backend import get_queue_backend
+
+            settings.queue_backend = "redis"
+            settings.redis_url = "redis://fake"
+            settings.redis_queue_key_prefix = "test"
+            backend = get_queue_backend("redis")
+            _seed_agent(session, agent_id="agt_block")
+            job = _seed_job(session, agent_id="agt_block", job_id="job_block")
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+
+            _block_job(session, job=job, reason="operator-block")
+            session.commit()
+            self.assertIsNone(backend.dequeue_candidate(session, target_queues=["agent:agt_block"]))
+
+            _unblock_job(session, job=job, reason="operator-unblock")
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_block"])
+            self.assertIsNotNone(delivery)
+            assert delivery is not None
+            self.assertEqual(delivery.job_id, job.job_id)
         finally:
             session.close()
 

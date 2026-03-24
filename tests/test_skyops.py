@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 from typer.testing import CliRunner
 
 from skyops.cli import app
@@ -166,6 +168,23 @@ class TestSkyopsConfig(unittest.TestCase):
             },
         })
         self.assertEqual(cfg.resolve_agent_workspace_ref("agt_local"), "/workspace/main")
+
+    def test_resolve_agent_workspace_unknown_agent_raises(self):
+        cfg = SkyopsConfig.from_dict({
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                }
+            },
+            "agents": {
+                "agt_local": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                }
+            },
+        })
+        with self.assertRaises(KeyError):
+            cfg.resolve_agent_workspace("agt_missing")
 
     def test_resolve_agent_workspace_uses_default_host_profile(self):
         cfg = SkyopsConfig.from_dict({
@@ -517,12 +536,15 @@ class TestRuntimeDeploy(unittest.TestCase):
             agent_id="agt_orc",
             runtime_token="tok",
             workspace_ref="/workspace/main",
+            prepare_commands=['mkdir -p "/srv/agp/git"'],
         )
         self.assertIn('Environment="AGP_ARTIFACT_BACKEND=http"', unit)
         self.assertIn('Environment="AGP_TMUX_DEFAULT_CWD=/workspace/main"', unit)
         self.assertIn('Environment="AGP_WEZTERM_DEFAULT_CWD=/workspace/main"', unit)
         self.assertIn("PassEnvironment=OPENAI_API_KEY OPENROUTER_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY", unit)
         self.assertIn("ExecStart=agp runtime-work-loop", unit)
+        self.assertIn("ExecStartPre=/bin/sh -lc", unit)
+        self.assertIn('mkdir -p "/srv/agp/git"', unit)
         self.assertNotIn("ExecStart=AGP_ARTIFACT_BACKEND=http", unit)
 
     def test_build_docker_run_includes_prepare_commands(self):
@@ -541,6 +563,16 @@ class TestRuntimeDeploy(unittest.TestCase):
         self.assertIn("# --- Prepare workspace ---", cmd)
         self.assertIn('mkdir -p "/srv/agp/worktrees"', cmd)
         self.assertIn("docker run", cmd)
+
+    def test_runtime_deploy_unknown_agent_fails(self):
+        cfg = SkyopsConfig()
+        with patch("skyops._runtime_deploy.load_config", return_value=cfg):
+            result = runner.invoke(
+                app,
+                ["runtime", "deploy", "rtm_local", "--agent-id", "agt_missing"],
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("agent not found", result.output)
 
 
 class TestSkyopsClient(unittest.TestCase):
@@ -727,6 +759,29 @@ class TestStatus(unittest.TestCase):
             self.assertIn("SERVICE", result.output)
             self.assertIn("postgres", result.output)
             self.assertIn("control-plane", result.output)
+
+    def test_status_uses_observability_job_buckets(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+        mock_client = _mock_agp_client(
+            observability_summary={
+                "jobs": {
+                    "queued": 1,
+                    "running": 2,
+                    "completed": 3,
+                    "failed": 1,
+                },
+                "queue": {"depth": 1},
+            },
+            list_agents={"items": [{"agent_id": "agt_local", "status": "active"}]},
+        )
+        with patch("skyops._status.load_config", return_value=cfg), \
+             patch("skyops._status._bare_metal_services", return_value=[]), \
+             patch("skyops._client.build_client", return_value=mock_client):
+            result = runner.invoke(app, ["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Platform:  7 jobs total, 2 running, 1 queued", result.output)
+        self.assertIn("Agents:    1 active (agt_local)", result.output)
 
 
 # ── Phase C: lifecycle, db, health ────────────────────────────────
@@ -974,6 +1029,67 @@ class TestDispatchAgents(unittest.TestCase):
         self.assertIn("agt_local", result.output)
 
 
+class TestDispatchCapabilities(unittest.TestCase):
+    def test_list_capabilities_command(self):
+        mock_client = _mock_agp_client(list_capabilities={"items": [{"capability_id": "cap_python", "name": "python"}]})
+        with patch("skyops._dispatch._client", return_value=mock_client):
+            result = runner.invoke(app, ["capabilities"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("cap_python", result.output)
+
+    def test_capability_inspect_by_name(self):
+        not_found = httpx.HTTPStatusError(
+            "not found",
+            request=httpx.Request("GET", "http://test/capabilities/python"),
+            response=httpx.Response(404),
+        )
+        mock_client = _mock_agp_client(
+            list_capabilities={"items": [{"capability_id": "cap_python", "name": "python", "version": "v1"}]},
+            get_capability={"capability_id": "cap_python", "name": "python"},
+        )
+        mock_client.get_capability.side_effect = [not_found, {"capability_id": "cap_python", "name": "python"}]
+        with patch("skyops._dispatch._client", return_value=mock_client):
+            result = runner.invoke(app, ["capability", "python"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("cap_python", result.output)
+        mock_client.list_capabilities.assert_called_once_with(name="python", limit=100)
+
+    def test_capability_inspect_non_404_error_propagates(self):
+        server_error = httpx.HTTPStatusError(
+            "server error",
+            request=httpx.Request("GET", "http://test/capabilities/cap_python"),
+            response=httpx.Response(500),
+        )
+        mock_client = _mock_agp_client()
+        mock_client.get_capability.side_effect = server_error
+        with patch("skyops._dispatch._client", return_value=mock_client):
+            result = runner.invoke(app, ["capability", "cap_python"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertNotIn("Capability not found", result.output)
+
+    def test_capability_inspect_ambiguous_name_fails(self):
+        not_found = httpx.HTTPStatusError(
+            "not found",
+            request=httpx.Request("GET", "http://test/capabilities/python"),
+            response=httpx.Response(404),
+        )
+        mock_client = _mock_agp_client(
+            list_capabilities={
+                "items": [
+                    {"capability_id": "cap_python_v1", "name": "python", "version": "v1"},
+                    {"capability_id": "cap_python_v2", "name": "python", "version": "v2"},
+                ]
+            }
+        )
+        mock_client.get_capability.side_effect = not_found
+        with patch("skyops._dispatch._client", return_value=mock_client):
+            result = runner.invoke(app, ["capability", "python"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("ambiguous", result.output.lower())
+        self.assertIn("cap_python_v1", result.output)
+        self.assertIn("cap_python_v2", result.output)
+
+
 class TestMonitorMetrics(unittest.TestCase):
     def test_metrics_summary(self):
         import tempfile
@@ -1001,6 +1117,22 @@ class TestMonitorAlerts(unittest.TestCase):
             with patch("skyops._monitor._client", return_value=mock_client):
                     result = runner.invoke(app, ["alerts"])
         self.assertEqual(result.exit_code, 0, result.output)
+
+
+class TestMonitorEvents(unittest.TestCase):
+    def test_events_command(self):
+        mock_client = _mock_agp_client(
+            get_job_events={
+                "items": [{"event_type": "job.accepted"}, {"event_type": "job.queued"}],
+                "page": {"next_cursor": None},
+            }
+        )
+        with patch("skyops._monitor._client", return_value=mock_client):
+            result = runner.invoke(app, ["events", "job_123"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("job.accepted", result.output)
+        self.assertIn("job.queued", result.output)
+        mock_client.get_job_events.assert_called_once()
 
 
 class TestUpgradeStatus(unittest.TestCase):
@@ -1063,11 +1195,11 @@ class TestCLIHelp(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         for cmd in [
             "init", "config", "status", "deps", "up", "down", "restart", "ps",
-            "db", "health", "send", "watch", "jobs", "agents",
+            "db", "health", "send", "watch", "jobs", "agents", "capabilities", "capability",
             "interrupt", "fetch", "deliveries", "metrics", "alerts",
-            "trace", "logs", "backup", "secrets", "upgrade", "drill",
+            "trace", "events", "logs", "backup", "secrets", "upgrade", "drill",
             "host", "adapter", "plugin", "queue", "job", "sweep",
-            "validate", "smoke", "k8s-smoke", "runtime",
+            "validate", "smoke", "k8s-smoke", "runtime", "workspace",
         ]:
             self.assertIn(cmd, result.output, f"Command '{cmd}' not found in --help output")
 
@@ -1163,15 +1295,234 @@ class TestQueueRedrive(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("redrive", result.output)
         self.assertIn("reconstruct", result.output)
+        self.assertIn("inspect", result.output)
+
+
+class TestQueueInspect(unittest.TestCase):
+    def test_queue_inspect_inmemory_backend(self):
+        from agp.queue_backend import InMemoryBrokerQueueBackend
+
+        backend = InMemoryBrokerQueueBackend()
+        backend._queued("agent:agt_local").append("job_1")
+        backend._dead_lettered_jobs.add("job_dead")
+
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, query):  # noqa: ARG002
+                self.calls += 1
+                if self.calls == 1:
+                    return _Result([("pending", 1)])
+                if self.calls == 2:
+                    return _Result([("agent:agt_local", "pending", 1)])
+                return _Result([])
+
+            def close(self):
+                return None
+
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+
+        with patch("skyops._queue.load_config", return_value=cfg), \
+             patch("agp.queue_backend.get_queue_backend", return_value=backend), \
+             patch("agp.db.SessionLocal", return_value=_Session()), \
+             patch("agp.config.settings.queue_backend", "inmemory_broker"):
+            result = runner.invoke(app, ["queue", "inspect"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("agent:agt_local", result.output)
+        self.assertIn("job_dead", result.output)
+
+    def test_queue_inspect_redis_includes_transport_only_queue(self):
+        from agp.queue_backend import RedisQueueBackend
+        from tests._base import FakeRedisClient
+
+        client = FakeRedisClient()
+        backend = RedisQueueBackend(redis_url="redis://test", key_prefix="agp-test")
+        backend.client = client
+        client.rpush("agp-test:queue:agent:stale", "job_stale")
+        client.sadd("agp-test:queue:agent:stale:pending", "job_stale")
+
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def all(self):
+                return self._rows
+
+        class _Session:
+            def __init__(self):
+                self.calls = 0
+
+            def execute(self, query):  # noqa: ARG002
+                self.calls += 1
+                if self.calls == 1:
+                    return _Result([("pending", 1)])
+                if self.calls == 2:
+                    return _Result([])
+                return _Result([])
+
+            def close(self):
+                return None
+
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+
+        with patch("skyops._queue.load_config", return_value=cfg), \
+             patch("agp.queue_backend.get_queue_backend", return_value=backend), \
+             patch("agp.db.SessionLocal", return_value=_Session()), \
+             patch("agp.config.settings.queue_backend", "redis"):
+            result = runner.invoke(app, ["queue", "inspect"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("agent:stale", result.output)
+        self.assertIn("job_stale", result.output)
+
+    def test_queue_inspect_docker_execs_into_control_plane(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+        proc = unittest.mock.Mock(returncode=0)
+        with patch("skyops._queue.load_config", return_value=cfg), \
+             patch("skyops._queue.subprocess.run", return_value=proc) as mock_run:
+            result = runner.invoke(app, ["queue", "inspect"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_run.assert_called_once()
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[:7], ["docker", "compose", "-f", "compose.yaml", "-p", "agp", "exec"])
+        self.assertIn("control-plane", cmd)
 
 
 class TestRuntimeDebug(unittest.TestCase):
     def test_runtime_subcommands_exist(self):
         result = runner.invoke(app, ["runtime", "--help"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("register", result.output)
-        self.assertIn("claim", result.output)
-        self.assertIn("work-once", result.output)
+        for name in ["register", "claim", "work-once", "work-loop", "deploy", "list", "inspect"]:
+            self.assertIn(name, result.output)
+
+    def test_runtime_list_command(self):
+        mock_client = _mock_agp_client(list_runtimes={"items": [{"runtime_id": "rtm_local"}]})
+        with patch("skyops._runtime_debug.build_client", return_value=mock_client):
+            result = runner.invoke(app, ["runtime", "list", "--cursor", "cur_123"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("rtm_local", result.output)
+        mock_client.list_runtimes.assert_called_once_with(
+            status=None, health_status=None, limit=50, cursor="cur_123"
+        )
+
+    def test_runtime_inspect_command(self):
+        mock_client = _mock_agp_client(get_runtime={"runtime_id": "rtm_local", "status": "idle"})
+        with patch("skyops._runtime_debug.build_client", return_value=mock_client):
+            result = runner.invoke(app, ["runtime", "inspect", "rtm_local"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("rtm_local", result.output)
+        self.assertIn("idle", result.output)
+
+    def test_runtime_work_loop_uses_configured_runtime_token(self):
+        cfg = SkyopsConfig()
+        cfg.security.runtime_token = "rtok"
+        observed: dict[str, str | None] = {}
+
+        def _fake_work_loop(**kwargs):
+            import os
+
+            observed["token"] = os.environ.get("AGP_RUNTIME_BEARER_TOKEN")
+            observed["server_url"] = kwargs["server_url"]
+
+        with patch("skyops._runtime_debug.load_config", return_value=cfg), \
+             patch("skyops._runtime_debug.build_profile", return_value=type("Profile", (), {"server_url": "http://cp:7860"})()), \
+             patch("agp.cli.runtime_work_loop", side_effect=_fake_work_loop):
+            result = runner.invoke(app, ["runtime", "work-loop", "rtm_local"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(observed["token"], "rtok")
+        self.assertEqual(observed["server_url"], "http://cp:7860")
+
+
+class TestWorkspaceCommands(unittest.TestCase):
+    def test_workspace_resolve_command(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {"default": {"mount_sources": {"repo": "/srv/repo"}}},
+            "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
+            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg):
+            result = runner.invoke(app, ["workspace", "resolve", "agt_local"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("/workspace/main", result.output)
+        self.assertIn("/srv/repo:/workspace/main", result.output)
+
+    def test_workspace_validate_command(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {"default": {"mount_sources": {"repo": "/srv/repo"}}},
+            "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
+            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg), \
+             patch("skyops._workspace.Path.exists", return_value=True):
+            result = runner.invoke(app, ["workspace", "validate", "agt_local"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('"ok": true', result.output.lower())
+
+    def test_workspace_validate_git_requires_missing_supplemental_mount(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "default": {
+                    "mount_sources": {"shared_docs": "/srv/shared-docs"},
+                    "git_root": "/srv/git",
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@shared_docs:/workspace/shared-docs"],
+                }
+            },
+            "agents": {
+                "agt_local": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                    "workspace_mode": "git",
+                    "repo_url": "git@github.com:example/repo.git",
+                }
+            },
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg), \
+             patch("skyops._workspace.shutil.which", return_value="/usr/bin/git"), \
+             patch("skyops._workspace.Path.exists", side_effect=lambda *args, **kwargs: str(args[-1]) == "/srv/git/agt_local"):
+            result = runner.invoke(app, ["workspace", "validate", "agt_local"])
+        self.assertNotEqual(result.exit_code, 0)
+
+    def test_workspace_resolve_unknown_agent_fails(self):
+        cfg = SkyopsConfig.from_dict({
+            "agents": {"agt_local": {"capability_id": "cap_python"}},
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg):
+            result = runner.invoke(app, ["workspace", "resolve", "agt_missing"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("agent not found", result.output)
+
+    def test_workspace_resolve_requires_host_profile_when_ambiguous(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server_a": {"mount_sources": {"repo": "/srv/a/repo"}},
+                "server_b": {"mount_sources": {"repo": "/srv/b/repo"}},
+            },
+            "workspace_profiles": {
+                "main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]},
+            },
+            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg):
+            result = runner.invoke(app, ["workspace", "resolve", "agt_local"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("host_profile is required", result.output)
 
 
 class TestLogsFollow(unittest.TestCase):
@@ -1182,6 +1533,63 @@ class TestLogsFollow(unittest.TestCase):
         self.assertIn("control-plane", result.output)
         self.assertIn("runtime", result.output)
         self.assertIn("prune", result.output)
+
+    def test_logs_runtime_follow_uses_runtime_specific_container(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+
+        runtime_client = _mock_agp_client(get_runtime={"runtime_id": "rtm_local", "hostname": "runtime-1"})
+
+        compose_ps = unittest.mock.Mock(returncode=0, stdout="cid123\n", stderr="")
+        inspect_payload = json.dumps([{
+            "Name": "/agp-runtime-1",
+            "Config": {
+                "Hostname": "runtime-1",
+                "Env": [
+                    "AGP_RUNTIME_ID=rtm_local",
+                    "AGP_RUNTIME_HOSTNAME=runtime-1",
+                ],
+            },
+        }])
+        docker_inspect = unittest.mock.Mock(returncode=0, stdout=inspect_payload, stderr="")
+        docker_logs = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+
+        with patch("skyops._monitor.load_config", return_value=cfg), \
+             patch("skyops._monitor._client", return_value=runtime_client), \
+             patch("skyops._monitor.subprocess.run", side_effect=[compose_ps, docker_inspect, docker_logs]) as mock_run:
+            result = runner.invoke(app, ["logs", "runtime", "rtm_local", "--follow"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(calls[-1], ["docker", "logs", "--follow", "cid123"])
+
+    def test_logs_runtime_follow_falls_back_without_control_plane_lookup(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+
+        compose_ps = unittest.mock.Mock(returncode=0, stdout="cid123\n", stderr="")
+        inspect_payload = json.dumps([{
+            "Name": "/agp-runtime-1",
+            "Config": {
+                "Hostname": "runtime-1",
+                "Env": [
+                    "AGP_RUNTIME_ID=rtm_local",
+                ],
+            },
+        }])
+        docker_inspect = unittest.mock.Mock(returncode=0, stdout=inspect_payload, stderr="")
+        docker_logs = unittest.mock.Mock(returncode=0, stdout="", stderr="")
+
+        with patch("skyops._monitor.load_config", return_value=cfg), \
+             patch("skyops._monitor._client", side_effect=RuntimeError("cp unavailable")), \
+             patch("skyops._monitor.subprocess.run", side_effect=[compose_ps, docker_inspect, docker_logs]) as mock_run:
+            result = runner.invoke(app, ["logs", "runtime", "rtm_local", "--follow"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        calls = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(calls[-1], ["docker", "logs", "--follow", "cid123"])
 
 
 class TestInitChecksDeps(unittest.TestCase):
