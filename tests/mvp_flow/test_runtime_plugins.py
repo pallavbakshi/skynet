@@ -1164,3 +1164,259 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             self.assertEqual(Path(result_artifact["path"]).read_text(encoding="utf-8"), "tmux plugin success")
         finally:
             shutil.rmtree(tmp)
+
+    # ── Sticky session tests ──────────────────────────────────────────
+
+    def test_codex_sticky_health_check_re_bootstraps_on_crash(self) -> None:
+        """When Codex TUI died between jobs, ensure_bootstrapped clears
+        the flag and re-launches."""
+        tui_alive = {"value": True}
+
+        class WezTermLikeHost(InProcessTerminalHost):
+            @property
+            def kind(self):
+                return "wezterm"
+
+            def is_foreground_tui(self, session):
+                return tui_alive["value"]
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_timeout_seconds=0.1,
+        )
+        host = WezTermLikeHost()
+        session = host.get_or_create_session(agent_id="agt_sticky")
+        claimed = {
+            "agent_id": "agt_sticky",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "first task"},
+        }
+
+        # Simulate first bootstrap succeeding — flag gets set
+        session.metadata["codex_bootstrapped"] = True
+
+        # TUI is alive — should return early, flag intact
+        adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.assertTrue(session.metadata.get("codex_bootstrapped"))
+
+        # TUI crashed — flag should be cleared and re-bootstrap attempted
+        tui_alive["value"] = False
+        try:
+            adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        except RecoverableExecutionError:
+            pass  # expected — no real TUI to become ready
+        # The flag was cleared before re-bootstrap attempt
+        history = host._history.get(session.session_id, [])
+        self.assertTrue(any("codex" in entry.lower() for entry in history),
+                        "should have attempted to re-launch codex")
+
+    def test_codex_sticky_cursor_preserved_across_runs(self) -> None:
+        """After a TUI run, cursor should be saved back to session metadata."""
+        adapter = CodexAdapter(
+            tui_mode=True,
+            session_mode="sticky",
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=1.0,
+        )
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cursor")
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cursor"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        # Inject a visible screen that looks like a completed codex turn
+        screen_content = (
+            "\u203a test task\n"
+            "\n"
+            "\u2022 The answer is 42\n"
+            "\n"
+            "\u203a \n"
+        )
+        host._history[session.session_id] = [screen_content]
+
+        claimed = {
+            "agent_id": "agt_cursor",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "test task"},
+        }
+
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed,
+            supervisor=SupervisorStub(),
+        )
+        self.assertIsNotNone(result)
+        # Cursor should be saved back for next run
+        self.assertIn("restored_cursor", session.metadata)
+        cursor = session.metadata["restored_cursor"]
+        self.assertEqual(cursor.session_id, session.session_id)
+
+    def test_codex_sticky_recover_clears_bootstrap_on_exit(self) -> None:
+        """recover() should clear codex_bootstrapped when Codex crashed."""
+        adapter = CodexAdapter(tui_mode=True, session_mode="sticky")
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_crash")
+        session.metadata["codex_bootstrapped"] = True
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_crash"})()
+                })()
+
+        adapter.recover(
+            host=host,
+            session=session,
+            claimed={"agent_id": "agt_crash", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
+            attempt=1,
+            error=RecoverableExecutionError("codex cli exited during execution"),
+            supervisor=SupervisorStub(),
+        )
+        self.assertNotIn("codex_bootstrapped", session.metadata)
+
+    def test_codex_sticky_recover_keeps_bootstrap_on_other_errors(self) -> None:
+        """recover() should NOT clear bootstrap flag for non-exit errors."""
+        adapter = CodexAdapter(tui_mode=True, session_mode="sticky")
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_other")
+        session.metadata["codex_bootstrapped"] = True
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_other"})()
+                })()
+
+        adapter.recover(
+            host=host,
+            session=session,
+            claimed={"agent_id": "agt_other", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
+            attempt=1,
+            error=RecoverableExecutionError("some other error"),
+            supervisor=SupervisorStub(),
+        )
+        self.assertTrue(session.metadata.get("codex_bootstrapped"))
+
+    def test_codex_sticky_tmux_falls_back_to_ephemeral(self) -> None:
+        """sticky + tmux should log a warning and still reset the session."""
+
+        class TmuxLikeHost(InProcessTerminalHost):
+            def __init__(self):
+                super().__init__()
+                self.reset_called = False
+
+            @property
+            def kind(self):
+                return "tmux"
+
+            def reset_session(self, session):
+                self.reset_called = True
+                return super().reset_session(session)
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            session_mode="sticky",
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=0.5,
+        )
+        host = TmuxLikeHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_sticky")
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_tmux"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        claimed = {
+            "agent_id": "agt_tmux_sticky",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "tmux sticky test"},
+        }
+
+        try:
+            adapter._execute_run_tui(
+                host=host, session=session, claimed=claimed,
+                supervisor=SupervisorStub(),
+            )
+        except RecoverableExecutionError:
+            pass
+        self.assertTrue(host.reset_called, "tmux should always reset even in sticky mode")
+
+    def test_codex_ephemeral_resets_on_wezterm(self) -> None:
+        """ephemeral + wezterm should reset session before each run."""
+
+        class WezTermLikeHost(InProcessTerminalHost):
+            def __init__(self):
+                super().__init__()
+                self.reset_called = False
+
+            @property
+            def kind(self):
+                return "wezterm"
+
+            def is_foreground_tui(self, session):
+                return True
+
+            def reset_session(self, session):
+                self.reset_called = True
+                return super().reset_session(session)
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            session_mode="ephemeral",
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=0.5,
+        )
+        host = WezTermLikeHost()
+        session = host.get_or_create_session(agent_id="agt_wez_eph")
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_wez"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        claimed = {
+            "agent_id": "agt_wez_eph",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "ephemeral wezterm test"},
+        }
+
+        try:
+            adapter._execute_run_tui(
+                host=host, session=session, claimed=claimed,
+                supervisor=SupervisorStub(),
+            )
+        except RecoverableExecutionError:
+            pass
+        self.assertTrue(host.reset_called, "wezterm ephemeral should reset session")

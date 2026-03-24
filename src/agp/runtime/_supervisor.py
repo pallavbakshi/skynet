@@ -406,6 +406,9 @@ class RuntimeSupervisor:
                         error=exc,
                         supervisor=self,
                     )
+                    # Re-bootstrap if recover() cleared the bootstrap flag
+                    # (e.g. Codex TUI crashed and needs re-launch).
+                    self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
                     self.client.resumed(
                         run_id=run["run_id"],
                         lease_id=lease["lease_id"],

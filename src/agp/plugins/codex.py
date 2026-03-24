@@ -35,6 +35,8 @@ _NOISE_PREFIXES = (
     "Keep current model",
     "Hide future rate",
     "Optimized for codex",
+    "Working (",  # transient "Working (3s • esc to interrupt)" status
+    "Use /skills",  # placeholder hint
 )
 _NOISE_INFIXES = (
     "\u00b7",  # · in status bar
@@ -105,7 +107,7 @@ def _clean_codex_tui_output(text: str) -> str:
         elif s.startswith(_RESPONSE_MARKER):
             in_response = True
             content = s.removeprefix(_RESPONSE_MARKER).strip()
-            if content:
+            if content and not _is_noise_line(content):
                 response_lines.append(content)
         elif in_response and not _is_noise_line(line):
             response_lines.append(s)
@@ -168,7 +170,7 @@ def _parse_codex_turns(text: str) -> list[dict[str, Any]]:
         elif s.startswith(_RESPONSE_MARKER):
             in_response = True
             content = s.removeprefix(_RESPONSE_MARKER).strip()
-            if content:
+            if content and not _is_noise_line(content):
                 response_lines.append(content)
         elif in_response and not _is_noise_line(line):
             response_lines.append(s)
@@ -194,6 +196,7 @@ class CodexAdapter(AgentAdapter):
         idle_poll_seconds: float = 2.0,
         idle_after: int = 3,
         idle_timeout_seconds: float = 0.0,
+        session_mode: str = "ephemeral",
     ) -> None:
         self.begin_marker = begin_marker
         self.result_marker = result_marker
@@ -207,6 +210,7 @@ class CodexAdapter(AgentAdapter):
         self.idle_poll_seconds = idle_poll_seconds
         self.idle_after = idle_after
         self.idle_timeout_seconds = idle_timeout_seconds
+        self.session_mode = session_mode
 
     @property
     def kind(self) -> str:
@@ -229,7 +233,16 @@ class CodexAdapter(AgentAdapter):
 
     def ensure_bootstrapped(self, *, host: TerminalHost, session: TerminalSession, claimed: dict[str, Any]) -> None:  # noqa: ARG002
         if session.metadata.get("codex_bootstrapped"):
-            return
+            # In sticky mode, verify the TUI process is still alive before
+            # skipping re-bootstrap.  If it crashed between jobs, clear the
+            # flag and fall through to re-launch.
+            if self.tui_mode and hasattr(host, "is_foreground_tui"):
+                if not host.is_foreground_tui(session):
+                    session.metadata.pop("codex_bootstrapped", None)
+                else:
+                    return
+            else:
+                return
         health = host.health(session)
         if not health.healthy:
             raise RecoverableExecutionError(f"session unhealthy before bootstrap: {health.reason}")
@@ -239,6 +252,11 @@ class CodexAdapter(AgentAdapter):
             # with send-keys.  We therefore use a per-run launch path for tmux TUI
             # execution and skip persistent bootstrap here.
             if host.kind == "tmux":
+                session.metadata["codex_bootstrapped"] = True
+                return
+            # If the TUI is already running in this pane (e.g. reused session
+            # from a prior process), skip launching and just set the flag.
+            if hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
                 session.metadata["codex_bootstrapped"] = True
                 return
             host.send_text(session, self.cli_command, enter=True)
@@ -344,13 +362,43 @@ class CodexAdapter(AgentAdapter):
         """Return True when the visible screen shows the Codex input prompt."""
         return _PROMPT_MARKER in text
 
+    # Box-drawing characters and keywords that indicate a TUI is rendering
+    # (broader than just the › prompt marker — covers startup banners and
+    # welcome boxes that appear before the first › prompt is drawn).
+    _TUI_BOX_CHARS = set("\u256d\u256e\u256f\u2570\u2502\u2500")  # ╭╮╯╰│─
+    _TUI_CONTENT_HINTS = (
+        "codex",
+        "model:",
+        "directory:",
+        "context left",
+        "update available",
+    )
+
     def _looks_like_shell_returned(self, text: str) -> bool:
-        """Return True when the visible screen shows a shell prompt (CLI exited)."""
+        """Return True when the visible screen shows a shell prompt (CLI exited).
+
+        Checks the last 5 non-empty lines for shell prompt characters vs.
+        TUI indicators.  TUI indicators include the › prompt marker, box-
+        drawing characters, and known TUI content keywords.  This avoids
+        false positives during TUI startup when the shell prompt is still
+        visible in scrollback but the TUI has begun rendering.
+        """
         lines = text.strip().splitlines()
         tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
         has_tui = any(_PROMPT_MARKER in ln for ln in tail)
         has_shell = any(ln[0] in self._SHELL_MARKERS for ln in tail if ln)
-        return has_shell and not has_tui
+        if not has_shell:
+            return False
+        if has_tui:
+            return False
+        # Check for TUI box-drawing chars or content hints anywhere in tail
+        for ln in tail:
+            if any(ch in self._TUI_BOX_CHARS for ch in ln):
+                return False
+        lower_tail = "\n".join(tail).lower()
+        if any(hint in lower_tail for hint in self._TUI_CONTENT_HINTS):
+            return False
+        return True
 
     def _begin_line(self, run_id: str) -> str:
         return f"{self.begin_marker} {run_id}"
@@ -456,11 +504,17 @@ class CodexAdapter(AgentAdapter):
         if baseline_turns:
             baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
 
+        # Session reset logic depends on host kind and session_mode:
+        # - tmux always resets (send-keys unreliable with running TUI)
+        # - wezterm resets only in ephemeral mode; sticky keeps the session
         if host.kind == "tmux":
-            # Tmux works reliably here only when Codex is launched with the task
-            # prompt on the initial command line.  Reset the session to a clean
-            # shell before each run so we don't depend on persistent interactive
-            # Codex state inside tmux.
+            if self.session_mode == "sticky":
+                import logging
+                logging.getLogger(__name__).warning(
+                    "sticky session_mode is not supported on tmux — falling back to ephemeral"
+                )
+            session = host.reset_session(session)
+        elif self.session_mode == "ephemeral":
             session = host.reset_session(session)
 
         health = host.health(session)
@@ -491,11 +545,16 @@ class CodexAdapter(AgentAdapter):
         prev_screen = ""
         unchanged = 0
         was_busy = False
+        dispatch_time = monotonic()
         while monotonic() < deadline:
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
             snap = self._normalise_visible_screen(screen)
-            if self._looks_like_shell_returned(screen):
+            # Only check for shell return after the TUI has had time to
+            # render.  During the first few seconds the old shell prompt
+            # may still be visible in scrollback while the TUI boots.
+            startup_settled = was_busy or (monotonic() - dispatch_time > 5.0)
+            if startup_settled and self._looks_like_shell_returned(screen):
                 raise RecoverableExecutionError("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
                 host.send_text(session, self._gate_response(screen), enter=True)
@@ -532,6 +591,9 @@ class CodexAdapter(AgentAdapter):
         raw_output = _strip_ansi(host.read_visible(session))
         # Also update the cursor/accumulator for bookkeeping.
         read = host.read_output(session, cursor)
+        # Preserve the updated cursor so the next sticky run starts from
+        # this point instead of creating a fresh baseline.
+        session.metadata["restored_cursor"] = read.cursor
         cleaned = _clean_codex_tui_output(raw_output)
 
         if not cleaned.strip():
@@ -606,6 +668,7 @@ class CodexAdapter(AgentAdapter):
                     if status != "success":
                         raise RecoverableExecutionError(f"invalid codex terminal status for run {run_id}: {status or 'missing'}")
                     result_text = str(payload.get("result") or "").strip()
+                    session.metadata["restored_cursor"] = read.cursor
                     return ExecutionResult(
                         artifacts=[
                             ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
@@ -631,11 +694,16 @@ class CodexAdapter(AgentAdapter):
         session: TerminalSession,
         claimed: dict[str, Any],
         attempt: int,  # noqa: ARG002
-        error: Exception,  # noqa: ARG002
+        error: Exception,
         supervisor: "RuntimeSupervisor",  # noqa: ARG002
     ) -> None:
         health = host.health(session)
         if not health.healthy:
+            return
+        # If Codex exited (crashed), clear the bootstrap flag so the
+        # supervisor retry path will re-launch it via ensure_bootstrapped().
+        if self.tui_mode and "exited during execution" in str(error):
+            session.metadata.pop("codex_bootstrapped", None)
             return
         host.interrupt(session)
         sleep(max(self.poll_interval_seconds, 0.1))

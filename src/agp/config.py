@@ -63,6 +63,7 @@ class Settings(BaseSettings):
     codex_idle_poll_seconds: float = 2.0
     codex_idle_after: int = 3
     codex_idle_timeout_seconds: float = 0.0
+    codex_session_mode: str = "ephemeral"
     wezterm_default_cwd: str = ""
     wezterm_scrollback_lines: int = 5000
     tmux_default_cwd: str = ""

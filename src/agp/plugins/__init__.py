@@ -46,5 +46,6 @@ def build_agent_adapter(kind: str, **kwargs: Any):
             idle_poll_seconds=kwargs.get("idle_poll_seconds", settings.codex_idle_poll_seconds),
             idle_after=kwargs.get("idle_after", settings.codex_idle_after),
             idle_timeout_seconds=kwargs.get("idle_timeout_seconds", settings.codex_idle_timeout_seconds),
+            session_mode=kwargs.get("session_mode", settings.codex_session_mode),
         )
     raise ValueError(f"unsupported agent adapter kind: {kind}")
