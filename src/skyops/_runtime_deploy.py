@@ -26,8 +26,11 @@ def _runtime_env(
     *,
     workspace_ref: str | None = None,
     artifact_backend: str = "http",
+    runtime_token: str | None = None,
 ) -> dict[str, str]:
     env = {"AGP_ARTIFACT_BACKEND": artifact_backend}
+    if runtime_token:
+        env["AGP_RUNTIME_BEARER_TOKEN"] = runtime_token
     if workspace_ref:
         env["AGP_TMUX_DEFAULT_CWD"] = workspace_ref
         env["AGP_WEZTERM_DEFAULT_CWD"] = workspace_ref
@@ -35,7 +38,36 @@ def _runtime_env(
 
 
 def _systemd_env_line(key: str, value: str) -> str:
-    return f'Environment="{key}={value}"'
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'Environment="{key}={escaped}"'
+
+
+def _prerequisite_checks(host_kind: str, adapter_kind: str) -> str:
+    lines: list[str] = []
+    if host_kind == "tmux":
+        lines.extend([
+            'if ! command -v tmux &>/dev/null; then',
+            '    echo "ERROR: tmux is required but not installed." >&2',
+            "    exit 1",
+            "fi",
+        ])
+    elif host_kind == "wezterm":
+        lines.extend([
+            'if ! command -v wezterm &>/dev/null; then',
+            '    echo "ERROR: wezterm is required but not installed." >&2',
+            "    exit 1",
+            "fi",
+        ])
+    if adapter_kind == "codex":
+        lines.extend([
+            'CODEX_BIN="${AGP_CODEX_CLI_COMMAND:-codex}"',
+            'CODEX_BIN="${CODEX_BIN%% *}"',
+            'if ! command -v "${CODEX_BIN}" &>/dev/null; then',
+            '    echo "ERROR: Codex CLI is required but not installed." >&2',
+            "    exit 1",
+            "fi",
+        ])
+    return "\n".join(lines)
 
 
 def _docker_reachable_server_url(server_url: str) -> tuple[str, bool]:
@@ -126,7 +158,13 @@ def _build_docker_run(
     prepare_block = _build_prepare_script(prepare_commands)
     if not prepare_block:
         return docker_run
-    return f"{prepare_block}{docker_run}"
+    return textwrap.dedent(f"""\
+        #!/usr/bin/env bash
+        set -euo pipefail
+
+        {prepare_block}\
+        {docker_run}
+    """)
 
 
 def _build_prepare_script(prepare_commands: list[str]) -> str:
@@ -153,7 +191,7 @@ def _build_script(
         host_kind,
         adapter_kind,
         agent_id,
-        env_vars=_runtime_env(workspace_ref=workspace_ref),
+        env_vars=_runtime_env(workspace_ref=workspace_ref, runtime_token=runtime_token),
     )
 
     # Parse host and port from server_url for env vars
@@ -161,15 +199,8 @@ def _build_script(
     agp_host = parsed.hostname or "127.0.0.1"
     agp_port = str(parsed.port or 7860)
 
-    tmux_note = ""
-    if host_kind == "tmux":
-        tmux_note = textwrap.dedent("""\
-            # NOTE: tmux is required for host-kind=tmux
-            if ! command -v tmux &>/dev/null; then
-                echo "ERROR: tmux is required but not installed." >&2
-                exit 1
-            fi
-        """)
+    prereq_checks = _prerequisite_checks(host_kind, adapter_kind)
+    prereq_block = f"{prereq_checks}\n" if prereq_checks else ""
 
     token_export = ""
     if runtime_token:
@@ -207,7 +238,7 @@ def _build_script(
             exit 1
         fi
 
-        {tmux_note}# --- Install agp ---
+        {prereq_block}# --- Install agp ---
         python3 -m pip install 'agp[server]'
         # NOTE: If using a custom package index, replace the line above with:
         #   python3 -m pip install 'agp[server]' --index-url https://your-custom-index/simple/
@@ -318,7 +349,7 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
                 _build_command(
                     runtime_id, resolved_url, resolved_host_kind,
                     resolved_adapter_kind, agent_id,
-                    env_vars=_runtime_env(workspace_ref=workspace_ref),
+                    env_vars=_runtime_env(workspace_ref=workspace_ref, runtime_token=runtime_token),
                 )
             )
         elif fmt == "script":

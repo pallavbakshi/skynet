@@ -56,6 +56,7 @@ def workspace_validate(
         raise typer.Exit(1) from exc
     mode = resolved["workspace_mode"]
     managed_targets = set(resolved.get("managed_mount_targets", []))
+    remote_host_profile = host_profile is not None
     checks: list[dict[str, object]] = []
 
     workspace_ref = resolved.get("workspace_ref")
@@ -78,7 +79,15 @@ def workspace_validate(
                     "mount": mount,
                     "path": source,
                     "ok": exists,
-                    "reason": None if exists else "shared_fs source path does not exist",
+                    "required_now": not remote_host_profile,
+                    "verified_locally": not remote_host_profile,
+                    "reason": None
+                    if exists
+                    else (
+                        "path not verified on the operator host for the selected host_profile"
+                        if remote_host_profile
+                        else "shared_fs source path does not exist"
+                    ),
                 }
             )
     else:
@@ -95,7 +104,7 @@ def workspace_validate(
             source = _mount_source(mount)
             target = _mount_target(mount)
             exists = Path(source).exists()
-            required_now = target not in managed_targets
+            required_now = (target not in managed_targets) and not remote_host_profile
             checks.append(
                 {
                     "kind": "mount_source",
@@ -103,9 +112,13 @@ def workspace_validate(
                     "path": source,
                     "ok": exists,
                     "required_now": required_now,
+                    "verified_locally": not remote_host_profile,
                     "reason": None
                     if exists
                     else (
+                        "path not verified on the operator host for the selected host_profile"
+                        if remote_host_profile
+                        else
                         "path will be created or prepared by deploy script"
                         if not required_now
                         else "required mount source path does not exist"

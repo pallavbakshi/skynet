@@ -15,6 +15,10 @@ monitor_app = typer.Typer(help="Monitoring and observability commands.")
 logs_app = typer.Typer(help="Log viewing commands.")
 
 
+class DockerCommandTimeout(RuntimeError):
+    """Raised when Docker inspection commands time out."""
+
+
 def _client():
     return build_client()
 
@@ -24,16 +28,22 @@ def _emit(data: object) -> None:
 
 
 def _run_output(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(args, capture_output=True, text=True, check=False)
+    return subprocess.run(args, capture_output=True, text=True, check=False, timeout=10)
 
 
 def _docker_runtime_container(project: str, compose_file: str, runtime_id: str, runtime_hostname: str | None = None) -> str | None:
-    result = _run_output("docker", "compose", "-f", compose_file, "-p", project, "ps", "-q")
+    try:
+        result = _run_output("docker", "compose", "-f", compose_file, "-p", project, "ps", "-q")
+    except subprocess.TimeoutExpired:
+        raise DockerCommandTimeout("docker compose ps timed out") from None
     if result.returncode != 0:
         return None
     container_ids = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     for container_id in container_ids:
-        inspect = _run_output("docker", "inspect", container_id)
+        try:
+            inspect = _run_output("docker", "inspect", container_id)
+        except subprocess.TimeoutExpired:
+            raise DockerCommandTimeout(f"docker inspect timed out for container {container_id}") from None
         if inspect.returncode != 0:
             continue
         try:
@@ -59,6 +69,12 @@ def _docker_runtime_container(project: str, compose_file: str, runtime_id: str, 
         ):
             return container_id
     return None
+
+
+def _run_streaming(cmd: list[str]) -> None:
+    result = subprocess.run(cmd, check=False)
+    if result.returncode != 0:
+        raise typer.Exit(result.returncode or 1)
 
 
 @monitor_app.command("metrics")
@@ -131,7 +147,7 @@ def logs_control_plane(
             "-p", cfg.stack.project_name,
             "logs", "--follow", "control-plane",
         ]
-        subprocess.run(cmd)
+        _run_streaming(cmd)
         return
 
     with _client() as client:
@@ -154,12 +170,16 @@ def logs_runtime(
                 runtime_data = client.get_runtime(runtime_id)
         except Exception:
             runtime_data = None
-        container_id = _docker_runtime_container(
-            cfg.stack.project_name,
-            cfg.stack.compose_file,
-            runtime_id,
-            runtime_hostname=runtime_data.get("hostname") if runtime_data else None,
-        )
+        try:
+            container_id = _docker_runtime_container(
+                cfg.stack.project_name,
+                cfg.stack.compose_file,
+                runtime_id,
+                runtime_hostname=runtime_data.get("hostname") if runtime_data else None,
+            )
+        except DockerCommandTimeout as exc:
+            typer.echo(f"Docker lookup timed out while resolving runtime {runtime_id}: {exc}", err=True)
+            raise typer.Exit(1) from exc
         if container_id is None:
             typer.echo(
                 f"Could not map runtime {runtime_id} to a Docker container in compose project {cfg.stack.project_name}.",
@@ -167,7 +187,7 @@ def logs_runtime(
             )
             raise typer.Exit(1)
         cmd = ["docker", "logs", "--follow", container_id]
-        subprocess.run(cmd)
+        _run_streaming(cmd)
         return
 
     with _client() as client:
@@ -193,7 +213,7 @@ def logs_service(
         if follow:
             cmd.append("--follow")
         cmd.append(service)
-        subprocess.run(cmd)
+        _run_streaming(cmd)
     else:
         # Bare-metal: try to tail JSONL log files
         from agp.config import settings
@@ -206,7 +226,7 @@ def logs_service(
         if follow:
             cmd.append("-f")
         cmd.append(str(log_file))
-        subprocess.run(cmd)
+        _run_streaming(cmd)
 
 
 @logs_app.command("prune")

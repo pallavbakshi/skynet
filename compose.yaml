@@ -31,6 +31,8 @@ services:
       AGP_ARTIFACT_BACKEND: registryfs
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
+      AGP_OPERATOR_BEARER_TOKEN: ${AGP_OPERATOR_BEARER_TOKEN:-}
+      AGP_RUNTIME_BEARER_TOKEN: ${AGP_RUNTIME_BEARER_TOKEN:-}
     volumes:
       - agp_artifacts:/artifacts
       - agp_logs:/logs
@@ -61,6 +63,7 @@ services:
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
       AGP_SERVER_URL: http://control-plane:7860
+      AGP_OPERATOR_TOKEN: ${AGP_OPERATOR_TOKEN:-}
       AGP_BOOTSTRAP_CAPABILITY_ID: cap_python
       AGP_BOOTSTRAP_AGENT_ID: agt_local
       AGP_BOOTSTRAP_RUNTIME_ID: rtm_local
@@ -85,6 +88,7 @@ services:
       AGP_ARTIFACT_ROOT: /artifacts
       AGP_LOG_ROOT: /logs
       AGP_SERVER_URL: http://control-plane:7860
+      AGP_RUNTIME_BEARER_TOKEN: ${AGP_RUNTIME_BEARER_TOKEN:-}
       AGP_RUNTIME_ID: rtm_local
       AGP_RUNTIME_HOSTNAME: runtime-1
       AGP_RUNTIME_AGENT_ID: agt_local

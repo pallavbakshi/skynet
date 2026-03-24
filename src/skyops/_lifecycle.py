@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -76,7 +77,12 @@ def _pid_directory(cfg: SkyopsConfig) -> Path:
     return pid_dir(base)
 
 
-def _start_bg(cmd: list[str], label: str, pid_directory: Path | None = None) -> subprocess.Popen:
+def _start_bg(
+    cmd: list[str],
+    label: str,
+    pid_directory: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> subprocess.Popen:
     typer.echo(f"Starting {label}: {' '.join(cmd)}")
     log_path = None
     stdout = subprocess.DEVNULL
@@ -89,11 +95,28 @@ def _start_bg(cmd: list[str], label: str, pid_directory: Path | None = None) -> 
         cmd,
         stdout=stdout,
         stderr=stderr,
+        env=env,
         start_new_session=True,
     )
     if pid_directory is not None:
         write_pidfile(pid_directory, label, proc.pid)
     return proc
+
+
+def _agp_process_env(cfg: SkyopsConfig) -> dict[str, str]:
+    env = os.environ.copy()
+    env["AGP_DATABASE_URL"] = cfg.database.url
+    env["AGP_REDIS_URL"] = cfg.redis.url
+    env["AGP_S3_ENDPOINT_URL"] = cfg.s3.endpoint_url
+    env["AGP_S3_ACCESS_KEY_ID"] = cfg.s3.access_key_id
+    env["AGP_S3_SECRET_ACCESS_KEY"] = cfg.s3.secret_access_key
+    env["AGP_S3_BUCKET"] = cfg.s3.bucket
+    if cfg.security.operator_token:
+        env["AGP_OPERATOR_BEARER_TOKEN"] = cfg.security.operator_token
+        env["AGP_OPERATOR_TOKEN"] = cfg.security.operator_token
+    if cfg.security.runtime_token:
+        env["AGP_RUNTIME_BEARER_TOKEN"] = cfg.security.runtime_token
+    return env
 
 
 def _wait_tcp(host: str, port: int, label: str, timeout: float = 30.0) -> None:
@@ -120,16 +143,17 @@ def _bare_metal_start_service(cfg: SkyopsConfig, service: str, host: str, port: 
     """Start a single bare-metal service by name."""
     server_url = resolve_server_url(cfg)
     pdir = _pid_directory(cfg)
+    agp_env = _agp_process_env(cfg)
     service_map = {
         "control-plane": lambda: (
-            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir),
+            _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir, env=agp_env),
             _wait_http(f"{server_url}/health", "control-plane"),
         ),
         "lease-sweeper": lambda: _start_bg(
-            ["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir,
+            ["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir, env=agp_env,
         ),
         "runtime-sweeper": lambda: _start_bg(
-            ["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir,
+            ["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir, env=agp_env,
         ),
         "runtime": lambda: _start_bg(
             ["agp", "runtime-work-loop", "rtm_local",
@@ -137,7 +161,7 @@ def _bare_metal_start_service(cfg: SkyopsConfig, service: str, host: str, port: 
              "--agent-id", next(iter(cfg.agents), "agt_local"),
              "--host-kind", cfg.runtime.host_kind,
              "--adapter-kind", cfg.runtime.adapter_kind],
-            "runtime", pdir,
+            "runtime", pdir, env=agp_env,
         ),
         "postgres": lambda: typer.echo("postgres must be started externally in bare-metal mode"),
         "redis": lambda: typer.echo("redis must be started externally in bare-metal mode"),
@@ -169,6 +193,7 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
 
     pdir = _pid_directory(cfg)
     server_url = resolve_server_url(cfg)
+    agp_env = _agp_process_env(cfg)
 
     # Derive hosts from config URLs (not hardcoded)
     infra_checks = [
@@ -190,10 +215,10 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
     # Init DB (only on first boot)
     if first_boot:
         typer.echo("First boot detected — initializing database...")
-        subprocess.run(["agp", "initdb"], check=True)
+        subprocess.run(["agp", "initdb"], check=True, env=agp_env)
 
     # Start control plane
-    _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir)
+    _start_bg(["agp", "serve", "--host", host, "--port", str(port)], "control-plane", pdir, env=agp_env)
     _wait_http(f"{server_url}/health", "control-plane")
 
     # Seed on first boot
@@ -207,8 +232,8 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
         _mark_initialized(cfg)
 
     # Start sweepers
-    _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir)
-    _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir)
+    _start_bg(["agp", "sweep-loop", "--interval-seconds", "5"], "lease-sweeper", pdir, env=agp_env)
+    _start_bg(["agp", "sweep-runtimes-loop", "--interval-seconds", "10"], "runtime-sweeper", pdir, env=agp_env)
 
     # Start runtime work loop if agents are configured
     if cfg.agents:
@@ -220,7 +245,7 @@ def _bare_metal_up(cfg: SkyopsConfig, service: str | None) -> None:
              "--agent-id", agent_id,
              "--host-kind", cfg.runtime.host_kind,
              "--adapter-kind", cfg.runtime.adapter_kind],
-            "runtime", pdir,
+            "runtime", pdir, env=agp_env,
         )
 
     typer.echo("Stack is up.")
@@ -305,7 +330,7 @@ def ps() -> None:
     cfg = load_config()
     if cfg.stack.mode == "docker":
         cmd = _compose_cmd(cfg) + ["ps", "-a"]
-        subprocess.run(cmd)
+        subprocess.run(cmd, check=True)
     else:
         pdir = _pid_directory(cfg)
         services = list_pidfiles(pdir)

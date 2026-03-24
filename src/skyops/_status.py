@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import typer
 
+from agp.enums import AgentStatus
 from skyops.config import SkyopsConfig, find_config, load_config
 
 status_app = typer.Typer(help="Show AGP stack service status.")
@@ -173,7 +174,14 @@ def _platform_summary(cfg: SkyopsConfig) -> list[str]:
             lines.append(f"  Platform:  {total} jobs total, {running} running, {queued} queued")
 
             agents = client.list_agents(limit=200)
-            agent_names = [a["agent_id"] for a in agents.get("items", []) if a.get("status") == "active"]
+            active_statuses = {
+                AgentStatus.PROVISIONING.value,
+                AgentStatus.IDLE.value,
+                AgentStatus.BUSY.value,
+                AgentStatus.DEGRADED.value,
+                AgentStatus.DRAINING.value,
+            }
+            agent_names = [a["agent_id"] for a in agents.get("items", []) if a.get("status") in active_statuses]
             lines.append(f"  Agents:    {len(agent_names)} active ({', '.join(agent_names[:5])})")
     except Exception:
         pass
@@ -221,14 +229,12 @@ def status(ctx: typer.Context) -> None:
 
     if mode == "docker":
         services = _docker_compose_services(cfg)
+        summary_lines = _platform_summary(cfg)
         if not services:
-            # Fallback to port probing if compose ps fails
-            services = _bare_metal_services(cfg)
+            summary_lines = ["  Docker:     compose status unavailable or returned no services", *summary_lines]
     else:
         services = _bare_metal_services(cfg)
-
-    # Get platform summary if control plane is running
-    summary_lines = _platform_summary(cfg)
+        summary_lines = _platform_summary(cfg)
 
     typer.echo("")
     typer.echo(_format_table(services, mode, config_path, summary_lines))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import textwrap
 import unittest
 from pathlib import Path
@@ -547,6 +548,20 @@ class TestRuntimeDeploy(unittest.TestCase):
         self.assertIn('mkdir -p "/srv/agp/git"', unit)
         self.assertNotIn("ExecStart=AGP_ARTIFACT_BACKEND=http", unit)
 
+    def test_build_systemd_escapes_quoted_values(self):
+        unit = _build_systemd(
+            runtime_id="rtm_orc",
+            server_url='http://control-plane:7860/"bad"',
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_orc",
+            runtime_token='tok"bad',
+            workspace_ref='/workspace/"main"',
+            prepare_commands=[],
+        )
+        self.assertIn('Environment="AGP_RUNTIME_BEARER_TOKEN=tok\\"bad"', unit)
+        self.assertIn('Environment="AGP_TMUX_DEFAULT_CWD=/workspace/\\"main\\""', unit)
+
     def test_build_docker_run_includes_prepare_commands(self):
         cmd = _build_docker_run(
             runtime_id="rtm_feature_a",
@@ -561,6 +576,7 @@ class TestRuntimeDeploy(unittest.TestCase):
             prepare_commands=['mkdir -p "/srv/agp/worktrees"', 'git -C "/srv/agp/git/skynet" fetch --all --prune'],
         )
         self.assertIn("# --- Prepare workspace ---", cmd)
+        self.assertIn("set -euo pipefail", cmd)
         self.assertIn('mkdir -p "/srv/agp/worktrees"', cmd)
         self.assertIn("docker run", cmd)
 
@@ -573,6 +589,14 @@ class TestRuntimeDeploy(unittest.TestCase):
             )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("agent not found", result.output)
+
+    def test_runtime_deploy_command_includes_runtime_token(self):
+        cfg = SkyopsConfig()
+        cfg.security.runtime_token = "rtok"
+        with patch("skyops._runtime_deploy.load_config", return_value=cfg):
+            result = runner.invoke(app, ["runtime", "deploy", "rtm_local", "--format", "command"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("AGP_RUNTIME_BEARER_TOKEN=rtok", result.output)
 
 
 class TestSkyopsClient(unittest.TestCase):
@@ -773,7 +797,7 @@ class TestStatus(unittest.TestCase):
                 },
                 "queue": {"depth": 1},
             },
-            list_agents={"items": [{"agent_id": "agt_local", "status": "active"}]},
+            list_agents={"items": [{"agent_id": "agt_local", "status": "idle"}]},
         )
         with patch("skyops._status.load_config", return_value=cfg), \
              patch("skyops._status._bare_metal_services", return_value=[]), \
@@ -875,6 +899,20 @@ class TestDbSeed(unittest.TestCase):
                     result = runner.invoke(app, ["db", "init"])
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("initialized", result.output.lower())
+
+    def test_db_init_bare_metal_uses_configured_database_url(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+        cfg.database.url = "postgresql+psycopg://agp:agp@db:5432/agp"
+        with patch("skyops._db.load_config", return_value=cfg), \
+             patch("skyops._db.subprocess.run") as mock_run:
+            mock_run.return_value = None
+            result = runner.invoke(app, ["db", "init"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            mock_run.call_args.kwargs["env"]["AGP_DATABASE_URL"],
+            "postgresql+psycopg://agp:agp@db:5432/agp",
+        )
 
 
 class TestHealth(unittest.TestCase):
@@ -1135,6 +1173,15 @@ class TestMonitorEvents(unittest.TestCase):
         mock_client.get_job_events.assert_called_once()
 
 
+class TestMonitorDockerHelpers(unittest.TestCase):
+    def test_docker_runtime_container_raises_on_timeout(self):
+        from skyops._monitor import DockerCommandTimeout, _docker_runtime_container
+
+        with patch("skyops._monitor._run_output", side_effect=subprocess.TimeoutExpired(cmd=["docker"], timeout=10)):
+            with self.assertRaises(DockerCommandTimeout):
+                _docker_runtime_container("agp", "compose.yaml", "rtm_local")
+
+
 class TestUpgradeStatus(unittest.TestCase):
     def test_upgrade_status(self):
         with patch("agp._ops_helpers.get_upgrade_status", return_value={
@@ -1221,6 +1268,20 @@ class TestDbMigrate(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("version", result.output.lower())
 
+    def test_db_migrate_bare_metal_uses_configured_database_url(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "bare-metal"
+        cfg.database.url = "postgresql+psycopg://agp:agp@db:5432/agp"
+        completed = unittest.mock.Mock(stdout='{"applied":[],"current_version":"0001_initial"}')
+        with patch("skyops._db.load_config", return_value=cfg), \
+             patch("skyops._db.subprocess.run", return_value=completed) as mock_run:
+            result = runner.invoke(app, ["db", "migrate"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            mock_run.call_args.kwargs["env"]["AGP_DATABASE_URL"],
+            "postgresql+psycopg://agp:agp@db:5432/agp",
+        )
+
 
 class TestBackupList(unittest.TestCase):
     def test_backup_list_no_dir(self):
@@ -1288,6 +1349,20 @@ class TestJobSubcommands(unittest.TestCase):
         self.assertIn("block", result.output)
         self.assertIn("unblock", result.output)
 
+    def test_job_block_docker_execs_into_control_plane(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+        proc = unittest.mock.Mock(returncode=0)
+        with patch("skyops._queue.load_config", return_value=cfg), \
+             patch("skyops._queue.subprocess.run", return_value=proc) as mock_run:
+            result = runner.invoke(app, ["job", "block", "job_123"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[:7], ["docker", "compose", "-f", "compose.yaml", "-p", "agp", "exec"])
+        self.assertIn("control-plane", cmd)
+
 
 class TestQueueRedrive(unittest.TestCase):
     def test_queue_redrive_subcommand_exists(self):
@@ -1296,6 +1371,20 @@ class TestQueueRedrive(unittest.TestCase):
         self.assertIn("redrive", result.output)
         self.assertIn("reconstruct", result.output)
         self.assertIn("inspect", result.output)
+
+    def test_queue_redrive_docker_execs_into_control_plane(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+        proc = unittest.mock.Mock(returncode=0)
+        with patch("skyops._queue.load_config", return_value=cfg), \
+             patch("skyops._queue.subprocess.run", return_value=proc) as mock_run:
+            result = runner.invoke(app, ["queue", "redrive"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        cmd = mock_run.call_args.args[0]
+        self.assertEqual(cmd[:7], ["docker", "compose", "-f", "compose.yaml", "-p", "agp", "exec"])
+        self.assertIn("control-plane", cmd)
 
 
 class TestQueueInspect(unittest.TestCase):
@@ -1444,6 +1533,26 @@ class TestRuntimeDebug(unittest.TestCase):
         self.assertEqual(observed["token"], "rtok")
         self.assertEqual(observed["server_url"], "http://cp:7860")
 
+    def test_runtime_work_loop_empty_env_token_falls_back_to_config(self):
+        cfg = SkyopsConfig()
+        cfg.security.runtime_token = "rtok"
+        observed: dict[str, str | None] = {}
+
+        def _fake_work_loop(**kwargs):
+            import os
+
+            observed["token"] = os.environ.get("AGP_RUNTIME_BEARER_TOKEN")
+            observed["server_url"] = kwargs["server_url"]
+
+        with patch.dict("os.environ", {"AGP_RUNTIME_BEARER_TOKEN": ""}, clear=False), \
+             patch("skyops._runtime_debug.load_config", return_value=cfg), \
+             patch("skyops._runtime_debug.build_profile", return_value=type("Profile", (), {"server_url": "http://cp:7860"})()), \
+             patch("agp.cli.runtime_work_loop", side_effect=_fake_work_loop):
+            result = runner.invoke(app, ["runtime", "work-loop", "rtm_local"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(observed["token"], "rtok")
+        self.assertEqual(observed["server_url"], "http://cp:7860")
+
 
 class TestWorkspaceCommands(unittest.TestCase):
     def test_workspace_resolve_command(self):
@@ -1469,6 +1578,18 @@ class TestWorkspaceCommands(unittest.TestCase):
             result = runner.invoke(app, ["workspace", "validate", "agt_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn('"ok": true', result.output.lower())
+
+    def test_workspace_validate_explicit_host_profile_is_not_authoritative_locally(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {"server-a": {"mount_sources": {"repo": "/srv/repo"}}},
+            "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
+            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+        })
+        with patch("skyops._workspace.load_config", return_value=cfg), \
+             patch("skyops._workspace.Path.exists", return_value=False):
+            result = runner.invoke(app, ["workspace", "validate", "agt_local", "--host-profile", "server-a"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn('"verified_locally": false', result.output.lower())
 
     def test_workspace_validate_git_requires_missing_supplemental_mount(self):
         cfg = SkyopsConfig.from_dict({
@@ -1591,6 +1712,32 @@ class TestLogsFollow(unittest.TestCase):
         calls = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(calls[-1], ["docker", "logs", "--follow", "cid123"])
 
+    def test_logs_runtime_follow_reports_timeout_separately(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+
+        with patch("skyops._monitor.load_config", return_value=cfg), \
+             patch("skyops._monitor._client", side_effect=RuntimeError("cp unavailable")), \
+             patch(
+                 "skyops._monitor._docker_runtime_container",
+                 side_effect=__import__("skyops._monitor", fromlist=["DockerCommandTimeout"]).DockerCommandTimeout("docker compose ps timed out"),
+             ):
+            result = runner.invoke(app, ["logs", "runtime", "rtm_local", "--follow"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("timed out", result.output.lower())
+
+    def test_logs_control_plane_follow_exits_nonzero_on_subprocess_failure(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        cfg.stack.compose_file = "compose.yaml"
+        cfg.stack.project_name = "agp"
+        with patch("skyops._monitor.load_config", return_value=cfg), \
+             patch("skyops._monitor.subprocess.run", return_value=unittest.mock.Mock(returncode=7)):
+            result = runner.invoke(app, ["logs", "control-plane", "--follow"])
+        self.assertEqual(result.exit_code, 7)
+
 
 class TestInitChecksDeps(unittest.TestCase):
     def test_init_reports_deps(self):
@@ -1615,6 +1762,14 @@ class TestPsCommand(unittest.TestCase):
                     mock_sub.run.return_value = None
                     result = runner.invoke(app, ["ps"])
         self.assertEqual(result.exit_code, 0, result.output)
+
+    def test_ps_docker_mode_nonzero_exits(self):
+        cfg = SkyopsConfig()
+        cfg.stack.mode = "docker"
+        with patch("skyops._lifecycle.load_config", return_value=cfg), \
+             patch("skyops._lifecycle.subprocess.run", side_effect=subprocess.CalledProcessError(2, ["docker", "compose", "ps"])):
+            result = runner.invoke(app, ["ps"])
+        self.assertNotEqual(result.exit_code, 0)
 
 
 class TestFirstBootDetection(unittest.TestCase):

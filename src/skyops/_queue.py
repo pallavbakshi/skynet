@@ -19,6 +19,18 @@ def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
 
 
+def _docker_exec_python(code: str) -> None:
+    cfg = load_config()
+    cmd = [
+        "docker", "compose",
+        "-f", cfg.stack.compose_file,
+        "-p", cfg.stack.project_name,
+        "exec", "-T", "control-plane",
+        "python", "-c", code,
+    ]
+    subprocess.run(cmd, check=True, timeout=30)
+
+
 def _redis_list(client, key: str) -> list[str]:
     return list(getattr(client, "lrange", lambda k, s, e: [])(key, 0, -1))
 
@@ -154,7 +166,7 @@ def queue_inspect() -> None:
                 "print(json.dumps(_inspect_queue_state(), indent=2, sort_keys=True, default=str))"
             ),
         ]
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, timeout=30)
         return
     _emit(_inspect_queue_state())
 
@@ -162,6 +174,14 @@ def queue_inspect() -> None:
 @queue_app.command("reconstruct")
 def queue_reconstruct() -> None:
     """Rebuild queue from current DB state."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "import json; "
+            "from agp._ops_helpers import reconstruct_queue_from_state; "
+            "print(json.dumps(reconstruct_queue_from_state(), indent=2, sort_keys=True, default=str))"
+        )
+        return
     from agp._ops_helpers import reconstruct_queue_from_state
 
     result = reconstruct_queue_from_state()
@@ -174,6 +194,21 @@ def queue_redrive(
     max_attempts: int = typer.Option(3, "--max-attempts", help="Max delivery attempts."),
 ) -> None:
     """Redrive stale in-flight deliveries."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "import json; "
+            "from agp.config import settings; "
+            "from agp.db import SessionLocal; "
+            "from agp.queue_backend import get_queue_backend; "
+            f"backend=get_queue_backend(settings.queue_backend); "
+            "session=SessionLocal(); "
+            f"result=backend.redrive_stale_deliveries(session, visibility_timeout_seconds={visibility_timeout}, max_delivery_attempts={max_attempts}); "
+            "session.commit(); "
+            "session.close(); "
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+        )
+        return
     from agp.config import settings
     from agp.db import SessionLocal
     from agp.queue_backend import get_queue_backend
@@ -198,6 +233,19 @@ def job_block(
     reason: str = typer.Option("operator-block", "--reason", "-r", help="Block reason."),
 ) -> None:
     """Block a queued job."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "from agp.control_plane import _block_job, _require_job; "
+            "from agp.db import SessionLocal; "
+            "session=SessionLocal(); "
+            f"job=_require_job(session, job_id={job_id!r}); "
+            f"_block_job(session, job=job, reason={reason!r}); "
+            "session.commit(); "
+            "session.close(); "
+            f"print('Job {job_id} blocked.')"
+        )
+        return
     from agp.control_plane import _block_job, _require_job
     from agp.db import SessionLocal
 
@@ -217,6 +265,19 @@ def job_unblock(
     reason: str = typer.Option("operator-unblock", "--reason", "-r", help="Unblock reason."),
 ) -> None:
     """Unblock a blocked job."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "from agp.control_plane import _unblock_job, _require_job; "
+            "from agp.db import SessionLocal; "
+            "session=SessionLocal(); "
+            f"job=_require_job(session, job_id={job_id!r}); "
+            f"_unblock_job(session, job=job, reason={reason!r}); "
+            "session.commit(); "
+            "session.close(); "
+            f"print('Job {job_id} unblocked.')"
+        )
+        return
     from agp.control_plane import _unblock_job, _require_job
     from agp.db import SessionLocal
 
@@ -233,6 +294,18 @@ def job_unblock(
 @sweep_app.command("leases")
 def sweep_leases() -> None:
     """One-shot sweep of expired leases."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "import json; "
+            "from agp.control_plane import sweep_expired_leases; "
+            "from agp.db import SessionLocal; "
+            "session=SessionLocal(); "
+            "result=sweep_expired_leases(session); "
+            "session.close(); "
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+        )
+        return
     from agp.control_plane import sweep_expired_leases
     from agp.db import SessionLocal
 
@@ -260,6 +333,18 @@ def sweep_runtimes(
     stale_timeout: int = typer.Option(90, "--timeout", help="Stale timeout in seconds."),
 ) -> None:
     """One-shot sweep of stale runtimes."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        _docker_exec_python(
+            "import json; "
+            "from agp.control_plane import sweep_stale_runtimes; "
+            "from agp.db import SessionLocal; "
+            "session=SessionLocal(); "
+            f"result=sweep_stale_runtimes(session, stale_timeout_seconds={stale_timeout}); "
+            "session.close(); "
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))"
+        )
+        return
     from agp.control_plane import sweep_stale_runtimes
     from agp.db import SessionLocal
 

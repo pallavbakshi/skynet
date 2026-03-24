@@ -18,6 +18,13 @@ def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
 
 
+def _runtime_bearer_token(cfg) -> str | None:
+    token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN")
+    if token:
+        return token
+    return cfg.security.runtime_token or None
+
+
 @runtime_debug_app.command("list")
 def runtime_list(
     status: str | None = typer.Option(None, "--status", help="Filter by runtime status."),
@@ -54,7 +61,7 @@ def runtime_register(
 
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
-    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
+    runtime_token = _runtime_bearer_token(cfg)
     server_url = build_profile(cfg).server_url
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
@@ -82,7 +89,7 @@ def runtime_claim(
 
     cfg = load_config()
     actual_hostname = hostname or socket.gethostname()
-    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
+    runtime_token = _runtime_bearer_token(cfg)
     server_url = build_profile(cfg).server_url
     identity = RuntimeIdentity(
         runtime_id=runtime_id,
@@ -117,7 +124,7 @@ def runtime_work_once(
     cfg = load_config()
     resolved_url = server_url or build_profile(cfg).server_url
     actual_hostname = hostname or socket.gethostname()
-    runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or cfg.security.runtime_token or None
+    runtime_token = _runtime_bearer_token(cfg)
     client = RuntimeClient(
         RuntimeIdentity(
             runtime_id=runtime_id,
@@ -168,9 +175,10 @@ def runtime_work_loop(
 
     cfg = load_config()
     resolved_url = server_url or build_profile(cfg).server_url
+    had_previous_token = "AGP_RUNTIME_BEARER_TOKEN" in os.environ
     previous_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN")
-    configured_token = cfg.security.runtime_token or None
-    if previous_token is None and configured_token:
+    configured_token = _runtime_bearer_token(cfg)
+    if not previous_token and configured_token:
         os.environ["AGP_RUNTIME_BEARER_TOKEN"] = configured_token
     try:
         agp_runtime_work_loop(
@@ -187,5 +195,7 @@ def runtime_work_loop(
             adapter_kind=adapter_kind,
         )
     finally:
-        if previous_token is None:
+        if not had_previous_token:
             os.environ.pop("AGP_RUNTIME_BEARER_TOKEN", None)
+        elif previous_token != os.environ.get("AGP_RUNTIME_BEARER_TOKEN"):
+            os.environ["AGP_RUNTIME_BEARER_TOKEN"] = previous_token or ""
