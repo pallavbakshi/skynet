@@ -70,7 +70,14 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
 
 @router.patch("/agents/{agent_id}", response_model=OkResponse[AgentResponse])
 def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends(get_db)) -> dict:
-    agent = agent_patch_service(db, agent_id=agent_id, workspace_ref=request.workspace_ref)
+    workspace_ref = request.workspace_ref if "workspace_ref" in request.model_fields_set else None
+    clear_workspace_ref = "workspace_ref" in request.model_fields_set
+    agent = agent_patch_service(
+        db,
+        agent_id=agent_id,
+        workspace_ref=workspace_ref,
+        clear_workspace_ref=clear_workspace_ref,
+    )
     return _ok(_serialize(agent, ("agent_id", "capability_id", "assigned_runtime_id", "queue_id", "status", "workspace_ref")))
 
 

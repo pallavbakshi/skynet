@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from agp.client import AgpClient, AgpProfile
+from agp.client._profile import _url_from_host_port
 
 from skyops.config import SkyopsConfig, load_config
 
@@ -31,17 +35,26 @@ def build_profile(cfg: SkyopsConfig | None = None) -> AgpProfile:
 
     Falls back to AgpProfile.load() resolution if no skyops config is available.
     """
+    base = AgpProfile.load()
     if cfg is None:
         try:
             cfg = load_config()
         except FileNotFoundError:
-            return AgpProfile.load()
+            return base
 
-    server_url = resolve_server_url(cfg)
+    profile_path = Path.home() / ".agp" / "profiles" / "default.toml"
+    server_url = (
+        os.environ.get("AGP_SERVER_URL")
+        or _url_from_host_port()
+        or (base.server_url if profile_path.exists() else None)
+        or resolve_server_url(cfg)
+    )
+    env_token = os.environ.get("AGP_OPERATOR_TOKEN")
+    token = env_token if env_token is not None else (cfg.security.operator_token or base.token)
 
     return AgpProfile(
         server_url=server_url,
-        token=cfg.security.operator_token or None,
+        token=token,
     )
 
 

@@ -10,12 +10,14 @@ from unittest.mock import patch
 from typer.testing import CliRunner
 
 from skyops.cli import app
+from skyops._client import build_profile
+from skyops._db import db_seed
+from skyops._runtime_deploy import _build_docker_run, _build_script, _build_systemd
 from skyops.config import (
     SkyopsConfig,
     _deep_merge,
     load_config,
 )
-from skyops._runtime_deploy import _build_docker_run
 
 
 runner = CliRunner()
@@ -147,6 +149,79 @@ class TestSkyopsConfig(unittest.TestCase):
                 "/srv/shared-docs:/workspace/shared-docs",
             ],
         )
+
+    def test_resolve_agent_workspace_ref_does_not_require_host_profile(self):
+        cfg = SkyopsConfig.from_dict({
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@repo:/workspace/main"],
+                }
+            },
+            "agents": {
+                "agt_local": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                }
+            },
+        })
+        self.assertEqual(cfg.resolve_agent_workspace_ref("agt_local"), "/workspace/main")
+
+    def test_resolve_agent_workspace_uses_default_host_profile(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "default": {
+                    "mount_sources": {
+                        "repo": "/srv/repo",
+                    }
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@repo:/workspace/main"],
+                }
+            },
+            "agents": {
+                "agt_local": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_local")
+        self.assertEqual(resolved["host_profile"], "default")
+        self.assertEqual(resolved["mounts"], ["/srv/repo:/workspace/main"])
+
+    def test_resolve_agent_workspace_uses_only_host_profile_when_unique(self):
+        cfg = SkyopsConfig.from_dict({
+            "host_profiles": {
+                "server-a": {
+                    "mount_sources": {
+                        "repo": "/srv/repo",
+                    }
+                }
+            },
+            "workspace_profiles": {
+                "main": {
+                    "workspace_ref": "/workspace/main",
+                    "mounts": ["@repo:/workspace/main"],
+                }
+            },
+            "agents": {
+                "agt_local": {
+                    "capability_id": "cap_python",
+                    "workspace_profile": "main",
+                }
+            },
+        })
+        resolved = cfg.resolve_agent_workspace("agt_local")
+        self.assertEqual(resolved["host_profile"], "server-a")
+        self.assertEqual(resolved["mounts"], ["/srv/repo:/workspace/main"])
+
+    def test_mount_target_ignores_mount_options(self):
+        cfg = SkyopsConfig()
+        self.assertEqual(cfg._mount_target("/host/path:/workspace/main:ro"), "/workspace/main")
 
     def test_resolve_agent_workspace_git_override_uses_host_git_root(self):
         cfg = SkyopsConfig.from_dict({
@@ -366,17 +441,53 @@ class TestRuntimeDeploy(unittest.TestCase):
                 "/host/repo:/workspace/main",
                 "/host/shared-docs:/workspace/shared-docs",
             ],
+            prepare_commands=[],
         )
         self.assertIn("-e AGP_RUNTIME_AGENT_ID=agt_orc", cmd)
         self.assertIn("-e AGP_TMUX_DEFAULT_CWD=/workspace/main", cmd)
         self.assertIn("-e AGP_WEZTERM_DEFAULT_CWD=/workspace/main", cmd)
         self.assertIn("-v /host/repo:/workspace/main", cmd)
         self.assertIn("-v /host/shared-docs:/workspace/shared-docs", cmd)
+        self.assertIn("-e OPENAI_API_KEY", cmd)
+        self.assertIn("-e OPENROUTER_API_KEY", cmd)
+        self.assertIn("-e OPENAI_BASE_URL", cmd)
         self.assertTrue(cmd.strip().endswith("agp-runtime:latest"))
 
-    def test_runtime_deploy_script_can_include_prepare_commands(self):
-        from skyops._runtime_deploy import _build_script
+    def test_build_docker_run_quotes_shell_sensitive_values(self):
+        cmd = _build_docker_run(
+            runtime_id="rtm risky",
+            server_url="http://host:7860/$TOKEN",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt risky",
+            runtime_token="tok`rm -rf /`",
+            image="agp-runtime:latest",
+            workspace_ref="/workspace/main",
+            mounts=["/host path:/workspace/main:ro"],
+            prepare_commands=[],
+        )
+        self.assertIn("'rtm risky'", cmd)
+        self.assertIn("'AGP_SERVER_URL=http://host:7860/$TOKEN'", cmd)
+        self.assertIn("'AGP_RUNTIME_BEARER_TOKEN=tok`rm -rf /`'", cmd)
+        self.assertIn("'/host path:/workspace/main:ro'", cmd)
 
+    def test_build_docker_run_uses_host_docker_internal_for_localhost(self):
+        cmd = _build_docker_run(
+            runtime_id="rtm_local",
+            server_url="http://127.0.0.1:7860",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_local",
+            runtime_token="",
+            image="agp-runtime:latest",
+            workspace_ref="/workspace/main",
+            mounts=[],
+            prepare_commands=[],
+        )
+        self.assertIn("host.docker.internal:7860", cmd)
+        self.assertIn("--add-host host.docker.internal:host-gateway", cmd)
+
+    def test_runtime_deploy_script_can_include_prepare_commands(self):
         script = _build_script(
             runtime_id="rtm_feature_a",
             server_url="http://control-plane:7860",
@@ -388,10 +499,102 @@ class TestRuntimeDeploy(unittest.TestCase):
                 'mkdir -p "/srv/agp/git" "/srv/agp/worktrees"',
                 'git -C "/srv/agp/git/skynet" fetch --all --prune',
             ],
+            workspace_ref="/workspace/main",
         )
         self.assertIn("# --- Prepare workspace ---", script)
         self.assertIn('mkdir -p "/srv/agp/git" "/srv/agp/worktrees"', script)
         self.assertIn('git -C "/srv/agp/git/skynet" fetch --all --prune', script)
+        self.assertIn("python3 -m pip install 'agp[server]'", script)
+        self.assertIn("export AGP_ARTIFACT_BACKEND=http", script)
+        self.assertIn("export AGP_TMUX_DEFAULT_CWD=/workspace/main", script)
+
+    def test_build_systemd_includes_runtime_env(self):
+        unit = _build_systemd(
+            runtime_id="rtm_orc",
+            server_url="http://control-plane:7860",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_orc",
+            runtime_token="tok",
+            workspace_ref="/workspace/main",
+        )
+        self.assertIn('Environment="AGP_ARTIFACT_BACKEND=http"', unit)
+        self.assertIn('Environment="AGP_TMUX_DEFAULT_CWD=/workspace/main"', unit)
+        self.assertIn('Environment="AGP_WEZTERM_DEFAULT_CWD=/workspace/main"', unit)
+        self.assertIn("PassEnvironment=OPENAI_API_KEY OPENROUTER_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY", unit)
+        self.assertIn("ExecStart=agp runtime-work-loop", unit)
+        self.assertNotIn("ExecStart=AGP_ARTIFACT_BACKEND=http", unit)
+
+    def test_build_docker_run_includes_prepare_commands(self):
+        cmd = _build_docker_run(
+            runtime_id="rtm_feature_a",
+            server_url="http://control-plane:7860",
+            host_kind="tmux",
+            adapter_kind="codex",
+            agent_id="agt_feature_a",
+            runtime_token="",
+            image="agp-runtime:latest",
+            workspace_ref="/workspace/main",
+            mounts=["/srv/agp/worktrees/feature-a:/workspace/main"],
+            prepare_commands=['mkdir -p "/srv/agp/worktrees"', 'git -C "/srv/agp/git/skynet" fetch --all --prune'],
+        )
+        self.assertIn("# --- Prepare workspace ---", cmd)
+        self.assertIn('mkdir -p "/srv/agp/worktrees"', cmd)
+        self.assertIn("docker run", cmd)
+
+
+class TestSkyopsClient(unittest.TestCase):
+    def test_build_profile_preserves_existing_token_when_config_has_none(self):
+        cfg = SkyopsConfig()
+        cfg.server.port = 9999
+        cfg.security.operator_token = ""
+        with patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://127.0.0.1:7860", "token": "persisted"})()), \
+             patch("pathlib.Path.exists", return_value=False):
+            profile = build_profile(cfg)
+        self.assertEqual(profile.server_url, "http://127.0.0.1:9999")
+        self.assertEqual(profile.token, "persisted")
+
+    def test_build_profile_uses_existing_profile_url_when_present(self):
+        cfg = SkyopsConfig()
+        cfg.server.host = "0.0.0.0"
+        cfg.server.port = 9999
+
+        fake_home = Path("/tmp/test-home")
+        profile_path = fake_home / ".agp" / "profiles" / "default.toml"
+
+        def fake_exists(path_obj: Path) -> bool:
+            return str(path_obj) == str(profile_path)
+
+        with patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://cp.example:7860", "token": "persisted"})()), \
+             patch("skyops._client.Path.home", return_value=fake_home), \
+             patch("pathlib.Path.exists", fake_exists):
+            profile = build_profile(cfg)
+        self.assertEqual(profile.server_url, "http://cp.example:7860")
+
+
+class TestDbSeed(unittest.TestCase):
+    def test_db_seed_can_clear_workspace_ref_on_existing_agent(self):
+        import tempfile
+
+        mock_client = unittest.mock.MagicMock()
+        mock_client.health.return_value = {"status": "ok"}
+        mock_client.list_agents.return_value = {
+            "items": [{"agent_id": "agt_local", "workspace_ref": "/workspace/main"}]
+        }
+        mock_client.__enter__ = lambda s: mock_client
+        mock_client.__exit__ = lambda s, *a: None
+
+        with tempfile.TemporaryDirectory() as td:
+            toml_path = Path(td) / "skyops.toml"
+            toml_path.write_text(textwrap.dedent("""\
+                [agents.agt_local]
+                capability_id = "cap_python"
+            """))
+            cfg = load_config(toml_path)
+            with patch("skyops._db.load_config", return_value=cfg), \
+                 patch("skyops._client.build_client", return_value=mock_client):
+                db_seed()
+        mock_client.patch_agent.assert_called_once_with("agt_local", workspace_ref=None)
 
 
 class TestInitCommand(unittest.TestCase):
@@ -417,6 +620,23 @@ class TestInitCommand(unittest.TestCase):
             result = runner.invoke(app, ["init", "--dir", td])
             self.assertEqual(result.exit_code, 1)
             self.assertIn("already exists", result.output)
+
+    def test_init_force_preserves_existing_profile_token(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            profiles_dir = home / ".agp" / "profiles"
+            profiles_dir.mkdir(parents=True, exist_ok=True)
+            (profiles_dir / "default.toml").write_text(
+                'server_url = "http://127.0.0.1:7860"\n'
+                'token = "persisted-token"\n'
+            )
+            with patch("skyops._init_cmd.Path.home", return_value=home):
+                result = runner.invoke(app, ["init", "--dir", td, "--mode", "docker", "--force"])
+            self.assertEqual(result.exit_code, 0, result.output)
+            content = (profiles_dir / "default.toml").read_text()
+            self.assertIn("persisted-token", content)
 
     def test_init_force_overwrites(self):
         import tempfile
@@ -664,6 +884,27 @@ class TestWriteProfile(unittest.TestCase):
             content = profile.read_text()
             self.assertIn("9999", content)
             self.assertIn("tok123", content)
+
+    def test_write_profile_preserves_existing_token_when_config_token_empty(self):
+        from skyops._lifecycle import _write_profile
+
+        cfg = SkyopsConfig()
+        cfg.server.port = 9999
+        cfg.security.operator_token = ""
+
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as td:
+            profiles_dir = Path(td) / ".agp" / "profiles"
+            profiles_dir.mkdir(parents=True, exist_ok=True)
+            (profiles_dir / "default.toml").write_text(
+                'server_url = "http://127.0.0.1:7860"\n'
+                'token = "persisted-token"\n'
+            )
+            with patch("skyops._lifecycle.Path.home", return_value=Path(td)):
+                _write_profile(cfg)
+            content = (profiles_dir / "default.toml").read_text()
+            self.assertIn("persisted-token", content)
 
 
 # ── Phase D: dispatch, monitor, backup, security, upgrade, drill, queue ──

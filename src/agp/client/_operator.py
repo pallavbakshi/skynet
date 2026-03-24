@@ -9,6 +9,8 @@ import httpx
 
 from agp.client._profile import AgpProfile
 
+_UNSET = object()
+
 
 class AgpClient:
     """SDK client for the AGP control plane.
@@ -183,11 +185,11 @@ class AgpClient:
         self,
         agent_id: str,
         *,
-        workspace_ref: str | None = None,
+        workspace_ref: str | None | object = _UNSET,
     ) -> dict:
         """Update mutable fields on an existing agent."""
         payload: dict[str, Any] = {}
-        if workspace_ref is not None:
+        if workspace_ref is not _UNSET:
             payload["workspace_ref"] = workspace_ref
         response = self._client.patch(f"/agents/{agent_id}", json=payload)
         response.raise_for_status()

@@ -156,13 +156,25 @@ class SkyopsConfig:
             raise KeyError(f"host profile not found: {name}")
         return profile
 
+    def default_host_profile_name(self) -> str | None:
+        if "default" in self.host_profiles:
+            return "default"
+        if len(self.host_profiles) == 1:
+            return next(iter(self.host_profiles))
+        return None
+
     def resolve_agent_workspace(
         self, agent_id: str, *, host_profile: str | None = None
     ) -> dict[str, Any]:
         agent = dict(self.agents.get(agent_id, {}))
         profile_name = agent.get("workspace_profile")
         profile = self.resolve_workspace_profile(profile_name) if profile_name else WorkspaceProfileConfig()
-        resolved_host = self.resolve_host_profile(host_profile) if host_profile else HostProfileConfig()
+        resolved_host_name = host_profile or self.default_host_profile_name()
+        resolved_host = (
+            self.resolve_host_profile(resolved_host_name)
+            if resolved_host_name
+            else HostProfileConfig()
+        )
         mode = agent.get("workspace_mode") or profile.mode or "shared_fs"
         workspace_ref = agent.get("workspace_ref") or profile.workspace_ref or None
         mounts: list[str] = []
@@ -255,11 +267,17 @@ class SkyopsConfig:
             "agent_id": agent_id,
             "workspace_profile": profile_name,
             "workspace_mode": mode,
-            "host_profile": host_profile,
+            "host_profile": resolved_host_name,
             "workspace_ref": workspace_ref,
             "mounts": mounts,
             "prepare_commands": prepare_commands,
         }
+
+    def resolve_agent_workspace_ref(self, agent_id: str) -> str | None:
+        agent = dict(self.agents.get(agent_id, {}))
+        profile_name = agent.get("workspace_profile")
+        profile = self.resolve_workspace_profile(profile_name) if profile_name else WorkspaceProfileConfig()
+        return agent.get("workspace_ref") or profile.workspace_ref or None
 
     def _resolve_mounts(
         self, mounts: list[str], host_profile: HostProfileConfig
@@ -298,7 +316,7 @@ class SkyopsConfig:
         parts = mount.split(":")
         if len(parts) < 2:
             return ""
-        return parts[-1]
+        return parts[1]
 
     def to_display_dict(self, *, mask_secrets: bool = True) -> dict[str, Any]:
         """Return a nested dict suitable for display, with secrets masked."""

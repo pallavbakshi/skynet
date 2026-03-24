@@ -202,13 +202,14 @@ def schema_status() -> dict:
     session = SessionLocal()
     try:
         current = _current_schema_version(session)
-        available = _discover_migrations()
+        dialect = "postgres" if _is_postgres() else "sqlite"
+        available = _discover_migrations(dialect=dialect)
         pending = pending_migrations(session) if current else available
         return {
             "current_version": current or "not_initialized",
             "available_migrations": [tag for tag, _ in available],
             "pending_migrations": [tag for tag, _ in pending],
-            "engine": "postgres" if _is_postgres() else "sqlite",
+            "engine": dialect,
             "release_version": current_release_version(),
         }
     finally:

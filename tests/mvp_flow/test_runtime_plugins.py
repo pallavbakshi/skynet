@@ -377,6 +377,67 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(result.artifacts[-1].content, "LOCAL_OK")
 
+    def test_codex_adapter_tui_ignores_stale_completed_turns_from_prior_prompt(self) -> None:
+        class StalePromptHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "wezterm"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                self._history.setdefault(session.session_id, []).append(
+                    "\u203a old prompt\n"
+                    "\u2022 OLD_OK\n"
+                    "\n"
+                    "\u203a delegate and summarize\n"
+                    "\u2022 LOCAL_OK\n"
+                    "\n"
+                    "\u203a\n"
+                )
+
+            def read_visible(self, session):
+                self.reads += 1
+                return super().read_visible(session)
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_stale_prompt"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="ncodex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = StalePromptHost()
+        session = host.get_or_create_session(agent_id="agt_stale_prompt")
+        session.metadata["codex_bootstrapped"] = True
+        host._history.setdefault(session.session_id, []).append(
+            "\u203a old prompt\n"
+            "\u2022 OLD_OK\n"
+            "\n"
+            "\u203a\n"
+        )
+        claimed = {
+            "agent_id": "agt_stale_prompt",
+            "job": {"job_id": "job_stale_prompt"},
+            "run": {"run_id": "run_stale_prompt"},
+            "message": {"text": "delegate and summarize"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(result.artifacts[-1].content, "LOCAL_OK")
+
     def test_codex_adapter_marker_mode_still_works(self) -> None:
         class CodexHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
@@ -467,6 +528,15 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertTrue(adapter._looks_like_gate_prompt(screen))
         self.assertEqual(adapter._gate_response(screen), "2")
+
+    def test_codex_adapter_does_not_false_trigger_on_permission_words_in_output(self) -> None:
+        adapter = CodexAdapter(tui_mode=True)
+        screen = (
+            "› explain the code\n"
+            "• The permission model allows writes after explicit approval.\n"
+            "• Confirm this by checking the guard clause in the module.\n"
+        )
+        self.assertFalse(adapter._looks_like_gate_prompt(screen))
 
     def test_codex_adapter_tui_detects_shell_returned_during_execution(self) -> None:
         call_count = {"n": 0}

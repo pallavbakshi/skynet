@@ -286,10 +286,6 @@ class CodexAdapter(AgentAdapter):
         "do you trust",
         "press enter to continue",
         "yes, continue",
-        "approve",
-        "confirm",
-        "permission",
-        "allow",
         "approaching rate limits",
         "introducing gpt-5.4",
         "try new model",
@@ -326,7 +322,9 @@ class CodexAdapter(AgentAdapter):
 
     def _looks_like_gate_prompt(self, text: str) -> bool:
         lower = text.lower()
-        return self._looks_like_onboarding_prompt(text) or any(pat in lower for pat in self._GATE_PATTERNS)
+        if self._looks_like_onboarding_prompt(text):
+            return True
+        return any(pat in lower for pat in self._GATE_PATTERNS)
 
     def _gate_response(self, text: str) -> str:
         """Return the key to send for a gate prompt (a number for menus, empty for Enter)."""
@@ -394,7 +392,13 @@ class CodexAdapter(AgentAdapter):
             lines.pop()
         return "\n".join(lines)
 
-    def _looks_like_completed_turn(self, text: str) -> bool:
+    def _looks_like_completed_turn(
+        self,
+        text: str,
+        *,
+        baseline_answered_turns: int,
+        baseline_last_response: str | None,
+    ) -> bool:
         """Return True when Codex has answered and returned to a fresh prompt."""
         turns = _parse_codex_turns(text)
         if not turns:
@@ -412,9 +416,15 @@ class CodexAdapter(AgentAdapter):
         last = meaningful[-1]
         if not last.startswith(_PROMPT_MARKER.lower()):
             return False
-        # Ignore the original task prompt; require a completed response turn
-        # and then a fresh prompt after it.
-        return any(turn["response"] for turn in turns)
+        answered = [turn for turn in turns if turn["response"]]
+        if len(answered) > baseline_answered_turns:
+            return True
+        if not answered:
+            return False
+        latest_response = "\n".join(answered[-1]["response"]).strip()
+        if latest_response and latest_response != (baseline_last_response or ""):
+            return True
+        return False
 
     def execute_run(
         self,
@@ -439,6 +449,12 @@ class CodexAdapter(AgentAdapter):
         """TUI mode: send prompt -> wait for idle -> read delta -> clean output."""
         prompt = claimed["message"]["text"]
         run_id = claimed["run"]["run_id"]
+
+        baseline_screen = _strip_ansi(host.read_visible(session))
+        baseline_turns = [turn for turn in _parse_codex_turns(baseline_screen) if turn["response"]]
+        baseline_last_response = None
+        if baseline_turns:
+            baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
 
         if host.kind == "tmux":
             # Tmux works reliably here only when Codex is launched with the task
@@ -496,7 +512,11 @@ class CodexAdapter(AgentAdapter):
                 was_busy = True
             prev_screen = snap
 
-            if self._looks_like_completed_turn(screen):
+            if self._looks_like_completed_turn(
+                screen,
+                baseline_answered_turns=len(baseline_turns),
+                baseline_last_response=baseline_last_response,
+            ):
                 break
 
             if _RESPONSE_MARKER in screen and unchanged >= max(1, self.idle_after - 1):

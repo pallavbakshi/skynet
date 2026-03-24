@@ -13,7 +13,11 @@ fi
 : "${AGP_SERVER_URL:?AGP_SERVER_URL must be set}"
 
 if command -v git >/dev/null 2>&1; then
-  git config --global --add safe.directory '*' >/dev/null 2>&1 || true
+  for path in "${AGP_TMUX_DEFAULT_CWD:-}" "${AGP_WEZTERM_DEFAULT_CWD:-}" "/workspace/main"; do
+    if [[ -n "${path}" && -d "${path}" ]]; then
+      git config --global --add safe.directory "${path}" >/dev/null 2>&1 || true
+    fi
+  done
 fi
 
 HOST_KIND="${AGP_RUNTIME_TERMINAL_HOST_KIND:-tmux}"

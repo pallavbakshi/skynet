@@ -2,12 +2,51 @@
 
 from __future__ import annotations
 
+import shlex
 import textwrap
+from urllib.parse import urlparse, urlunparse
 
 import typer
 
 from skyops.config import load_config
 from skyops._client import resolve_server_url
+
+
+def _join_shell(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def _env_prefix(env_vars: dict[str, str]) -> str:
+    if not env_vars:
+        return ""
+    return " ".join(f"{key}={shlex.quote(value)}" for key, value in env_vars.items()) + " "
+
+
+def _runtime_env(
+    *,
+    workspace_ref: str | None = None,
+    artifact_backend: str = "http",
+) -> dict[str, str]:
+    env = {"AGP_ARTIFACT_BACKEND": artifact_backend}
+    if workspace_ref:
+        env["AGP_TMUX_DEFAULT_CWD"] = workspace_ref
+        env["AGP_WEZTERM_DEFAULT_CWD"] = workspace_ref
+    return env
+
+
+def _systemd_env_line(key: str, value: str) -> str:
+    return f'Environment="{key}={value}"'
+
+
+def _docker_reachable_server_url(server_url: str) -> tuple[str, bool]:
+    parsed = urlparse(server_url)
+    hostname = parsed.hostname or ""
+    if hostname not in {"127.0.0.1", "localhost"}:
+        return server_url, False
+    netloc = "host.docker.internal"
+    if parsed.port:
+        netloc = f"{netloc}:{parsed.port}"
+    return urlunparse(parsed._replace(netloc=netloc)), True
 
 
 def _build_command(
@@ -16,19 +55,23 @@ def _build_command(
     host_kind: str,
     adapter_kind: str,
     agent_id: str | None,
+    env_vars: dict[str, str] | None = None,
 ) -> str:
     """Build the ``agp runtime-work-loop`` command string."""
     parts = [
         "agp",
         "runtime-work-loop",
         runtime_id,
-        f"--server-url {server_url}",
-        f"--host-kind {host_kind}",
-        f"--adapter-kind {adapter_kind}",
+        "--server-url",
+        server_url,
+        "--host-kind",
+        host_kind,
+        "--adapter-kind",
+        adapter_kind,
     ]
     if agent_id:
-        parts.append(f"--agent-id {agent_id}")
-    return " ".join(parts)
+        parts.extend(["--agent-id", agent_id])
+    return _env_prefix(env_vars or {}) + _join_shell(parts)
 
 
 def _build_docker_run(
@@ -42,28 +85,48 @@ def _build_docker_run(
     image: str,
     workspace_ref: str | None,
     mounts: list[str],
+    prepare_commands: list[str],
 ) -> str:
     """Build a docker run command for an interactive runtime."""
+    reachable_server_url, needs_host_gateway = _docker_reachable_server_url(server_url)
     parts = [
-        "docker run --rm -it",
-        f"--name {runtime_id}",
-        f"-e AGP_SERVER_URL={server_url}",
-        f"-e AGP_RUNTIME_ID={runtime_id}",
-        f"-e AGP_RUNTIME_TERMINAL_HOST_KIND={host_kind}",
-        f"-e AGP_RUNTIME_AGENT_ADAPTER_KIND={adapter_kind}",
-        "-e AGP_ARTIFACT_BACKEND=http",
+        "docker", "run", "--rm", "-it",
+        "--name", runtime_id,
+        "-e", f"AGP_SERVER_URL={reachable_server_url}",
+        "-e", f"AGP_RUNTIME_ID={runtime_id}",
+        "-e", f"AGP_RUNTIME_TERMINAL_HOST_KIND={host_kind}",
+        "-e", f"AGP_RUNTIME_AGENT_ADAPTER_KIND={adapter_kind}",
+        "-e", "AGP_ARTIFACT_BACKEND=http",
+        "-e", "OPENAI_API_KEY",
+        "-e", "OPENROUTER_API_KEY",
+        "-e", "OPENAI_BASE_URL",
+        "-e", "ANTHROPIC_API_KEY",
     ]
+    if needs_host_gateway:
+        parts.extend(["--add-host", "host.docker.internal:host-gateway"])
     if runtime_token:
-        parts.append(f"-e AGP_RUNTIME_BEARER_TOKEN={runtime_token}")
+        parts.extend(["-e", f"AGP_RUNTIME_BEARER_TOKEN={runtime_token}"])
     if agent_id:
-        parts.append(f"-e AGP_RUNTIME_AGENT_ID={agent_id}")
+        parts.extend(["-e", f"AGP_RUNTIME_AGENT_ID={agent_id}"])
     if workspace_ref:
-        parts.append(f"-e AGP_TMUX_DEFAULT_CWD={workspace_ref}")
-        parts.append(f"-e AGP_WEZTERM_DEFAULT_CWD={workspace_ref}")
+        parts.extend(["-e", f"AGP_TMUX_DEFAULT_CWD={workspace_ref}"])
+        parts.extend(["-e", f"AGP_WEZTERM_DEFAULT_CWD={workspace_ref}"])
     for mount in mounts:
-        parts.append(f"-v {mount}")
+        parts.extend(["-v", mount])
     parts.append(image)
-    return " \\\n  ".join(parts)
+    lines = [_join_shell(parts[:4])]
+    cursor = 4
+    while cursor < len(parts) - 1:
+        chunk = parts[cursor:cursor + 2]
+        lines.append(_join_shell(chunk))
+        cursor += 2
+    if cursor == len(parts) - 1:
+        lines.append(_join_shell([parts[-1]]))
+    docker_run = " \\\n  ".join(lines)
+    prepare_block = _build_prepare_script(prepare_commands)
+    if not prepare_block:
+        return docker_run
+    return f"{prepare_block}{docker_run}"
 
 
 def _build_prepare_script(prepare_commands: list[str]) -> str:
@@ -81,13 +144,19 @@ def _build_script(
     agent_id: str | None,
     runtime_token: str,
     prepare_commands: list[str],
+    workspace_ref: str | None,
 ) -> str:
     """Build a self-contained bash deployment script."""
-    cmd = _build_command(runtime_id, server_url, host_kind, adapter_kind, agent_id)
+    cmd = _build_command(
+        runtime_id,
+        server_url,
+        host_kind,
+        adapter_kind,
+        agent_id,
+        env_vars=_runtime_env(workspace_ref=workspace_ref),
+    )
 
     # Parse host and port from server_url for env vars
-    from urllib.parse import urlparse
-
     parsed = urlparse(server_url)
     agp_host = parsed.hostname or "127.0.0.1"
     agp_port = str(parsed.port or 7860)
@@ -104,7 +173,14 @@ def _build_script(
 
     token_export = ""
     if runtime_token:
-        token_export = f'export AGP_RUNTIME_BEARER_TOKEN="{runtime_token}"'
+        token_export = f"export AGP_RUNTIME_BEARER_TOKEN={shlex.quote(runtime_token)}"
+
+    provider_exports = textwrap.dedent("""\
+        if [ -n "${OPENAI_API_KEY:-}" ]; then export OPENAI_API_KEY; fi
+        if [ -n "${OPENROUTER_API_KEY:-}" ]; then export OPENROUTER_API_KEY; fi
+        if [ -n "${OPENAI_BASE_URL:-}" ]; then export OPENAI_BASE_URL; fi
+        if [ -n "${ANTHROPIC_API_KEY:-}" ]; then export ANTHROPIC_API_KEY; fi
+    """)
 
     prepare_block = _build_prepare_script(prepare_commands)
 
@@ -126,15 +202,24 @@ def _build_script(
             exit 1
         fi
 
+        if ! python3 -m pip --version &>/dev/null; then
+            echo "ERROR: python3 -m pip is required but not installed." >&2
+            exit 1
+        fi
+
         {tmux_note}# --- Install agp ---
-        pip install agp
+        python3 -m pip install 'agp[server]'
         # NOTE: If using a custom package index, replace the line above with:
-        #   pip install agp --index-url https://your-custom-index/simple/
+        #   python3 -m pip install 'agp[server]' --index-url https://your-custom-index/simple/
 
         # --- Environment variables ---
-        export AGP_HOST="{agp_host}"
-        export AGP_PORT="{agp_port}"
+        export AGP_HOST={shlex.quote(agp_host)}
+        export AGP_PORT={shlex.quote(agp_port)}
+        export AGP_ARTIFACT_BACKEND=http
         {token_export}
+        {provider_exports}
+        if [ -n "{workspace_ref or ''}" ]; then export AGP_TMUX_DEFAULT_CWD={shlex.quote(workspace_ref or '')}; fi
+        if [ -n "{workspace_ref or ''}" ]; then export AGP_WEZTERM_DEFAULT_CWD={shlex.quote(workspace_ref or '')}; fi
 
         {prepare_block}\
         # --- Run the work loop ---
@@ -149,22 +234,26 @@ def _build_systemd(
     adapter_kind: str,
     agent_id: str | None,
     runtime_token: str,
+    workspace_ref: str | None,
 ) -> str:
     """Build a systemd unit file."""
     cmd = _build_command(runtime_id, server_url, host_kind, adapter_kind, agent_id)
-
-    from urllib.parse import urlparse
 
     parsed = urlparse(server_url)
     agp_host = parsed.hostname or "127.0.0.1"
     agp_port = str(parsed.port or 7860)
 
     env_lines = [
-        f"Environment=AGP_HOST={agp_host}",
-        f"Environment=AGP_PORT={agp_port}",
+        _systemd_env_line("AGP_HOST", agp_host),
+        _systemd_env_line("AGP_PORT", agp_port),
+        _systemd_env_line("AGP_ARTIFACT_BACKEND", "http"),
+        "PassEnvironment=OPENAI_API_KEY OPENROUTER_API_KEY OPENAI_BASE_URL ANTHROPIC_API_KEY",
     ]
     if runtime_token:
-        env_lines.append(f"Environment=AGP_RUNTIME_BEARER_TOKEN={runtime_token}")
+        env_lines.append(_systemd_env_line("AGP_RUNTIME_BEARER_TOKEN", runtime_token))
+    if workspace_ref:
+        env_lines.append(_systemd_env_line("AGP_TMUX_DEFAULT_CWD", workspace_ref))
+        env_lines.append(_systemd_env_line("AGP_WEZTERM_DEFAULT_CWD", workspace_ref))
 
     env_block = "\n".join(env_lines)
 
@@ -219,20 +308,21 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
                 _build_command(
                     runtime_id, resolved_url, resolved_host_kind,
                     resolved_adapter_kind, agent_id,
+                    env_vars=_runtime_env(workspace_ref=workspace_ref),
                 )
             )
         elif fmt == "script":
             typer.echo(
                 _build_script(
                     runtime_id, resolved_url, resolved_host_kind,
-                    resolved_adapter_kind, agent_id, runtime_token, prepare_commands,
+                    resolved_adapter_kind, agent_id, runtime_token, prepare_commands, workspace_ref,
                 )
             )
         elif fmt == "systemd":
             typer.echo(
                 _build_systemd(
                     runtime_id, resolved_url, resolved_host_kind,
-                    resolved_adapter_kind, agent_id, runtime_token,
+                    resolved_adapter_kind, agent_id, runtime_token, workspace_ref,
                 )
             )
         elif fmt == "docker-run":
@@ -247,6 +337,7 @@ def register_deploy_command(runtime_app: typer.Typer) -> None:
                     image=image,
                     workspace_ref=workspace_ref,
                     mounts=mounts,
+                    prepare_commands=prepare_commands,
                 )
             )
         else:

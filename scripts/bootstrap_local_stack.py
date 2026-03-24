@@ -102,7 +102,8 @@ def ensure_agent() -> None:
 def main() -> None:
     init_db()
     wait_for_health()
-    apply_bucket_policy()
+    if os.environ.get("AGP_ARTIFACT_BACKEND", "").lower() == "s3":
+        apply_bucket_policy()
     ensure_capability()
     ensure_agent()
 

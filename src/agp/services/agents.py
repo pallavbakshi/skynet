@@ -59,9 +59,15 @@ def agent_up_service(
     return agent
 
 
-def agent_patch_service(db: Session, *, agent_id: str, workspace_ref: str | None) -> Agent:
+def agent_patch_service(
+    db: Session,
+    *,
+    agent_id: str,
+    workspace_ref: str | None,
+    clear_workspace_ref: bool = False,
+) -> Agent:
     agent = _require_agent(db, agent_id)
-    if workspace_ref is not None:
+    if clear_workspace_ref:
         agent.workspace_ref = workspace_ref
     db.commit()
     return agent
