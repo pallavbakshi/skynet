@@ -1117,8 +1117,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     # ── agp interrupt tests ──────────────────────────────────────────
 
-    def test_agent_interrupt_cancels_active_job(self) -> None:
-        """Scenario A: interrupt an agent with an active running job."""
+    def test_agent_interrupt_requests_interrupt_for_active_job(self) -> None:
+        """Scenario A: interrupt on an active job requests runtime cancellation."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
             "agent_id": "agt_int", "capability_id": "cap_python",
@@ -1139,11 +1139,11 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(data["agent_id"], "agt_int")
         self.assertEqual(data["halted_job_id"], job_id)
         self.assertEqual(data["dropped_job_ids"], [])
-        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["status"], "busy")
 
-        # Job should be cancelled
+        # Job should be marked interrupt_requested and left to the runtime to cancel.
         job = self.client.get(f"/jobs/{job_id}").json()["data"]
-        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["status"], "interrupt_requested")
 
     def test_agent_interrupt_with_purge_empties_queue(self) -> None:
         """Scenario B: interrupt with --purge cancels active + all queued."""
@@ -1174,9 +1174,11 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(data["remaining_queue_size"], 0)
 
         # All jobs should be cancelled
-        for jid in job_ids:
+        for jid in data["dropped_job_ids"]:
             job = self.client.get(f"/jobs/{jid}").json()["data"]
             self.assertEqual(job["status"], "cancelled")
+        active = self.client.get(f"/jobs/{job_ids[0]}").json()["data"]
+        self.assertEqual(active["status"], "interrupt_requested")
 
     def test_agent_interrupt_no_active_job_is_noop(self) -> None:
         """Interrupt on idle agent with no active job succeeds gracefully."""
@@ -1200,8 +1202,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         resp = self.client.post("/agents/agt_term_int/interrupt")
         self.assertEqual(resp.status_code, 409)
 
-    def test_agent_interrupt_releases_lease_and_idles_runtime(self) -> None:
-        """Interrupt releases the active lease and transitions runtime to IDLE."""
+    def test_agent_interrupt_preserves_active_lease_until_runtime_cancels(self) -> None:
+        """Interrupt does not release the lease before the runtime handles it."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_int_rt", "hostname": "localhost"})
         self.client.post("/agents/up", json={
             "agent_id": "agt_int_rt", "capability_id": "cap_python",
@@ -1227,12 +1229,12 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         session = SessionLocal()
         try:
             runtime = session.get(Runtime, "rtm_int_rt")
-            self.assertEqual(runtime.status, "idle")
-            # Lease should be released
+            self.assertEqual(runtime.status, "busy")
+            # Lease should remain active until the runtime observes the interrupt and cancels the run.
             lease = session.scalars(
                 select(Lease).where(Lease.runtime_id == "rtm_int_rt")
             ).first()
-            self.assertEqual(lease.status, "released")
+            self.assertEqual(lease.status, "active")
         finally:
             session.close()
 
@@ -1257,6 +1259,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(resp.status_code, 200)
         data = resp.json()["data"]
         self.assertEqual(data["status"], "draining")
+        job = self.client.get(f"/jobs/{self.client.get('/jobs').json()['data']['items'][0]['job_id']}").json()["data"]
+        self.assertEqual(job["status"], "interrupt_requested")
 
     def test_agent_interrupt_event_audit_trail(self) -> None:
         """Interrupt creates agent.interrupted event with correct body."""
@@ -1345,7 +1349,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
         result = self._cli_invoke(["interrupt", "agt_cli_purge", "--purge"])
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("Agent Purged and Reset", result.output)
+        self.assertIn("Interrupt Requested and Queue Purged", result.output)
         self.assertIn("DROPPED JOBS:", result.output)
         self.assertIn("Purging", result.output)
 
@@ -1445,7 +1449,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(data["halted_job_id"], job_id)
 
         job = self.client.get(f"/jobs/{job_id}").json()["data"]
-        self.assertEqual(job["status"], "cancelled")
+        self.assertEqual(job["status"], "interrupt_requested")
 
     def test_agent_interrupt_double_is_idempotent(self) -> None:
         """Calling interrupt twice is a no-op on the second call."""
@@ -1468,8 +1472,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
         resp2 = self.client.post("/agents/agt_dbl_int/interrupt")
         self.assertEqual(resp2.status_code, 200)
-        self.assertIsNone(resp2.json()["data"]["halted_job_id"])
-        self.assertEqual(resp2.json()["data"]["status"], "idle")
+        self.assertEqual(resp2.json()["data"]["halted_job_id"], self.client.get("/jobs").json()["data"]["items"][0]["job_id"])
+        self.assertEqual(resp2.json()["data"]["status"], "busy")
 
     def test_agent_interrupt_remaining_queue_count(self) -> None:
         """Interrupt without purge reports correct remaining queue size."""
@@ -1490,7 +1494,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         resp = self.client.post("/agents/agt_rem/interrupt", json={"purge": False})
         data = resp.json()["data"]
         self.assertEqual(data["remaining_queue_size"], 3)
-        self.assertEqual(data["status"], "idle")
+        self.assertEqual(data["status"], "busy")
 
     def test_agent_interrupt_delivery_records_cleaned(self) -> None:
         """Interrupt acks dangling delivery records for cancelled jobs."""
@@ -1525,3 +1529,76 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
                                      f"Delivery for {jid} still in {d.state}")
         finally:
             session.close()
+
+    def test_agent_interrupt_live_runtime_becomes_cancelled(self) -> None:
+        """Agent-level interrupt reaches a live worker and results in cancellation."""
+        self.client.post("/agents/up", json={"agent_id": "agt_agent_interrupt", "capability_id": "cap_python"})
+        sent = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_agent_interrupt"},
+                "message": {"text": "interrupt me via agent", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "agent-interrupt-flow-1"},
+        ).json()
+        job_id = sent["data"]["job_id"]
+        runtime_client = RuntimeClient(
+            RuntimeIdentity(runtime_id="rtm_agent_interrupt", hostname="localhost", server_url="http://testserver"),
+            client=self.client,
+        )
+        worker = RuntimeSupervisor(
+            runtime_client,
+            host=InProcessTerminalHost(),
+            adapter=DefaultAgentAdapter(),
+            artifact_root=".agp-artifacts-tests",
+        )
+        holder: dict[str, object] = {}
+
+        def run_worker() -> None:
+            try:
+                holder["payload"] = worker.run_once(
+                    agent_id="agt_agent_interrupt",
+                    heartbeat_interval_seconds=0.01,
+                )
+            except Exception as exc:  # pragma: no cover
+                holder["error"] = exc
+
+        thread = Thread(target=run_worker)
+        thread.start()
+        try:
+            sleep(0.03)
+            interrupt = None
+            for _ in range(20):
+                try:
+                    interrupt = self.client.post("/agents/agt_agent_interrupt/interrupt", json={"purge": False})
+                    break
+                except Exception as exc:
+                    if "database is locked" not in str(exc):
+                        raise
+                    sleep(0.02)
+            self.assertIsNotNone(interrupt)
+            assert interrupt is not None
+            self.assertEqual(interrupt.status_code, 200)
+        finally:
+            for _ in range(50):
+                thread.join(timeout=0.1)
+                if not thread.is_alive():
+                    break
+            runtime_client.close()
+
+        self.assertFalse(thread.is_alive())
+        if "error" in holder:
+            raise holder["error"]  # type: ignore[misc]
+
+        payload = holder["payload"]
+        assert isinstance(payload, dict)
+        self.assertTrue(payload["cancelled"])
+        self.assertEqual(payload["result"]["status"], "cancelled")
+
+        job = self.client.get(f"/jobs/{job_id}").json()["data"]
+        self.assertEqual(job["status"], "cancelled")
+        events = self.client.get(f"/jobs/{job_id}/events").json()["data"]["items"]
+        event_types = [item["event_type"] for item in events]
+        self.assertIn("job.interrupt_requested", event_types)
+        self.assertIn("run.cancelled", event_types)
+        self.assertIn("job.cancelled", event_types)

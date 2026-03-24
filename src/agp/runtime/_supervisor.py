@@ -276,6 +276,11 @@ class RuntimeSupervisor:
                             self.client.identity.runtime_id,
                             {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
                         )
+                        claimed["job"]["status"] = "interrupt_requested"
+                        try:
+                            self.host.interrupt(session)
+                        except Exception:  # noqa: BLE001
+                            pass
                         stop.set()
                         break
                 except Exception:  # noqa: BLE001

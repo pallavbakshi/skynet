@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from agp.enums import AgentStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
-from agp.services._helpers import _new_id, _require_agent, _require_capability, _require_runtime
+from agp.services._helpers import _new_id, _queue_backend, _require_agent, _require_capability, _require_runtime
 from agp.services.events import _create_event
 from agp.services.exceptions import ConflictError
 
@@ -302,13 +302,18 @@ def agent_interrupt_service(
         ).first()
 
     halted_job_id: str | None = None
-    affected_runtime_ids: set[str] = set()
 
     if active_job is not None:
         halted_job_id = active_job.job_id
-        affected_runtime_ids |= _cancel_job_cascade(
-            db, active_job, now, reason="interrupt",
-        )
+        if active_job.status == JobStatus.RUNNING.value:
+            active_job.status = JobStatus.INTERRUPT_REQUESTED.value
+            active_job.updated_at = now
+            _create_event(
+                db,
+                job_id=active_job.job_id,
+                event_type="job.interrupt_requested",
+                body={"previous_status": JobStatus.RUNNING.value, "status": JobStatus.INTERRUPT_REQUESTED.value},
+            )
 
     # ── Purge queued jobs ──
     dropped_job_ids: list[str] = []
@@ -328,9 +333,8 @@ def agent_interrupt_service(
                 body={"previous_status": prev, "reason": "purge"},
             )
             dropped_job_ids.append(job.job_id)
-        _ack_cancelled_deliveries(db, [active_job.job_id] if active_job else [], dropped_job_ids, now)
-    elif active_job is not None:
-        _ack_cancelled_deliveries(db, [active_job.job_id], [], now)
+        _ack_cancelled_deliveries(db, [], dropped_job_ids, now)
+        _queue_backend().remove_jobs(db, target_queue=agent_queue, job_ids=dropped_job_ids)
 
     # ── Count remaining queued jobs ──
     remaining_count: int = db.scalar(
@@ -345,11 +349,9 @@ def agent_interrupt_service(
         AgentStatus.TERMINATED.value,
         AgentStatus.DRAINING.value,
     })
-    if agent.status not in _PRESERVE_STATUSES:
+    if active_job is None and agent.status not in _PRESERVE_STATUSES:
         agent.status = AgentStatus.IDLE.value
     agent.updated_at = now
-
-    _release_idle_runtimes(db, affected_runtime_ids)
 
     _create_event(
         db, agent_id=agent_id, event_type="agent.interrupted",

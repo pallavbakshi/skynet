@@ -73,6 +73,17 @@ class FakeRedisClient:
         values = self.lists.setdefault(key, [])
         return values.pop(0) if values else None
 
+    def lrange(self, key: str, start: int, end: int) -> list[str]:
+        values = self.lists.setdefault(key, [])
+        if end == -1:
+            end = len(values) - 1
+        return values[start : end + 1]
+
+    def delete(self, key: str) -> None:
+        self.lists.pop(key, None)
+        self.hashes.pop(key, None)
+        self.sets.pop(key, None)
+
     def hset(self, name: str, key: str, value: str) -> None:
         self.hashes.setdefault(name, {})[key] = value
 

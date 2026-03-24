@@ -93,6 +93,9 @@ class QueueBackend(Protocol):
     ) -> dict[str, int]:
         """Return stale in-flight deliveries back to pending state or dead-letter them."""
 
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:
+        """Best-effort transport cleanup for jobs removed from a queue."""
+
 
 class DbQueueBackend:
     """State-store-backed queue transport used for the MVP."""
@@ -135,6 +138,9 @@ class DbQueueBackend:
         max_delivery_attempts: int,  # noqa: ARG002
     ) -> dict[str, int]:
         return {"redriven_deliveries": 0, "dead_lettered_deliveries": 0}
+
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+        return None
 
 
 class DeliveryTableQueueBackend:
@@ -251,6 +257,22 @@ class DeliveryTableQueueBackend:
             "dead_lettered_deliveries": dead_lettered,
         }
 
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+        if not job_ids:
+            return
+        now = utc_now()
+        rows = db.scalars(
+            select(QueueDeliveryRecord).where(
+                QueueDeliveryRecord.job_id.in_(job_ids),
+                QueueDeliveryRecord.target_queue == target_queue,
+                QueueDeliveryRecord.state.in_(("pending", "delivered")),
+            )
+        ).all()
+        for row in rows:
+            row.state = "acked"
+            row.acked_at = now
+            row.updated_at = now
+
 
 class InMemoryBrokerQueueBackend:
     """In-process broker-style queue transport without external dependencies."""
@@ -291,6 +313,9 @@ class InMemoryBrokerQueueBackend:
             while queue:
                 job_id = queue.popleft()
                 if job_id in self._dead_lettered_jobs:
+                    continue
+                job = db.get(Job, job_id)
+                if job is None or job.status != JobStatus.QUEUED.value or job.target_queue != target_queue:
                     continue
                 attempt = self._job_attempts.get(job_id, 0) + 1
                 self._job_attempts[job_id] = attempt
@@ -350,6 +375,16 @@ class InMemoryBrokerQueueBackend:
             "redriven_deliveries": redriven,
             "dead_lettered_deliveries": dead_lettered,
         }
+
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+        if not job_ids:
+            return
+        job_id_set = set(job_ids)
+        queue = self._queued(target_queue)
+        self._queues[target_queue] = deque(job_id for job_id in queue if job_id not in job_id_set)
+        for delivery_id, inflight in list(self._inflight.items()):
+            if inflight.target_queue == target_queue and inflight.job_id in job_id_set:
+                self._inflight.pop(delivery_id, None)
 
 
 _INMEMORY_BROKER = InMemoryBrokerQueueBackend()
@@ -636,6 +671,33 @@ class RedisQueueBackend:
             redriven += 1
 
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}
+
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+        if not job_ids:
+            return
+        job_id_set = set(job_ids)
+        pending_set = self._pending_set_key(target_queue)
+        for job_id in job_ids:
+            self.client.srem(pending_set, job_id)
+            self.client.srem(self._inflight_jobs_key(), job_id)
+        queue_key = self._queue_key(target_queue)
+        existing = list(getattr(self.client, "lrange", lambda key, start, end: [])(queue_key, 0, -1))
+        if existing:
+            filtered = [job_id for job_id in existing if job_id not in job_id_set]
+            delete = getattr(self.client, "delete", None)
+            if callable(delete):
+                delete(queue_key)
+            else:
+                self.client.lists[queue_key] = []  # type: ignore[attr-defined]
+            for job_id in filtered:
+                self.client.rpush(queue_key, job_id)
+        for delivery_id in list(self.client.hkeys(self._inflight_hash_key())):
+            payload = self.client.hget(self._inflight_hash_key(), delivery_id)
+            if payload is None:
+                continue
+            item = json.loads(payload)
+            if item.get("job_id") in job_id_set:
+                self.client.hdel(self._inflight_hash_key(), delivery_id)
 
 
 def reset_queue_backend_state(name: str | None = None) -> None:

@@ -641,21 +641,21 @@ def _interrupt_agent(client, agent_id: str, *, purge: bool) -> None:
     new_status = result.get("status", "idle").upper()
 
     if halted:
-        typer.echo(f"[..] Sending SIGTERM to active process ({halted})...")
-        typer.echo("[..] Executing Clean Slate protocol on workspace...")
+        typer.echo(f"[..] Requesting interrupt for active execution ({halted})...")
 
     if purge and dropped:
         typer.echo(f"[..] Purging {len(dropped)} pending jobs from the queue...")
 
-    if purge:
+    if purge and halted:
+        _print_banner("SUCCESS", "Interrupt Requested and Queue Purged")
+    elif purge:
         _print_banner("SUCCESS", "Agent Purged and Reset")
     else:
         _print_banner("SUCCESS", "Execution Interrupted")
 
     typer.echo(f"AGENT:        {agent_id}")
     if halted:
-        status_note = "CANCELLED" if purge else "Status updated to CANCELLED"
-        typer.echo(f"HALTED JOB:   {halted} ({status_note})")
+        typer.echo(f"HALTED JOB:   {halted} (interrupt requested)")
     else:
         typer.echo("HALTED JOB:   (none — no active execution)")
 
@@ -666,9 +666,12 @@ def _interrupt_agent(client, agent_id: str, *, purge: bool) -> None:
     if remaining > 0 and not purge:
         typer.echo("")
         typer.echo("Next queued job will be claimed on the runtime's next poll cycle.")
-    elif purge:
+    elif purge and not halted:
         typer.echo("")
         typer.echo("Agent is completely reset and ready for immediate, fresh tasking.")
+    elif purge and halted:
+        typer.echo("")
+        typer.echo("Queued backlog was purged. The active run will stop once the runtime processes the interrupt.")
 
 
 def _interrupt_job(client, job_id: str) -> None:

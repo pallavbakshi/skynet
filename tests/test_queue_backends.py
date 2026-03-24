@@ -18,7 +18,7 @@ from agp.queue_backend import (
 )
 import agp.queue_backend as queue_backend_module
 
-from _base import AgpTestCase, FakeRedisClient
+from tests._base import AgpTestCase, FakeRedisClient
 
 
 def _seed_agent(session, agent_id: str = "agt_q") -> Agent:
@@ -229,6 +229,22 @@ class InMemoryBrokerContractTest(AgpTestCase):
                     self.assertEqual(result["dead_lettered_deliveries"], 1)
             d = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
             self.assertIsNone(d)
+        finally:
+            session.close()
+
+    def test_cancelled_job_is_not_redelivered(self) -> None:
+        backend = InMemoryBrokerQueueBackend()
+        backend.reset()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            job.status = JobStatus.CANCELLED.value
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNone(delivery)
         finally:
             session.close()
 
