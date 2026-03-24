@@ -1,11 +1,11 @@
 """Compatibility entrypoint for the split MVP flow suite."""
 
-from tests.mvp_flow.core import MvpFlowCoreTest
-from tests.mvp_flow.observability import MvpFlowObservabilityTest
-from tests.mvp_flow.queue_security import MvpFlowQueueSecurityTest
-from tests.mvp_flow.sweeps_recovery import MvpFlowSweepsRecoveryTest
-from tests.mvp_flow.runtime_plugins import MvpFlowRuntimePluginsTest
-from tests.mvp_flow.gap_regressions import MvpFlowGapRegressionTest
+from tests.mvp_flow.test_core import MvpFlowCoreTest
+from tests.mvp_flow.test_observability import MvpFlowObservabilityTest
+from tests.mvp_flow.test_queue_security import MvpFlowQueueSecurityTest
+from tests.mvp_flow.test_sweeps_recovery import MvpFlowSweepsRecoveryTest
+from tests.mvp_flow.test_runtime_plugins import MvpFlowRuntimePluginsTest
+from tests.mvp_flow.test_gap_regressions import MvpFlowGapRegressionTest
 
 __all__ = [
     "MvpFlowCoreTest",

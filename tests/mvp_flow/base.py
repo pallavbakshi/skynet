@@ -140,6 +140,13 @@ class MvpFlowTestBase(unittest.TestCase):
 
     def setUp(self) -> None:
         self.cli_runner = CliRunner()
+        self._original_settings = {
+            "artifact_root": settings.artifact_root,
+            "log_root": settings.log_root,
+        }
+        self._tmp_root = Path(mkdtemp(prefix="agp-mvp-flow-"))
+        settings.artifact_root = self._tmp_root / "artifacts"
+        settings.log_root = self._tmp_root / "logs"
         settings.operator_bearer_token = None
         settings.operator_token_roles_json = {}
         settings.runtime_active_tokens_json = []
@@ -158,8 +165,6 @@ class MvpFlowTestBase(unittest.TestCase):
         reset_artifact_store_state()
         from agp.services.events import reset_event_seq
         reset_event_seq()
-        if settings.log_root.exists():
-            shutil.rmtree(settings.log_root)
         from tests._base import _reset_sqlite_database
         engine.dispose()
         _reset_sqlite_database()
@@ -184,8 +189,6 @@ class MvpFlowTestBase(unittest.TestCase):
             session.commit()
         finally:
             session.close()
-        if settings.artifact_root.exists():
-            shutil.rmtree(settings.artifact_root)
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
         self.client = TestClient(build_app())
         self.agp = AgpClient(http_client=self.client)
@@ -193,7 +196,11 @@ class MvpFlowTestBase(unittest.TestCase):
     def tearDown(self) -> None:
         self.client.close()
         from tests._base import _reset_sqlite_database
+        engine.dispose()
         _reset_sqlite_database()
+        for key, value in self._original_settings.items():
+            setattr(settings, key, value)
+        shutil.rmtree(self._tmp_root, ignore_errors=True)
 
     def _cli_invoke(self, args: list[str]):
         from unittest.mock import patch

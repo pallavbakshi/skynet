@@ -1,9 +1,211 @@
 """Gap/regression coverage added after the initial MVP flow suite."""
 
-from .base import *
+from tests.mvp_flow.base import *
 
 
 class MvpFlowGapRegressionTest(MvpFlowTestBase):
+    def test_gap1_deterministic_capability_pool_routing_selects_lru(self) -> None:
+        """Gap 1: Capability-pool routing must use deterministic LRU tie-breaking."""
+        from agp.models import CapabilityPool
+
+        session = SessionLocal()
+        try:
+            session.add(Capability(
+                capability_id="cap_pool_test",
+                name="Pool Test",
+                version="v1",
+                image_ref="test:v1",
+                model_ref="test",
+                resource_tier="small",
+                permission_profile="default",
+                queue_mode="capability_pool",
+                runtime_requirements_json={},
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            ))
+            session.flush()
+            session.add(CapabilityPool(
+                capability_id="cap_pool_test",
+                queue_id="capability:cap_pool_test:v1",
+                routing_policy="least_recent",
+            ))
+            session.commit()
+        finally:
+            session.close()
+
+        for i, agent_id in enumerate(["agt_pool_c", "agt_pool_a", "agt_pool_b"]):
+            resp = self.client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_pool_test"})
+            self.assertEqual(resp.status_code, 200)
+            session = SessionLocal()
+            try:
+                agent = session.get(Agent, agent_id)
+                agent.last_seen_at = utc_now() - timedelta(seconds=100 - i * 10)
+                session.commit()
+            finally:
+                session.close()
+
+        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_pool", "hostname": "pool-host"})
+        self.assertEqual(runtime.status_code, 200)
+
+        sent = self.client.post("/messages/send", json={
+            "target": {"type": "capability", "id": "cap_pool_test"},
+            "message": {"text": "pool work"},
+        })
+        self.assertEqual(sent.status_code, 200)
+
+        claim = self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_pool",
+            "capability_id": "cap_pool_test",
+            "lease_ttl_seconds": 30,
+        })
+        self.assertEqual(claim.status_code, 200)
+        data = claim.json()["data"]
+        self.assertTrue(data["claimed"])
+        self.assertEqual(data["agent_id"], "agt_pool_c")
+
+        job_id = data["job"]["job_id"]
+        events = self.client.get(f"/jobs/{job_id}/events").json()["data"]["items"]
+        routing_events = [e for e in events if e["event_type"] == "routing.decision"]
+        self.assertEqual(len(routing_events), 1)
+        self.assertEqual(routing_events[0]["body"]["policy"], "least_recent")
+        self.assertEqual(routing_events[0]["body"]["selected_agent_id"], "agt_pool_c")
+        self.assertEqual(routing_events[0]["body"]["candidate_count"], 3)
+
+    def test_gap1_deterministic_routing_is_stable(self) -> None:
+        """Gap 1: Repeated claims with same state must pick the same agent."""
+        from agp.models import CapabilityPool
+
+        session = SessionLocal()
+        try:
+            session.add(Capability(
+                capability_id="cap_stable",
+                name="Stable",
+                version="v1",
+                image_ref="test:v1",
+                model_ref="test",
+                resource_tier="small",
+                permission_profile="default",
+                queue_mode="capability_pool",
+                runtime_requirements_json={},
+                created_at=utc_now(),
+                updated_at=utc_now(),
+            ))
+            session.flush()
+            session.add(CapabilityPool(
+                capability_id="cap_stable",
+                queue_id="capability:cap_stable:v1",
+                routing_policy="least_recent",
+            ))
+            session.commit()
+        finally:
+            session.close()
+
+        for agent_id in ["agt_s1", "agt_s2"]:
+            self.client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_stable"})
+
+        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_stable", "hostname": "h"})
+        self.assertEqual(runtime.status_code, 200)
+
+        selected_agents = []
+        for _ in range(2):
+            self.client.post("/messages/send", json={
+                "target": {"type": "capability", "id": "cap_stable"},
+                "message": {"text": "stable work"},
+            })
+            claim = self.client.post("/runs/claim", json={
+                "runtime_id": "rtm_stable",
+                "capability_id": "cap_stable",
+                "lease_ttl_seconds": 30,
+            })
+            data = claim.json()["data"]
+            if data["claimed"]:
+                selected_agents.append(data["agent_id"])
+                run_id = data["run"]["run_id"]
+                artifacts = self._materialize_terminal_artifacts({
+                    "prompt.txt": "prompt",
+                    "transcript.txt": "transcript_log",
+                    "exec.txt": "exec_log",
+                    "result.txt": "result",
+                })
+                self.client.post(f"/runs/{run_id}/complete", json={
+                    "runtime_id": "rtm_stable",
+                    "lease_id": data["lease"]["lease_id"],
+                    "fencing_token": data["lease"]["fencing_token"],
+                    "artifacts": artifacts,
+                })
+
+        self.assertEqual(len(selected_agents), 2)
+        self.assertEqual(selected_agents[0], selected_agents[1])
+
+    def test_gap2_handoff_rejects_invalid_artifact_id(self) -> None:
+        """Gap 2: Handoff must reject artifact IDs that don't exist."""
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho1", "capability_id": "cap_python"})
+        self.assertEqual(agent.status_code, 200)
+
+        sent = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_ho1"},
+            "message": {"text": "handoff source"},
+        })
+        job_id = sent.json()["data"]["job_id"]
+
+        handoff = self.client.post(f"/jobs/{job_id}/handoff", json={
+            "targets": [{"type": "agent", "id": "agt_ho1"}],
+            "message": {"text": "handoff follow-up"},
+            "artifact_ids": ["art_nonexistent"],
+        })
+        self.assertEqual(handoff.status_code, 400)
+        self.assertIn("not found", handoff.json()["error"]["message"])
+
+    def test_gap2_handoff_rejects_artifacts_from_wrong_job(self) -> None:
+        """Gap 2: Handoff must reject artifacts that belong to a different job."""
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho2", "capability_id": "cap_python"})
+        self.assertEqual(agent.status_code, 200)
+        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_ho2", "hostname": "h"})
+        self.assertEqual(runtime.status_code, 200)
+
+        sent1 = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_ho2"},
+            "message": {"text": "job 1"},
+        })
+        job1_id = sent1.json()["data"]["job_id"]
+
+        claim = self.client.post("/runs/claim", json={
+            "runtime_id": "rtm_ho2", "agent_id": "agt_ho2", "lease_ttl_seconds": 30,
+        })
+        data = claim.json()["data"]
+        self.assertTrue(data["claimed"])
+        artifacts = self._materialize_terminal_artifacts({
+            "prompt.txt": "prompt",
+            "transcript.txt": "transcript_log",
+            "exec.txt": "exec_log",
+            "result.txt": "result",
+        })
+        run_id = data["run"]["run_id"]
+        self.client.post(f"/runs/{run_id}/complete", json={
+            "runtime_id": "rtm_ho2",
+            "lease_id": data["lease"]["lease_id"],
+            "fencing_token": data["lease"]["fencing_token"],
+            "artifacts": artifacts,
+        })
+
+        job1_artifacts = self.client.get(f"/jobs/{job1_id}/artifacts").json()["data"]["items"]
+        self.assertTrue(len(job1_artifacts) > 0)
+        art_id_from_job1 = job1_artifacts[0]["artifact_id"]
+
+        sent2 = self.client.post("/messages/send", json={
+            "target": {"type": "agent", "id": "agt_ho2"},
+            "message": {"text": "job 2"},
+        })
+        job2_id = sent2.json()["data"]["job_id"]
+
+        handoff = self.client.post(f"/jobs/{job2_id}/handoff", json={
+            "targets": [{"type": "agent", "id": "agt_ho2"}],
+            "message": {"text": "bad handoff"},
+            "artifact_ids": [art_id_from_job1],
+        })
+        self.assertEqual(handoff.status_code, 400)
+        self.assertIn("does not belong", handoff.json()["error"]["message"])
+
     def test_gap3_runtime_list_includes_claimed_work(self) -> None:
         """Gap 3: GET /runtimes must include active claimed work per runtime."""
         agent = self.client.post("/agents/up", json={"agent_id": "agt_cw", "capability_id": "cap_python"})

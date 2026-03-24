@@ -1,6 +1,6 @@
 """Lease expiry, sweeps, recovery, and routing flows."""
 
-from .base import *
+from tests.mvp_flow.base import *
 
 
 class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):

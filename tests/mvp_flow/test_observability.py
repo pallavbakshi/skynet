@@ -1,6 +1,6 @@
 """Observability, backup, restore, drills, and upgrade flows."""
 
-from .base import *
+from tests.mvp_flow.base import *
 
 
 class MvpFlowObservabilityTest(MvpFlowTestBase):
@@ -643,75 +643,3 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             json={"runtime_id": "rtm_major", "hostname": "localhost", "release_version": "1.0.0"},
         )
         self.assertEqual(major_skew.status_code, 409)
-
-    def test_handoff_creates_child_job_that_can_be_claimed(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_parent", "capability_id": "cap_python"})
-        self.client.post("/agents/up", json={"agent_id": "agt_child", "capability_id": "cap_python"})
-
-        parent = self.client.post(
-            "/messages/send",
-            json={
-                "target": {"type": "agent", "id": "agt_parent"},
-                "message": {"text": "parent result", "metadata": {}},
-                "detach_policy": {"mode": "inline"},
-            },
-            headers={"Idempotency-Key": "handoff-parent-1"},
-        ).json()["data"]
-
-        handoff = self.client.post(
-            f"/jobs/{parent['job_id']}/handoff",
-            json={
-                "artifact_ids": [parent["result_artifact_id"]],
-                "targets": [{"type": "agent", "id": "agt_child"}],
-                "message": {"text": "continue from parent", "metadata": {}},
-            },
-        )
-        self.assertEqual(handoff.status_code, 200)
-        child_job_id = handoff.json()["data"]["child_job_ids"][0]
-
-        self.client.post("/runtimes/register", json={"runtime_id": "rtm_handoff", "hostname": "localhost"})
-        claim = self.client.post(
-            "/runs/claim",
-            json={"runtime_id": "rtm_handoff", "agent_id": "agt_child"},
-        )
-        self.assertEqual(claim.status_code, 200)
-        payload = claim.json()["data"]
-        self.assertTrue(payload["claimed"])
-        self.assertEqual(payload["job"]["job_id"], child_job_id)
-
-    def test_delivery_table_backend_persists_and_acks_deliveries(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_queue", "capability_id": "cap_python"})
-        sent = self.client.post(
-            "/messages/send",
-            json={
-                "target": {"type": "agent", "id": "agt_queue"},
-                "message": {"text": "queue delivery", "metadata": {}},
-            },
-            headers={"Idempotency-Key": "queue-delivery-1"},
-        ).json()["data"]
-
-        session = SessionLocal()
-        try:
-            pending = session.query(QueueDeliveryRecord).filter_by(job_id=sent["job_id"]).one()
-            self.assertEqual(pending.state, "pending")
-            delivery_id = pending.delivery_id
-        finally:
-            session.close()
-
-        self.client.post("/runtimes/register", json={"runtime_id": "rtm_queue", "hostname": "localhost"})
-        claim = self.client.post(
-            "/runs/claim",
-            json={"runtime_id": "rtm_queue", "agent_id": "agt_queue"},
-        )
-        self.assertEqual(claim.status_code, 200)
-        self.assertTrue(claim.json()["data"]["claimed"])
-
-        session = SessionLocal()
-        try:
-            acked = session.get(QueueDeliveryRecord, delivery_id)
-            assert acked is not None
-            self.assertEqual(acked.state, "acked")
-            self.assertEqual(acked.job_id, sent["job_id"])
-            self.assertGreaterEqual(acked.delivery_attempt, 1)
-        finally:
-            session.close()

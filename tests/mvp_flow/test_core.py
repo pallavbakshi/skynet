@@ -1,6 +1,6 @@
 """Core agent/job/orchestration and artifact flows."""
 
-from .base import *
+from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):

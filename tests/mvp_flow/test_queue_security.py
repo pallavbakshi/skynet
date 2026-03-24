@@ -1,9 +1,81 @@
 """Queueing, handoff, auth, security, and compatibility flows."""
 
-from .base import *
+from tests.mvp_flow.base import *
 
 
 class MvpFlowQueueSecurityTest(MvpFlowTestBase):
+    def test_handoff_creates_child_job_that_can_be_claimed(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_parent", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_child", "capability_id": "cap_python"})
+
+        parent = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_parent"},
+                "message": {"text": "parent result", "metadata": {}},
+                "detach_policy": {"mode": "inline"},
+            },
+            headers={"Idempotency-Key": "handoff-parent-1"},
+        ).json()["data"]
+
+        handoff = self.client.post(
+            f"/jobs/{parent['job_id']}/handoff",
+            json={
+                "artifact_ids": [parent["result_artifact_id"]],
+                "targets": [{"type": "agent", "id": "agt_child"}],
+                "message": {"text": "continue from parent", "metadata": {}},
+            },
+        )
+        self.assertEqual(handoff.status_code, 200)
+        child_job_id = handoff.json()["data"]["child_job_ids"][0]
+
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_handoff", "hostname": "localhost"})
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_handoff", "agent_id": "agt_child"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        payload = claim.json()["data"]
+        self.assertTrue(payload["claimed"])
+        self.assertEqual(payload["job"]["job_id"], child_job_id)
+
+    def test_delivery_table_backend_persists_and_acks_deliveries(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_queue", "capability_id": "cap_python"})
+        sent = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_queue"},
+                "message": {"text": "queue delivery", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "queue-delivery-1"},
+        ).json()["data"]
+
+        session = SessionLocal()
+        try:
+            pending = session.query(QueueDeliveryRecord).filter_by(job_id=sent["job_id"]).one()
+            self.assertEqual(pending.state, "pending")
+            delivery_id = pending.delivery_id
+        finally:
+            session.close()
+
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_queue", "hostname": "localhost"})
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_queue", "agent_id": "agt_queue"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        self.assertTrue(claim.json()["data"]["claimed"])
+
+        session = SessionLocal()
+        try:
+            acked = session.get(QueueDeliveryRecord, delivery_id)
+            assert acked is not None
+            self.assertEqual(acked.state, "acked")
+            self.assertEqual(acked.job_id, sent["job_id"])
+            self.assertGreaterEqual(acked.delivery_attempt, 1)
+        finally:
+            session.close()
+
     def test_delivery_table_backend_redrives_stale_deliveries(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_redrive", "capability_id": "cap_python"})
         sent = self.client.post(
@@ -577,23 +649,43 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             adapter=DefaultAgentAdapter(),
             artifact_root=".agp-artifacts-tests",
         )
-        holder: dict[str, dict] = {}
+        holder: dict[str, object] = {}
 
         def run_worker() -> None:
-            holder["payload"] = worker.run_once(
-                agent_id="agt_interrupt",
-                heartbeat_interval_seconds=0.01,
-            )
+            try:
+                holder["payload"] = worker.run_once(
+                    agent_id="agt_interrupt",
+                    heartbeat_interval_seconds=0.01,
+                )
+            except Exception as exc:  # pragma: no cover - surfaced by the test assertions below
+                holder["error"] = exc
 
         thread = Thread(target=run_worker)
         thread.start()
-        sleep(0.03)
-        interrupt = self.client.post(f"/jobs/{job_id}/interrupt")
-        self.assertEqual(interrupt.status_code, 200)
-        thread.join(timeout=2.0)
+        try:
+            sleep(0.03)
+            interrupt = None
+            for _ in range(20):
+                try:
+                    interrupt = self.client.post(f"/jobs/{job_id}/interrupt")
+                    break
+                except Exception as exc:
+                    if "database is locked" not in str(exc):
+                        raise
+                    sleep(0.02)
+            self.assertIsNotNone(interrupt)
+            assert interrupt is not None
+            self.assertEqual(interrupt.status_code, 200)
+        finally:
+            thread.join(timeout=2.0)
+            runtime_client.close()
+
         self.assertFalse(thread.is_alive())
+        if "error" in holder:
+            raise holder["error"]  # type: ignore[misc]
 
         payload = holder["payload"]
+        assert isinstance(payload, dict)
         self.assertTrue(payload["cancelled"])
         self.assertEqual(payload["result"]["status"], "cancelled")
 
