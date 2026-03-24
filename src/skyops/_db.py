@@ -63,7 +63,7 @@ def db_seed() -> None:
         # Seed agents via SDK
         for agent_id, agent_data in cfg.agents.items():
             cap_id = agent_data.get("capability_id", "")
-            workspace = agent_data.get("workspace_ref")
+            workspace = cfg.resolve_agent_workspace(agent_id).get("workspace_ref")
             agents = client.list_agents(capability_id=cap_id, limit=200)
             existing = next(
                 (item for item in agents["items"] if item["agent_id"] == agent_id),
