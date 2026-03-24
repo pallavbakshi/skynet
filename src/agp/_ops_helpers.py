@@ -5,6 +5,7 @@ the skyops operator CLI package.
 """
 
 import json
+import sqlite3
 import shutil
 import socket
 from datetime import timedelta
@@ -46,7 +47,9 @@ def create_backup_snapshot(*, backup_dir: str | Path) -> dict:
 
     engine.dispose()
     if db_path.exists():
-        shutil.copy2(db_path, db_backup_path)
+        with sqlite3.connect(db_path) as source_conn:
+            with sqlite3.connect(db_backup_path) as backup_conn:
+                source_conn.backup(backup_conn)
 
     if artifact_backup_path.exists():
         shutil.rmtree(artifact_backup_path)
@@ -80,14 +83,14 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
     artifact_backup_path = Path(manifest["artifact_snapshot"])
 
     engine.dispose()
+    for suffix in ("", "-wal", "-shm"):
+        candidate = Path(f"{db_path}{suffix}")
+        if candidate.exists():
+            candidate.unlink()
     if db_backup_path.exists():
         db_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(db_backup_path, db_path)
     else:
-        for suffix in ("", "-wal", "-shm"):
-            candidate = Path(f"{db_path}{suffix}")
-            if candidate.exists():
-                candidate.unlink()
         from agp.migrations import apply_migrations
         apply_migrations()  # schema only; restore will repopulate data
 
