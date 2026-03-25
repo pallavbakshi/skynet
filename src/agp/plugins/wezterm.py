@@ -287,7 +287,10 @@ class WezTermHost(TerminalHost):
             or all(ch == "\u2500" for ch in ln if ch != " ")  # ────
             for ln in tail if ln
         )
-        has_shell = any(ln[0] in _SHELL_PROMPT_CHARS for ln in tail if ln)
+        has_shell = any(
+            ln[0] in _SHELL_PROMPT_CHARS or ln[-1] in ("$", "%", "#")
+            for ln in tail if ln
+        )
         if has_codex_tui or has_claude_tui:
             return True
         if has_shell:

@@ -1799,6 +1799,27 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertEqual(result.summary["mode"], "tui")
 
+    def test_wezterm_is_foreground_tui_detects_bash_prompt_with_trailing_dollar(self) -> None:
+        """A bash prompt like 'user@host:~$' must be detected as shell, not TUI."""
+
+        def runner(argv: list[str], input: str | None = None, **_: object):
+            if argv[2] == "get-text":
+                return type("R", (), {"stdout": "agpuser@agp-runtime:~$ \n", "stderr": "", "returncode": 0})()
+            if argv[2] == "list":
+                return type("R", (), {
+                    "stdout": json.dumps([{
+                        "pane_id": 99, "tab_id": 1, "window_id": 1,
+                        "workspace": "agp-test", "window_title": "AGP:agt_shell",
+                        "tab_title": "AGP:agt_shell", "cwd": "/home/agpuser",
+                    }]),
+                    "stderr": "", "returncode": 0,
+                })()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = WezTermHost(workspace="agp-test", runner=runner)
+        session = host.get_or_create_session(agent_id="agt_shell")
+        self.assertFalse(host.is_foreground_tui(session))
+
     def test_build_agent_adapter_claude_code(self) -> None:
         """build_agent_adapter should return ClaudeCodeAdapter for kind='claude_code'."""
         adapter = build_agent_adapter("claude_code")
