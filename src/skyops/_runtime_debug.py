@@ -203,6 +203,218 @@ def runtime_work_loop(
             os.environ["AGP_RUNTIME_BEARER_TOKEN"] = previous_token or ""
 
 
+_DEFAULT_VOLUME = "agp-credentials"
+_CRED_MOUNT = "/credentials"
+
+
+@runtime_debug_app.command("env")
+def runtime_env(
+    key: str | None = typer.Argument(None, help="Variable name. Omit to list all."),
+    value: str | None = typer.Argument(None, help="Value to set. Omit to show current value."),
+    unset: bool = typer.Option(False, "--unset", "-d", help="Remove the variable."),
+    file: str | None = typer.Option(None, "--file", "-f", help="Import a local .env file (replaces all vars)."),
+    volume: str = typer.Option(_DEFAULT_VOLUME, "--volume", help="Docker volume."),
+    image: str = typer.Option("agp-runtime-test:latest", "--image", help="Runtime image."),
+) -> None:
+    """Manage shared environment variables on the credentials volume.
+
+    Variables are stored in /credentials/.env and sourced by every
+    container and every shell (including docker exec) automatically.
+
+    Examples:
+        skyops runtime env                          # list all vars
+        skyops runtime env OPENAI_API_KEY sk-...    # set a var
+        skyops runtime env OPENAI_API_KEY           # show a var
+        skyops runtime env OPENAI_API_KEY --unset   # remove a var
+        skyops runtime env --file .env              # import a local .env file
+    """
+    docker = shutil.which("docker")
+    if not docker:
+        typer.echo("docker not found in PATH", err=True)
+        raise typer.Exit(1)
+
+    env_path = f"{_CRED_MOUNT}/.env"
+    mount = ["-v", f"{volume}:{_CRED_MOUNT}"]
+
+    def _run_in_vol(cmd: str, *, stdin: str | None = None) -> str:
+        r = subprocess.run(
+            [docker, "run", "--rm", "-i", *mount, image, "sh", "-c", cmd],
+            input=stdin, capture_output=True, text=True, check=False,
+        )
+        return r.stdout
+
+    # Import from file
+    if file is not None:
+        import pathlib
+        content = pathlib.Path(file).read_text()
+        _run_in_vol(f"cat > {env_path}", stdin=content)
+        count = sum(1 for ln in content.splitlines() if ln.strip() and not ln.startswith("#"))
+        typer.echo(f"✓ Imported {count} variable(s) from {file}")
+        return
+
+    # List all
+    if key is None:
+        out = _run_in_vol(f"cat {env_path} 2>/dev/null || true")
+        typer.echo(out or "(empty)")
+        return
+
+    # Unset
+    if unset:
+        _run_in_vol(
+            f"touch {env_path} && "
+            f"grep -v '^{key}=' {env_path} > {env_path}.tmp && "
+            f"mv {env_path}.tmp {env_path}"
+        )
+        typer.echo(f"✓ Unset {key}")
+        return
+
+    # Show single var
+    if value is None:
+        out = _run_in_vol(f"grep '^{key}=' {env_path} 2>/dev/null || true")
+        typer.echo(out.strip() or f"{key} not set")
+        return
+
+    # Set var — remove old entry, append new one
+    import shlex
+    safe_value = shlex.quote(value)
+    _run_in_vol(
+        f"touch {env_path} && "
+        f"grep -v '^{key}=' {env_path} > {env_path}.tmp 2>/dev/null; "
+        f"echo '{key}='{safe_value} >> {env_path}.tmp && "
+        f"mv {env_path}.tmp {env_path}"
+    )
+    typer.echo(f"✓ {key} set")
+
+
+_TOOL_AUTH: dict[str, dict] = {
+    "claude": {
+        "auth_cmd": "claude --dangerously-skip-permissions",
+        "home_dir": ".claude",
+        "verify_file": ".credentials.json",
+        "description": "Claude Code OAuth",
+        "post_auth_copy": (".claude.json", ".claude.json"),  # $HOME file → volume subdir
+    },
+    "codex": {
+        "auth_cmd": "codex",
+        "home_dir": ".codex",
+        "verify_file": None,
+        "description": "Codex setup",
+        "post_auth_copy": None,
+    },
+}
+
+
+@runtime_debug_app.command("auth")
+def runtime_auth(
+    tool: str = typer.Argument("claude", help=f"Tool to authenticate: {', '.join(_TOOL_AUTH)}"),
+    image: str = typer.Option("agp-runtime-test:latest", "--image", help="Runtime image."),
+    volume: str = typer.Option("agp-credentials", "--volume", help="Docker volume for shared credentials."),
+    user: str = typer.Option("pb", "--user", "-u", help="Container user."),
+    hostname: str = typer.Option("agp-runtime", "--hostname", help="Container hostname (must match runtime identity)."),
+    mac: str = typer.Option("02:42:37:fc:f5:93", "--mac", help="Container MAC (must match runtime identity)."),
+) -> None:
+    """Run interactive auth setup for a tool (claude, codex).
+
+    Launches a temporary container with the credentials volume,
+    runs the tool's auth flow, and persists credentials into the
+    shared volume under /credentials/<tool>/.
+
+    Examples:
+        skyops runtime auth claude   # OAuth for Claude Code
+        skyops runtime auth codex    # First-run setup for Codex
+    """
+    import shlex
+
+    if tool not in _TOOL_AUTH:
+        typer.echo(f"Unknown tool: {tool}. Supported: {', '.join(_TOOL_AUTH)}", err=True)
+        raise typer.Exit(1)
+
+    spec = _TOOL_AUTH[tool]
+    docker = shutil.which("docker")
+    if not docker:
+        typer.echo("docker not found in PATH", err=True)
+        raise typer.Exit(1)
+
+    safe_user = shlex.quote(user)
+    home = f"/home/{user}"
+    cred_root = "/credentials"
+    tool_dir = f"{cred_root}/{tool}"
+
+    typer.echo(f"Starting {spec['description']} (volume={volume}, tool={tool})...")
+    typer.echo("Complete the auth flow, then exit when done.\n")
+
+    # Build the in-container bash script:
+    # 1. Create user, tool subdir, symlink into $HOME
+    # 2. Run tool's auth command
+    # 3. Post-auth copy (e.g. .claude.json)
+    setup = (
+        f"useradd -m {safe_user} 2>/dev/null; "
+        f"mkdir -p {tool_dir}; "
+        f"chown -R {safe_user}:{safe_user} {tool_dir}; "
+        f"ln -sfn {tool_dir} {home}/{spec['home_dir']}; "
+    )
+    auth = f"runuser -u {safe_user} -- env HOME={home} {spec['auth_cmd']}; EC=$?; "
+    post = ""
+    if spec.get("post_auth_copy"):
+        src_name, dst_name = spec["post_auth_copy"]
+        post = (
+            f"if [ -f {home}/{src_name} ]; then "
+            f"  cp {home}/{src_name} {tool_dir}/{dst_name}; "
+            f"else "
+            f'  echo "WARNING: {home}/{src_name} not found" >&2; '
+            f"fi; "
+        )
+
+    result = subprocess.run([
+        docker, "run", "-it", "--rm",
+        "--hostname", hostname,
+        "--mac-address", mac,
+        "-v", f"{volume}:{cred_root}",
+        image,
+        "bash", "-c", setup + auth + post + "exit $EC",
+    ], check=False)
+
+    if result.returncode != 0:
+        typer.echo(f"\n✗ Exited with code {result.returncode}.", err=True)
+        raise typer.Exit(result.returncode)
+
+    # Verify tool-specific credential file if defined
+    if spec.get("verify_file"):
+        check = subprocess.run(
+            [docker, "run", "--rm", "-v", f"{volume}:{cred_root}",
+             image, "test", "-s", f"{tool_dir}/{spec['verify_file']}"],
+            check=False,
+        )
+        if check.returncode != 0:
+            typer.echo(f"\n✗ No credentials found at {tool_dir}/{spec['verify_file']}.", err=True)
+            typer.echo("  The auth flow may not have completed. Run again.", err=True)
+            raise typer.Exit(1)
+
+    # Claude-specific: verify onboarding state
+    if tool == "claude" and spec.get("post_auth_copy"):
+        _, dst_name = spec["post_auth_copy"]
+        check_onboarding = subprocess.run(
+            [docker, "run", "--rm", "-v", f"{volume}:{cred_root}",
+             image, "test", "-s", f"{tool_dir}/{dst_name}"],
+            check=False,
+        )
+        if check_onboarding.returncode != 0:
+            typer.echo("\n⚠ Credentials saved but onboarding state (.claude.json) missing.", err=True)
+            typer.echo("  First-run screens may appear on next launch.", err=True)
+        else:
+            typer.echo("✓ Onboarding state persisted.")
+
+    typer.echo(f"✓ {spec['description']} credentials saved to volume.")
+
+    # Write sentinel so the entrypoint knows this is a real initialized volume
+    subprocess.run(
+        [docker, "run", "--rm", "-v", f"{volume}:{cred_root}",
+         image, "sh", "-c", f"date -Iseconds > {cred_root}/.volume-initialized"],
+        check=False,
+    )
+    typer.echo("✓ Volume initialized. Ready for runtime containers.")
+
+
 @runtime_debug_app.command("attach")
 def runtime_attach(
     container: str = typer.Argument(
@@ -248,7 +460,15 @@ def runtime_attach(
 
     if host_kind == "tmux":
         if peek:
-            result = _docker_exec(["tmux", "capture-pane", "-t", pane_id or "0", "-p"])
+            # Auto-find the tmux session name
+            target = pane_id
+            if not target:
+                result = _docker_exec(["tmux", "list-sessions", "-F", "#{session_name}"])
+                sessions = [s.strip() for s in (result.stdout or "").splitlines() if s.strip()]
+                # Prefer agp-* sessions over default ones
+                target = next((s for s in sessions if s.startswith("agp-")), sessions[0] if sessions else "0")
+            # -S -50 captures scrollback (TUI apps use alternate buffer)
+            result = _docker_exec(["tmux", "capture-pane", "-t", target, "-p", "-S", "-50"])
             typer.echo(result.stdout)
         else:
             os.execvp(docker, [

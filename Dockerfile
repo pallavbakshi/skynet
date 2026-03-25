@@ -73,26 +73,22 @@ ENV AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
     DISABLE_TELEMETRY=1 \
     NO_UPDATE_NOTIFIER=1
 
-# ── Auth & data volumes ──────────────────────────────────────────────
-# Two-volume architecture:
-#   agp-claude-auth  → /auth             (read-only)  — OAuth credentials
-#   agp-claude-data  → /home/pb/.claude  (read-write) — shared session state
+# ── Credentials volume ────────────────────────────────────────────────
+# Shared volume: agp-credentials → /credentials (read-write)
+# Contains per-tool subdirectories symlinked into $HOME by entrypoint:
+#   /credentials/claude/  → /home/pb/.claude
+#   /credentials/codex/   → /home/pb/.codex
 #
-# The auth volume is seeded once via OAuth; the data volume is shared
-# across all containers for persistent chat history and sessions.
-# The entrypoint injects credentials into the data volume on first run.
+# Multiple containers share the volume concurrently.  Claude Code
+# detects token refreshes by other containers via mtime and re-reads.
 #
 # Stable machine identity so all containers look like one machine:
 #   docker run --hostname agp-runtime --mac-address 02:42:37:fc:f5:93 \
-#              -v agp-claude-auth:/auth:ro \
-#              -v agp-claude-data:/home/pb/.claude ...
+#              -v agp-credentials:/credentials ...
 #
-# One-time OAuth setup (only needed once per host):
-#   docker run -it --hostname agp-runtime --mac-address 02:42:37:fc:f5:93 \
-#              -v agp-claude-auth:/auth <image> \
-#              bash -c 'useradd -m pb && runuser -u pb -- \
-#              claude --dangerously-skip-permissions'
-#   (complete OAuth in browser, /exit, done — auth persists in the volume)
+# One-time auth setup (per tool, only needed once per host):
+#   skyops runtime auth claude   # OAuth for Claude Code
+#   skyops runtime auth codex    # First-run setup for Codex
 LABEL agp.runtime.hostname="agp-runtime" \
       agp.runtime.mac="02:42:37:fc:f5:93"
 
