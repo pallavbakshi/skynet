@@ -1420,3 +1420,260 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         except RecoverableExecutionError:
             pass
         self.assertTrue(host.reset_called, "wezterm ephemeral should reset session")
+
+    # ── Claude Code adapter tests ────────────────────────────────────
+
+    def test_claude_code_output_cleaning_extracts_last_response(self) -> None:
+        """_clean_claude_code_output should extract the response from TUI chrome."""
+        raw = (
+            "\u256d\u2500\u2500\u2500 Claude Code v2.1.72 \u2500\u2500\u2500\u256e\n"
+            "\u2502  Opus 4.6 \u00b7 Claude Max  \u2502\n"
+            "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u256f\n"
+            "\u276f What is 2+2?\n"
+            "\u23fa 2 + 2 = 4.\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        )
+        cleaned = _clean_claude_code_output(raw)
+        self.assertEqual(cleaned, "2 + 2 = 4.")
+
+    def test_claude_code_output_cleaning_handles_tool_results(self) -> None:
+        raw = (
+            "\u276f Read this file\n"
+            "\u23fa Let me read the file.\n"
+            "  Read src/foo.py\n"
+            "  \u23bf file contents here\n"
+            "\u23fa The file contains foo.\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+        )
+        cleaned = _clean_claude_code_output(raw)
+        self.assertIn("The file contains foo.", cleaned)
+
+    def test_claude_code_output_cleaning_handles_compaction(self) -> None:
+        raw = (
+            "\u276f old question\n"
+            "\u23fa old answer\n"
+            "\u273b Conversation compacted\n"
+            "\u276f new question\n"
+            "\u23fa new answer here\n"
+            "\u276f \n"
+        )
+        cleaned = _clean_claude_code_output(raw)
+        self.assertEqual(cleaned, "new answer here")
+
+    def test_claude_code_ready_detection(self) -> None:
+        adapter = ClaudeCodeAdapter()
+        # Ready: has ❯ prompt and separator
+        ready_screen = (
+            "\u256d\u2500 Claude Code \u2500\u256e\n"
+            "\u2570\u2500\u2500\u2500\u2500\u2500\u2500\u256f\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+        )
+        self.assertTrue(adapter._looks_like_ready(ready_screen))
+        # Not ready: just a shell with ❯
+        shell_screen = "\u276f ls\nfile1 file2\n\u276f \n"
+        self.assertFalse(adapter._looks_like_ready(shell_screen))
+
+    def test_claude_code_shell_returned_detection(self) -> None:
+        adapter = ClaudeCodeAdapter()
+        # Shell returned (no TUI indicators)
+        self.assertTrue(adapter._looks_like_shell_returned("$ \nsome output\n$ "))
+        # TUI still running (has separator)
+        tui_screen = "\u23fa response\n\u2500\u2500\u2500\u2500\n\u276f \n"
+        self.assertFalse(adapter._looks_like_shell_returned(tui_screen))
+
+    def test_claude_code_bootstrap_verifies_health(self) -> None:
+        from agp.runtime import SessionHealth
+
+        class UnhealthyHost(InProcessTerminalHost):
+            def health(self, session):
+                return SessionHealth(
+                    session_id=session.session_id,
+                    exists=False,
+                    healthy=False,
+                    reason="pane_dead",
+                )
+
+        adapter = ClaudeCodeAdapter()
+        host = UnhealthyHost()
+        session = host.get_or_create_session(agent_id="agt_cc_health")
+        claimed = {"agent_id": "agt_cc_health", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}}
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.assertIn("unhealthy before bootstrap", str(ctx.exception))
+
+    def test_claude_code_sticky_health_check_re_bootstraps_on_crash(self) -> None:
+        tui_alive = {"value": True}
+
+        class WezTermLikeHost(InProcessTerminalHost):
+            @property
+            def kind(self):
+                return "wezterm"
+
+            def is_foreground_tui(self, session):
+                return tui_alive["value"]
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_timeout_seconds=0.1,
+        )
+        host = WezTermLikeHost()
+        session = host.get_or_create_session(agent_id="agt_cc_sticky")
+        claimed = {"agent_id": "agt_cc_sticky", "job": {"job_id": "j1"}, "run": {"run_id": "r1"}, "message": {"text": "task"}}
+
+        session.metadata["claude_code_bootstrapped"] = True
+        adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.assertTrue(session.metadata.get("claude_code_bootstrapped"))
+
+        # TUI crashed
+        tui_alive["value"] = False
+        try:
+            adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        except RecoverableExecutionError:
+            pass
+        history = host._history.get(session.session_id, [])
+        self.assertTrue(any("claude" in entry.lower() for entry in history),
+                        "should have attempted to re-launch claude code")
+
+    def test_claude_code_sticky_cursor_preserved_across_runs(self) -> None:
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=1.0,
+        )
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_cursor")
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_cursor"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        # Inject a visible screen showing a completed Claude Code turn
+        screen_content = (
+            "\u276f test task\n"
+            "\u23fa The answer is 42\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host._history[session.session_id] = [screen_content]
+
+        claimed = {
+            "agent_id": "agt_cc_cursor",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "test task"},
+        }
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed,
+            supervisor=SupervisorStub(),
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("restored_cursor", session.metadata)
+
+    def test_claude_code_recover_clears_bootstrap_on_exit(self) -> None:
+        adapter = ClaudeCodeAdapter(session_mode="sticky")
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_crash")
+        session.metadata["claude_code_bootstrapped"] = True
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_crash"})()
+                })()
+
+        adapter.recover(
+            host=host, session=session,
+            claimed={"agent_id": "agt_cc_crash", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
+            attempt=1,
+            error=RecoverableExecutionError("claude code cli exited during execution"),
+            supervisor=SupervisorStub(),
+        )
+        self.assertNotIn("claude_code_bootstrapped", session.metadata)
+
+    def test_claude_code_recover_keeps_bootstrap_on_other_errors(self) -> None:
+        adapter = ClaudeCodeAdapter(session_mode="sticky")
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_other")
+        session.metadata["claude_code_bootstrapped"] = True
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_other"})()
+                })()
+
+        adapter.recover(
+            host=host, session=session,
+            claimed={"agent_id": "agt_cc_other", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
+            attempt=1,
+            error=RecoverableExecutionError("some other error"),
+            supervisor=SupervisorStub(),
+        )
+        self.assertTrue(session.metadata.get("claude_code_bootstrapped"))
+
+    def test_claude_code_tmux_uses_tui_mode(self) -> None:
+        """On tmux, Claude Code adapter uses TUI mode (not oneshot)."""
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=1.0,
+        )
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_tmux")
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_tmux"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        # Inject a visible screen showing a completed Claude Code turn
+        screen_content = (
+            "\u276f What is 2+2?\n"
+            "\u23fa 4\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host._history[session.session_id] = [screen_content]
+
+        claimed = {
+            "agent_id": "agt_cc_tmux",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "What is 2+2?"},
+        }
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed,
+            supervisor=SupervisorStub(),
+        )
+        self.assertEqual(result.summary["mode"], "tui")
+
+    def test_build_agent_adapter_claude_code(self) -> None:
+        """build_agent_adapter should return ClaudeCodeAdapter for kind='claude_code'."""
+        adapter = build_agent_adapter("claude_code")
+        self.assertEqual(adapter.kind, "claude_code")
+        self.assertIsInstance(adapter, ClaudeCodeAdapter)

@@ -16,9 +16,6 @@ from agp.runtime import (
 # Shell prompt characters that indicate the CLI exited and the shell returned.
 _SHELL_PROMPT_CHARS = {"\u276f", "\u2733", "$", "%", "#"}
 
-# Known TUI process names for foreground detection.
-_TUI_PROCESSES = {"codex", "ncodex", "claude", "gemini"}
-
 
 class WezTermHost(TerminalHost):
     def __init__(
@@ -118,10 +115,80 @@ class WezTermHost(TerminalHost):
         self._run(["set-tab-title", "--pane-id", pane_id, self._marker(agent_id)])
         return session
 
+    # Maximum bytes per wezterm send-text call.  Larger payloads are
+    # automatically chunked to avoid terminal buffer overflow (matching
+    # the chunking strategy used by wezutils).
+    _PASTE_CHUNK_SIZE = 4096
+
     def send_text(self, session: TerminalSession, text: str, *, enter: bool = True) -> None:
-        self._run(["send-text", "--pane-id", session.session_id, "--no-paste", text])
+        pane_args = ["send-text", "--pane-id", session.session_id]
+        is_multiline = "\n" in text
+
+        if is_multiline:
+            # Multiline: use paste mode (no --no-paste) so TUI receives
+            # the full text as a single bracketed paste, then send Enter
+            # separately after a short delay.
+            self._send_chunked(pane_args, text)
+        else:
+            self._run([*pane_args, "--no-paste", text])
+
         if enter:
-            self._run(["send-text", "--pane-id", session.session_id, "--no-paste", "\r"])
+            # Give the TUI time to process the text before Enter.
+            sleep(0.15 if is_multiline else 0.05)
+            self._run([*pane_args, "--no-paste", "\r"])
+
+    _MAX_CHUNKS = 1000
+    _MAX_LINE_SIZE = 10_000_000
+
+    def _send_chunked(self, base_args: list[str], text: str) -> None:
+        """Send text in chunks to avoid terminal buffer overflow.
+
+        Prefers splitting on line boundaries to avoid cutting mid-word.
+        Falls back to byte-level splitting for individual lines that
+        exceed the chunk size.  Guards against unbounded chunk creation
+        and oversized lines.
+        """
+        encoded = text.encode("utf-8", errors="replace")
+        if len(encoded) <= self._PASTE_CHUNK_SIZE:
+            self._run([*base_args, text])
+            return
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_size = 0
+
+        for line in text.splitlines(keepends=True):
+            if len(line) > self._MAX_LINE_SIZE:
+                continue  # skip pathologically long lines
+            line_size = len(line.encode("utf-8", errors="replace"))
+            if current and current_size + line_size > self._PASTE_CHUNK_SIZE:
+                chunks.append("".join(current))
+                if len(chunks) >= self._MAX_CHUNKS:
+                    break
+                current = []
+                current_size = 0
+            if line_size > self._PASTE_CHUNK_SIZE:
+                # Force-split oversized line by bytes.
+                line_enc = line.encode("utf-8", errors="replace")
+                i = 0
+                while i < len(line_enc) and len(chunks) < self._MAX_CHUNKS:
+                    end = min(i + self._PASTE_CHUNK_SIZE, len(line_enc))
+                    if end < len(line_enc):
+                        while end > i and (line_enc[end] & 0xC0) == 0x80:
+                            end -= 1
+                    if end <= i:
+                        end = i + 1
+                    chunks.append(line_enc[i:end].decode("utf-8", errors="replace"))
+                    i = end
+                continue
+            current.append(line)
+            current_size += line_size
+
+        if current and len(chunks) < self._MAX_CHUNKS:
+            chunks.append("".join(current))
+
+        for chunk in chunks:
+            self._run([*base_args, chunk])
 
     def create_cursor(self, session: TerminalSession) -> OutputCursor:
         baseline = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
@@ -201,6 +268,9 @@ class WezTermHost(TerminalHost):
         Reads the visible screen and checks for TUI-specific markers vs.
         shell prompt markers.  Returns True if a TUI appears to be running,
         False if the shell prompt has returned.
+
+        Detects both Codex TUI (› prompt marker) and Claude Code TUI
+        (⏺ response, ────  separators, ⏵⏵ status bar, ╭/╰ welcome box).
         """
         screen = _strip_ansi(self.read_visible(session))
         if not screen.strip():
@@ -208,9 +278,17 @@ class WezTermHost(TerminalHost):
         lines = screen.strip().splitlines()
         # Check the last few non-empty lines for shell vs. TUI indicators.
         tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
-        has_tui = any("\u203a" in ln for ln in tail)  # › = Codex prompt
+        has_codex_tui = any("\u203a" in ln for ln in tail)  # › = Codex prompt
+        # Claude Code indicators: ⏺ response, ────  separator, ⏵⏵ status bar, ╭/╰ box
+        has_claude_tui = any(
+            ln.startswith("\u23fa")  # ⏺
+            or ln.startswith("\u256d") or ln.startswith("\u2570")  # ╭ ╰
+            or "\u23f5\u23f5" in ln  # ⏵⏵ status bar
+            or all(ch == "\u2500" for ch in ln if ch != " ")  # ────
+            for ln in tail if ln
+        )
         has_shell = any(ln[0] in _SHELL_PROMPT_CHARS for ln in tail if ln)
-        if has_tui:
+        if has_codex_tui or has_claude_tui:
             return True
         if has_shell:
             return False

@@ -48,4 +48,14 @@ def build_agent_adapter(kind: str, **kwargs: Any):
             idle_timeout_seconds=kwargs.get("idle_timeout_seconds", settings.codex_idle_timeout_seconds),
             session_mode=kwargs.get("session_mode", settings.codex_session_mode),
         )
+    if kind == "claude_code":
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        return ClaudeCodeAdapter(
+            cli_command=kwargs.get("cli_command", settings.claude_code_cli_command),
+            idle_poll_seconds=kwargs.get("idle_poll_seconds", settings.claude_code_idle_poll_seconds),
+            idle_after=kwargs.get("idle_after", settings.claude_code_idle_after),
+            idle_timeout_seconds=kwargs.get("idle_timeout_seconds", settings.claude_code_idle_timeout_seconds),
+            session_mode=kwargs.get("session_mode", settings.claude_code_session_mode),
+            bootstrap_settle_seconds=kwargs.get("bootstrap_settle_seconds", settings.claude_code_bootstrap_settle_seconds),
+        )
     raise ValueError(f"unsupported agent adapter kind: {kind}")

@@ -155,10 +155,13 @@ class TmuxHost(TerminalHost):
         self, session: TerminalSession, text: str, *, enter: bool = True
     ) -> None:
         # Use -l (literal) for the text to prevent tmux interpreting key names,
-        # then send Enter as a separate key event.
+        # then send Enter as a separate key event with a small delay so the
+        # TUI has time to process the text.
         if text:
             self._run(["send-keys", "-t", session.session_id, "-l", text])
         if enter:
+            if text:
+                sleep(0.15 if "\n" in text else 0.05)
             self._run(["send-keys", "-t", session.session_id, "Enter"])
 
     # ── Absolute line tracking via tmux format variables ────────────

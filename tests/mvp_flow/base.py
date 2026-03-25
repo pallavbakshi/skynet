@@ -64,6 +64,7 @@ from agp._ops_helpers import (
 )
 
 from agp.runtime import (
+    ClaudeCodeAdapter,
     CodexAdapter,
     DefaultAgentAdapter,
     InProcessTerminalHost,
@@ -74,6 +75,7 @@ from agp.runtime import (
     RuntimeSupervisor,
     WezTermHost,
     _OutputAccumulator,
+    _clean_claude_code_output,
     _clean_codex_tui_output,
     _compute_output_delta,
     _strip_ansi,
