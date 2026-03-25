@@ -85,11 +85,33 @@ if [[ -n "${AGP_RUNTIME_CAPABILITY_ID:-}" ]]; then
   ARGS+=(--capability-id "${AGP_RUNTIME_CAPABILITY_ID}")
 fi
 
+# ── Build env for the runtime user ───────────────────────────────────
+# Forward all provider/endpoint vars so _provider_env() picks them up
+# inside tmux sessions.  This lets you switch providers per-container:
+#   docker run -e ANTHROPIC_BASE_URL=https://openrouter.ai/api \
+#              -e ANTHROPIC_AUTH_TOKEN=sk-or-... \
+#              -e ANTHROPIC_API_KEY="" ...
+USER_ENV=(
+  HOME="${AGP_USER_HOME}"
+  PATH="/usr/local/bin:/usr/bin:/bin"
+  WEZTERM_CONFIG_FILE="${WEZTERM_CONFIG_FILE:-/etc/wezterm/wezterm.lua}"
+  DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}"
+  DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}"
+  NO_UPDATE_NOTIFIER="${NO_UPDATE_NOTIFIER:-1}"
+)
+
+# Passthrough provider vars (only if set — allows explicit empty string)
+for _var in \
+  ANTHROPIC_API_KEY ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN \
+  ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL \
+  ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL \
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS \
+  OPENAI_API_KEY OPENAI_BASE_URL OPENROUTER_API_KEY \
+  AGP_SERVER_URL; do
+  if [[ -v "$_var" ]]; then
+    USER_ENV+=("${_var}=${!_var}")
+  fi
+done
+
 # ── Run as non-root user ─────────────────────────────────────────────
-exec runuser -u "${AGP_USER}" -- env \
-  HOME="${AGP_USER_HOME}" \
-  PATH="/usr/local/bin:/usr/bin:/bin" \
-  DISABLE_AUTOUPDATER="${DISABLE_AUTOUPDATER:-1}" \
-  DISABLE_TELEMETRY="${DISABLE_TELEMETRY:-1}" \
-  WEZTERM_CONFIG_FILE="${WEZTERM_CONFIG_FILE:-/etc/wezterm/wezterm.lua}" \
-  "${ARGS[@]}"
+exec runuser -u "${AGP_USER}" -- env "${USER_ENV[@]}" "${ARGS[@]}"

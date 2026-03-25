@@ -23,17 +23,30 @@ from agp.runtime import (
 
 
 def _provider_env() -> dict[str, str]:
-    """Collect provider API keys and AGP connection vars for tmux sessions.
+    """Collect provider API keys, endpoint overrides, and runtime vars for tmux sessions.
 
-    Prefer the direct OpenAI path when OPENAI_API_KEY is already
-    available and no alternate base URL was requested. That matches the
-    behavior of a manual local ``ncodex`` launch on this host.
+    Supports on-the-fly provider switching via env vars at ``docker run`` time:
 
-    When only OPENROUTER_API_KEY is available, force the OpenRouter
-    endpoint and mirror the key into OPENAI_API_KEY for older Codex CLI
-    builds that only read the OpenAI-compatible variable.
+    Direct Anthropic (default):
+        ANTHROPIC_API_KEY=sk-ant-...
+
+    Claude Code via OpenRouter:
+        ANTHROPIC_BASE_URL=https://openrouter.ai/api
+        ANTHROPIC_AUTH_TOKEN=sk-or-...
+        ANTHROPIC_API_KEY=""              (must be explicitly empty)
+
+    Codex via OpenRouter:
+        OPENROUTER_API_KEY=sk-or-...      (auto-sets OPENAI_BASE_URL + OPENAI_API_KEY)
+
+    Model overrides (Claude Code):
+        ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.6
+        ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6
+        ANTHROPIC_DEFAULT_HAIKU_MODEL=anthropic/claude-haiku-4.5
+        CLAUDE_CODE_SUBAGENT_MODEL=anthropic/claude-opus-4.6
     """
     env: dict[str, str] = {}
+
+    # ── Codex / OpenAI-compatible endpoint ───────────────────────────
     openai_key = os.environ.get("OPENAI_API_KEY")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_base_url = os.environ.get("OPENAI_BASE_URL")
@@ -48,18 +61,37 @@ def _provider_env() -> dict[str, str]:
             env["OPENAI_API_KEY"] = openai_key
         if openai_base_url:
             env["OPENAI_BASE_URL"] = openai_base_url
+
+    # ── Claude Code / Anthropic endpoint ─────────────────────────────
+    # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code
+    # to use ANTHROPIC_AUTH_TOKEN instead (required for OpenRouter).
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key:
+    if anthropic_key is not None:
         env["ANTHROPIC_API_KEY"] = anthropic_key
+
+    # Passthrough: endpoint, auth token, model overrides
+    _ANTHROPIC_PASSTHROUGH = (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    )
+    for key in _ANTHROPIC_PASSTHROUGH:
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+
+    # ── AGP + container runtime vars ─────────────────────────────────
     agp_server_url = os.environ.get("AGP_SERVER_URL")
     if agp_server_url:
         env["AGP_SERVER_URL"] = agp_server_url
-    # Container-friendly vars: prevent Claude Code auto-updater and telemetry
-    # prompts that would block headless/autonomous execution.
-    for passthrough in ("DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY"):
-        val = os.environ.get(passthrough)
+    for key in ("DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "NO_UPDATE_NOTIFIER"):
+        val = os.environ.get(key)
         if val:
-            env[passthrough] = val
+            env[key] = val
     return env
 
 
