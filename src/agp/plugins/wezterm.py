@@ -96,6 +96,30 @@ class WezTermHost(TerminalHost):
         existing = self._find_existing(agent_id=agent_id)
         if existing is not None:
             return existing
+        # Reuse an unmarked idle pane in the target workspace (e.g. the
+        # default pane the mux-server creates on startup) so the agent
+        # session is the pane the user lands on when connecting.
+        marker = self._marker(agent_id)
+        for pane in self._list_panes():
+            if pane.get("workspace") != self.workspace:
+                continue
+            if pane.get("window_title") == marker or pane.get("tab_title") == marker:
+                continue
+            # Skip panes already claimed by another agent.
+            if any(
+                t.startswith("AGP:") for t in (pane.get("window_title", ""), pane.get("tab_title", ""))
+            ):
+                continue
+            pane_id = str(pane["pane_id"])
+            session = TerminalSession(
+                session_id=pane_id,
+                agent_id=agent_id,
+                workspace_ref=workspace_ref or pane.get("cwd"),
+                metadata={"pane_id": pane["pane_id"], "workspace": self.workspace},
+            )
+            self._run(["set-window-title", "--pane-id", pane_id, marker])
+            self._run(["set-tab-title", "--pane-id", pane_id, marker])
+            return session
         cwd = workspace_ref or self.default_cwd
         args = ["spawn", "--new-window", "--workspace", self.workspace]
         if self.domain:
@@ -111,8 +135,8 @@ class WezTermHost(TerminalHost):
             workspace_ref=workspace_ref,
             metadata={"pane_id": int(pane_id), "workspace": self.workspace},
         )
-        self._run(["set-window-title", "--pane-id", pane_id, self._marker(agent_id)])
-        self._run(["set-tab-title", "--pane-id", pane_id, self._marker(agent_id)])
+        self._run(["set-window-title", "--pane-id", pane_id, marker])
+        self._run(["set-tab-title", "--pane-id", pane_id, marker])
         return session
 
     # Maximum bytes per wezterm send-text call.  Larger payloads are
