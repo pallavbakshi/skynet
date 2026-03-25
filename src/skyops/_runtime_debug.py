@@ -213,27 +213,32 @@ def runtime_env(
     value: str | None = typer.Argument(None, help="Value to set. Omit to show current value."),
     unset: bool = typer.Option(False, "--unset", "-d", help="Remove the variable."),
     file: str | None = typer.Option(None, "--file", "-f", help="Import a local .env file (replaces all vars)."),
+    runtime_id: str | None = typer.Option(None, "--runtime-id", "-r", help="Target a specific runtime (per-container override)."),
     volume: str = typer.Option(_DEFAULT_VOLUME, "--volume", help="Docker volume."),
     image: str = typer.Option("agp-runtime-test:latest", "--image", help="Runtime image."),
 ) -> None:
     """Manage shared environment variables on the credentials volume.
 
     Variables are stored in /credentials/.env and sourced by every
-    container and every shell (including docker exec) automatically.
+    container at startup.  Use --runtime-id to set per-container
+    overrides (stored in /credentials/.env.<runtime-id>).
 
     Examples:
-        skyops runtime env                          # list all vars
-        skyops runtime env OPENAI_API_KEY sk-...    # set a var
-        skyops runtime env OPENAI_API_KEY           # show a var
-        skyops runtime env OPENAI_API_KEY --unset   # remove a var
-        skyops runtime env --file .env              # import a local .env file
+        skyops runtime env                                  # list shared vars
+        skyops runtime env OPENAI_API_KEY sk-...            # set shared var
+        skyops runtime env OPENAI_API_KEY -r my-runtime     # set for one runtime only
+        skyops runtime env OPENAI_API_KEY --unset           # remove a var
+        skyops runtime env --file .env                      # import a local .env file
+        skyops runtime env --file .env -r my-runtime        # import for one runtime
     """
     docker = shutil.which("docker")
     if not docker:
         typer.echo("docker not found in PATH", err=True)
         raise typer.Exit(1)
 
-    env_path = f"{_CRED_MOUNT}/.env"
+    suffix = f".{runtime_id}" if runtime_id else ""
+    env_path = f"{_CRED_MOUNT}/.env{suffix}"
+    label = f" (runtime={runtime_id})" if runtime_id else " (shared)"
     mount = ["-v", f"{volume}:{_CRED_MOUNT}"]
 
     def _run_in_vol(cmd: str, *, stdin: str | None = None) -> str:
@@ -249,13 +254,13 @@ def runtime_env(
         content = pathlib.Path(file).read_text()
         _run_in_vol(f"cat > {env_path}", stdin=content)
         count = sum(1 for ln in content.splitlines() if ln.strip() and not ln.startswith("#"))
-        typer.echo(f"✓ Imported {count} variable(s) from {file}")
+        typer.echo(f"✓ Imported {count} variable(s) from {file}{label}")
         return
 
     # List all
     if key is None:
         out = _run_in_vol(f"cat {env_path} 2>/dev/null || true")
-        typer.echo(out or "(empty)")
+        typer.echo(out or f"(empty){label}")
         return
 
     # Unset
@@ -265,13 +270,13 @@ def runtime_env(
             f"grep -v '^{key}=' {env_path} > {env_path}.tmp && "
             f"mv {env_path}.tmp {env_path}"
         )
-        typer.echo(f"✓ Unset {key}")
+        typer.echo(f"✓ Unset {key}{label}")
         return
 
     # Show single var
     if value is None:
         out = _run_in_vol(f"grep '^{key}=' {env_path} 2>/dev/null || true")
-        typer.echo(out.strip() or f"{key} not set")
+        typer.echo(out.strip() or f"{key} not set{label}")
         return
 
     # Set var — remove old entry, append new one
@@ -283,7 +288,7 @@ def runtime_env(
         f"echo '{key}='{safe_value} >> {env_path}.tmp && "
         f"mv {env_path}.tmp {env_path}"
     )
-    typer.echo(f"✓ {key} set")
+    typer.echo(f"✓ {key} set{label}")
 
 
 _TOOL_AUTH: dict[str, dict] = {

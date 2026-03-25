@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
@@ -43,6 +44,46 @@ _NOISE_INFIXES = (
 )
 
 
+def _ensure_codex_config(base_url: str) -> None:
+    """Write ``openai_base_url`` into ``~/.codex/config.toml``.
+
+    Codex >= 0.116 reads the base URL from config.toml and warns when
+    the deprecated ``OPENAI_BASE_URL`` env var is used.
+    """
+    import tomllib
+    config_dir = Path.home() / ".codex"
+    config_path = config_dir / "config.toml"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    existing: dict = {}
+    if config_path.exists():
+        existing = tomllib.loads(config_path.read_text())
+    if existing.get("openai_base_url") == base_url:
+        return
+    existing["openai_base_url"] = base_url
+    # Write back as minimal TOML (top-level keys first, then tables)
+    lines: list[str] = []
+    tables: list[tuple[str, dict]] = []
+    for k, v in existing.items():
+        if isinstance(v, dict):
+            tables.append((k, v))
+        elif isinstance(v, str):
+            lines.append(f'{k} = "{v}"')
+        else:
+            lines.append(f"{k} = {v}")
+    for tbl_name, tbl in tables:
+        lines.append(f"\n[{tbl_name}]")
+        for k, v in tbl.items():
+            if isinstance(v, dict):
+                lines.append(f"\n[{tbl_name}.{k}]")
+                for kk, vv in v.items():
+                    lines.append(f'"{kk}" = "{vv}"' if isinstance(vv, str) else f'"{kk}" = {vv}')
+            elif isinstance(v, str):
+                lines.append(f'"{k}" = "{v}"')
+            else:
+                lines.append(f'"{k}" = {v}')
+    config_path.write_text("\n".join(lines) + "\n")
+
+
 def _runtime_env_prefix() -> str:
     env_pairs: list[tuple[str, str]] = []
     openai_key = os.environ.get("OPENAI_API_KEY")
@@ -51,14 +92,15 @@ def _runtime_env_prefix() -> str:
     if openai_key and not openai_base_url:
         env_pairs.append(("OPENAI_API_KEY", openai_key))
     elif openrouter_key:
+        base_url = openai_base_url or "https://openrouter.ai/api/v1"
+        _ensure_codex_config(base_url)
         env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
-        env_pairs.append(("OPENAI_BASE_URL", openai_base_url or "https://openrouter.ai/api/v1"))
         env_pairs.append(("OPENAI_API_KEY", openrouter_key))
     else:
         if openai_key:
             env_pairs.append(("OPENAI_API_KEY", openai_key))
         if openai_base_url:
-            env_pairs.append(("OPENAI_BASE_URL", openai_base_url))
+            _ensure_codex_config(openai_base_url)
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if anthropic_key:
         env_pairs.append(("ANTHROPIC_API_KEY", anthropic_key))

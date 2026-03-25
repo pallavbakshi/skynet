@@ -80,6 +80,8 @@ services:
     build:
       context: .
       target: agp-runtime
+    hostname: agp-runtime
+    mac_address: "02:42:37:fc:f5:93"
     environment:
       AGP_QUEUE_BACKEND: redis
       AGP_REDIS_URL: redis://redis:6379/0
@@ -98,11 +100,8 @@ services:
       AGP_CODEX_CLI_COMMAND: ${AGP_CODEX_CLI_COMMAND:-codex -a never -s danger-full-access}
       AGP_TMUX_DEFAULT_CWD: /workspace/main
       AGP_RUNTIME_IDLE_SLEEP_SECONDS: "1"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes:
+      - agp_credentials:/credentials
       - agp_artifacts:/artifacts
       - agp_logs:/logs
       - ${AGP_RUNTIME_WORKSPACE_SOURCE:-.}:/workspace/main
@@ -154,5 +153,8 @@ services:
 
 volumes:
   agp_pg_data:
+  agp_credentials:
+    external: true
+    name: agp-credentials
   agp_artifacts:
   agp_logs:

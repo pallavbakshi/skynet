@@ -111,6 +111,8 @@ services:
     build:
       context: .
       target: agp-runtime
+    hostname: agp-runtime
+    mac_address: "02:42:37:fc:f5:93"
     environment:
       AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
       AGP_QUEUE_BACKEND: redis
@@ -129,11 +131,12 @@ services:
       AGP_RUNTIME_ID: rtm_local
       AGP_RUNTIME_HOSTNAME: runtime-1
       AGP_RUNTIME_AGENT_ID: agt_local
-      AGP_RUNTIME_TERMINAL_HOST_KIND: inprocess
-      AGP_RUNTIME_AGENT_ADAPTER_KIND: default
-      AGP_CODEX_TUI_MODE: "false"
+      AGP_RUNTIME_TERMINAL_HOST_KIND: tmux
+      AGP_RUNTIME_AGENT_ADAPTER_KIND: codex
+      AGP_CODEX_TUI_MODE: "true"
       AGP_RUNTIME_IDLE_SLEEP_SECONDS: "1"
     volumes:
+      - agp_credentials:/credentials
       - agp_logs:/logs
     depends_on:
       control-plane:
@@ -225,5 +228,12 @@ volumes:
   agp_pgdata:
   agp_minio:
   agp_logs:
+  agp_credentials:
+    # Shared credentials volume — initialized by `skyops runtime auth`.
+    # Pre-populated with OAuth tokens, API keys, and .env config.
+    # Mount name uses compose project prefix: agp_agp_credentials
+    # To use the standalone volume instead: external: true, name: agp-credentials
+    external: true
+    name: agp-credentials
   agp_prometheus:
   agp_grafana:

@@ -53,14 +53,17 @@ def _provider_env() -> dict[str, str]:
     if openai_key and not openai_base_url:
         env["OPENAI_API_KEY"] = openai_key
     elif openrouter_key:
+        from agp.plugins.codex import _ensure_codex_config
+        base_url = openai_base_url or "https://openrouter.ai/api/v1"
+        _ensure_codex_config(base_url)
         env["OPENROUTER_API_KEY"] = openrouter_key
-        env["OPENAI_BASE_URL"] = openai_base_url or "https://openrouter.ai/api/v1"
         env["OPENAI_API_KEY"] = openrouter_key
     else:
         if openai_key:
             env["OPENAI_API_KEY"] = openai_key
         if openai_base_url:
-            env["OPENAI_BASE_URL"] = openai_base_url
+            from agp.plugins.codex import _ensure_codex_config
+            _ensure_codex_config(openai_base_url)
 
     # ── Claude Code / Anthropic endpoint ─────────────────────────────
     # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code
