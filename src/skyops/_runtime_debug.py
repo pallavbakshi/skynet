@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import socket
+import subprocess
 
 import typer
 
@@ -199,3 +201,90 @@ def runtime_work_loop(
             os.environ.pop("AGP_RUNTIME_BEARER_TOKEN", None)
         elif previous_token != os.environ.get("AGP_RUNTIME_BEARER_TOKEN"):
             os.environ["AGP_RUNTIME_BEARER_TOKEN"] = previous_token or ""
+
+
+@runtime_debug_app.command("attach")
+def runtime_attach(
+    container: str = typer.Argument(
+        "agp-runtime-live",
+        help="Docker container name or ID.",
+    ),
+    host_kind: str = typer.Option(
+        "wezterm",
+        "--host-kind",
+        help="Terminal host kind: wezterm or tmux.",
+    ),
+    user: str = typer.Option("agpuser", "--user", "-u", help="Container user."),
+    pane_id: str | None = typer.Option(None, "--pane-id", help="Specific pane/session to attach."),
+    peek: bool = typer.Option(False, "--peek", "-p", help="Print current screen and exit."),
+    domain: str = typer.Option("agp", "--domain", "-d", help="WezTerm unix_domain name from your local config."),
+) -> None:
+    """Attach to a running runtime container's terminal session.
+
+    For WezTerm: requires a unix_domain in your local wezterm config
+    with a proxy_command that docker-execs into the container. The
+    default domain name is 'agp'.  Example wezterm.lua entry::
+
+        { name = 'agp', proxy_command = { 'docker', 'exec', '-i',
+          'agp-runtime-live', 'runuser', '-u', 'agpuser', '--',
+          'env', 'HOME=/home/agpuser',
+          'WEZTERM_CONFIG_FILE=/etc/wezterm/wezterm.lua',
+          'wezterm', 'cli', 'proxy' } }
+    """
+    docker = shutil.which("docker")
+    if not docker:
+        typer.echo("docker not found in PATH", err=True)
+        raise typer.Exit(1)
+
+    wez_env = ["env", "WEZTERM_CONFIG_FILE=/etc/wezterm/wezterm.lua"]
+
+    def _docker_exec(args: list[str], *, interactive: bool = False) -> subprocess.CompletedProcess[str]:
+        flags = ["-i"] if interactive else []
+        return subprocess.run(
+            [docker, "exec", *flags, container, "runuser", "-u", user, "--",
+             "env", f"HOME=/home/{user}", *args],
+            capture_output=not interactive, text=True, check=False,
+        )
+
+    if host_kind == "tmux":
+        if peek:
+            result = _docker_exec(["tmux", "capture-pane", "-t", pane_id or "0", "-p"])
+            typer.echo(result.stdout)
+        else:
+            os.execvp(docker, [
+                docker, "exec", "-it", container, "runuser", "-u", user, "--",
+                "env", f"HOME=/home/{user}",
+                "tmux", "attach-session", *(["-t", pane_id] if pane_id else []),
+            ])
+        return
+
+    # WezTerm peek: show pane list + screen content
+    if peek:
+        result = _docker_exec([*wez_env, "wezterm", "cli", "list"])
+        typer.echo(result.stdout)
+        target = pane_id
+        if not target:
+            # Auto-find the agent pane (title starts with AGP: or has TUI markers)
+            list_result = _docker_exec([*wez_env, "wezterm", "cli", "list", "--format", "json"])
+            try:
+                panes = json.loads(list_result.stdout or "[]")
+                for p in panes:
+                    title = p.get("tab_title", "") or p.get("window_title", "")
+                    if title.startswith("AGP:") or "\u2733" in title:
+                        target = str(p["pane_id"])
+                        break
+            except (json.JSONDecodeError, KeyError):
+                pass
+            target = target or "0"
+        result = _docker_exec([*wez_env, "wezterm", "cli", "get-text", "--pane-id", target, "--start-line", "-50"])
+        typer.echo(result.stdout)
+        return
+
+    # WezTerm full GUI attach via preconfigured unix_domain
+    local_wezterm = shutil.which("wezterm")
+    if not local_wezterm:
+        typer.echo("wezterm not found locally — install WezTerm or use --peek", err=True)
+        raise typer.Exit(1)
+
+    typer.echo(f"Connecting to {container} via wezterm domain '{domain}'...")
+    os.execvp(local_wezterm, [local_wezterm, "connect", domain])
