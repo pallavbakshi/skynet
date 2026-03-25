@@ -214,7 +214,7 @@ def runtime_attach(
         "--host-kind",
         help="Terminal host kind: wezterm or tmux.",
     ),
-    user: str = typer.Option("agpuser", "--user", "-u", help="Container user."),
+    user: str = typer.Option("pb", "--user", "-u", help="Container user."),
     pane_id: str | None = typer.Option(None, "--pane-id", help="Specific pane/session to attach."),
     peek: bool = typer.Option(False, "--peek", "-p", help="Print current screen and exit."),
     domain: str = typer.Option("agp", "--domain", "-d", help="WezTerm unix_domain name from your local config."),
@@ -226,8 +226,8 @@ def runtime_attach(
     default domain name is 'agp'.  Example wezterm.lua entry::
 
         { name = 'agp', proxy_command = { 'docker', 'exec', '-i',
-          'agp-runtime-live', 'runuser', '-u', 'agpuser', '--',
-          'env', 'HOME=/home/agpuser',
+          'agp-runtime-live', 'runuser', '-u', 'pb', '--',
+          'env', 'HOME=/home/pb',
           'WEZTERM_CONFIG_FILE=/etc/wezterm/wezterm.lua',
           'wezterm', 'cli', 'proxy' } }
     """

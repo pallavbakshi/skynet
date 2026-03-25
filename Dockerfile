@@ -73,19 +73,24 @@ ENV AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
     DISABLE_TELEMETRY=1 \
     NO_UPDATE_NOTIFIER=1
 
-# ── Auth & identity ──────────────────────────────────────────────────
-# Auth lives in a Docker volume (agp-claude-auth), not in the image.
-# Mount it at /auth — the entrypoint copies credentials into ~/.claude/.
-# This means you can rebuild this image freely without losing auth.
+# ── Auth & data volumes ──────────────────────────────────────────────
+# Two-volume architecture:
+#   agp-claude-auth  → /auth             (read-only)  — OAuth credentials
+#   agp-claude-data  → /home/pb/.claude  (read-write) — shared session state
+#
+# The auth volume is seeded once via OAuth; the data volume is shared
+# across all containers for persistent chat history and sessions.
+# The entrypoint injects credentials into the data volume on first run.
 #
 # Stable machine identity so all containers look like one machine:
 #   docker run --hostname agp-runtime --mac-address 02:42:37:fc:f5:93 \
-#              -v agp-claude-auth:/auth ...
+#              -v agp-claude-auth:/auth:ro \
+#              -v agp-claude-data:/home/pb/.claude ...
 #
-# One-time OAuth setup (only needed once, ever):
+# One-time OAuth setup (only needed once per host):
 #   docker run -it --hostname agp-runtime --mac-address 02:42:37:fc:f5:93 \
 #              -v agp-claude-auth:/auth <image> \
-#              bash -c 'useradd -m agpuser && runuser -u agpuser -- \
+#              bash -c 'useradd -m pb && runuser -u pb -- \
 #              claude --dangerously-skip-permissions'
 #   (complete OAuth in browser, /exit, done — auth persists in the volume)
 LABEL agp.runtime.hostname="agp-runtime" \

@@ -17,34 +17,47 @@ fi
 # ── Runtime user setup ───────────────────────────────────────────────
 # Create a non-root user for CLI tools that refuse to run as root
 # (e.g. claude --dangerously-skip-permissions).
-AGP_USER="${AGP_RUNTIME_USER:-agpuser}"
+AGP_USER="${AGP_RUNTIME_USER:-pb}"
 AGP_USER_HOME="/home/${AGP_USER}"
 if ! id "${AGP_USER}" &>/dev/null; then
   useradd -m -s /bin/bash "${AGP_USER}"
 fi
 
-# ── Claude Code auth injection ───────────────────────────────────────
-# Mount the agp-claude-auth volume at /auth and the entrypoint copies
-# credentials + onboarding state into the user's home.
-# This survives image rebuilds — OAuth is done once, persisted forever.
+# ── Claude Code data volume ─────────────────────────────────────────
+# Two-volume architecture:
+#   /auth              (read-only)   — OAuth credentials, mounted from agp-claude-auth
+#   /home/pb/.claude   (read-write)  — shared session state, mounted from agp-claude-data
 #
-# The volume contains:
-#   .credentials.json   — OAuth tokens
-#   .claude.json         — onboarding state (hasCompletedOnboarding, etc.)
-#   settings.json        — user preferences
-#   plugins/, sessions/  — cached state
+# The data volume is shared across all containers so chat history,
+# sessions, and project state persist and are accessible to any
+# container with the same pinned identity.
+#
+# On first start the entrypoint injects credentials from /auth into
+# the data volume.  Subsequent starts skip the copy if credentials
+# already exist — this preserves any state accumulated in the volume.
+CLAUDE_DIR="${AGP_USER_HOME}/.claude"
 AUTH_MOUNT="${AGP_CLAUDE_AUTH_DIR:-/auth}"
+
+mkdir -p "${CLAUDE_DIR}"
+
+# Inject credentials from auth volume only if missing in data volume
 if [[ -d "${AUTH_MOUNT}" && -f "${AUTH_MOUNT}/.credentials.json" ]]; then
-  mkdir -p "${AGP_USER_HOME}/.claude"
-  # Copy the .claude/ directory contents
-  cp -a "${AUTH_MOUNT}/." "${AGP_USER_HOME}/.claude/"
-  chmod 600 "${AGP_USER_HOME}/.claude/.credentials.json"
-  # Copy .claude.json (TUI onboarding state) — lives in $HOME, not .claude/
-  if [[ -f "${AUTH_MOUNT}/.claude.json" ]]; then
+  if [[ ! -f "${CLAUDE_DIR}/.credentials.json" ]]; then
+    cp "${AUTH_MOUNT}/.credentials.json" "${CLAUDE_DIR}/.credentials.json"
+  fi
+  chmod 600 "${CLAUDE_DIR}/.credentials.json"
+  # Onboarding state lives in $HOME, not .claude/
+  if [[ -f "${AUTH_MOUNT}/.claude.json" && ! -f "${AGP_USER_HOME}/.claude.json" ]]; then
     cp "${AUTH_MOUNT}/.claude.json" "${AGP_USER_HOME}/.claude.json"
   fi
-  chown -R "${AGP_USER}:${AGP_USER}" "${AGP_USER_HOME}/.claude" "${AGP_USER_HOME}/.claude.json" 2>/dev/null || true
+  # Settings — seed once, user changes in data volume are preserved
+  if [[ -f "${AUTH_MOUNT}/settings.json" && ! -f "${CLAUDE_DIR}/settings.json" ]]; then
+    cp "${AUTH_MOUNT}/settings.json" "${CLAUDE_DIR}/settings.json"
+  fi
 fi
+
+chown -R "${AGP_USER}:${AGP_USER}" "${CLAUDE_DIR}" 2>/dev/null || true
+chown "${AGP_USER}:${AGP_USER}" "${AGP_USER_HOME}/.claude.json" 2>/dev/null || true
 
 # ── Git safe directories ────────────────────────────────────────────
 if command -v git >/dev/null 2>&1; then
