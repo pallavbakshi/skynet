@@ -1438,6 +1438,36 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         cleaned = _clean_claude_code_output(raw)
         self.assertEqual(cleaned, "2 + 2 = 4.")
 
+    def test_claude_code_output_cleaning_strips_feedback_survey(self) -> None:
+        """Feedback survey noise should be stripped from cleaned output."""
+        raw = (
+            "\u276f What is 6 * 7?\n"
+            "\u23fa 42\n"
+            "\u23fa How is Claude doing this session? (optional)\n"
+            "  1: Bad    2: Fine   3: Good   0: Dismiss\n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+            "\u23f5\u23f5 bypass permissions on\n"
+        )
+        cleaned = _clean_claude_code_output(raw)
+        self.assertIn("42", cleaned)
+        self.assertNotIn("How is Claude doing", cleaned)
+        self.assertNotIn("Dismiss", cleaned)
+
+    def test_claude_code_feedback_survey_gate_dismissed(self) -> None:
+        """Feedback survey should be auto-dismissed with 0."""
+        adapter = ClaudeCodeAdapter()
+        survey_screen = (
+            "\u23fa How is Claude doing this session? (optional)\n"
+            "  1: Bad    2: Fine   3: Good   0: Dismiss\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(survey_screen))
+        self.assertFalse(adapter._is_fatal_gate(survey_screen))
+        self.assertEqual(adapter._gate_response(survey_screen), "0")
+
     def test_claude_code_output_cleaning_handles_tool_results(self) -> None:
         raw = (
             "\u276f Read this file\n"

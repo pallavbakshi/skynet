@@ -17,6 +17,7 @@ _TOOL_RESULT_PREFIX = "\u23bf"  # ⎿ = tool result / continuation
 _SEPARATOR_RE = re.compile(r"^\u2500{4,}$")  # ────
 _COMPACTION_RE = re.compile(r"^\u273b\s+(Conversation compacted|Churned)")  # ✻
 _SYSTEM_RE = re.compile(r"^\u273b\s+")
+_FEEDBACK_RE = re.compile(r"how is claude doing", re.IGNORECASE)
 _WELCOME_START = "\u256d"  # ╭
 _WELCOME_END = "\u2570"    # ╰
 _STATUS_BAR_RE = re.compile(r"^\s*\u23f5\u23f5\s+")  # ⏵⏵ (any status bar variant)
@@ -42,6 +43,11 @@ def _is_noise_line(line: str) -> bool:
     if _SEPARATOR_RE.match(s):
         return True
     if _STATUS_BAR_RE.match(s):
+        return True
+    if _FEEDBACK_RE.search(s):
+        return True
+    # Feedback survey options: "1: Bad    2: Fine   3: Good   0: Dismiss"
+    if s.startswith("1:") and "dismiss" in s.lower():
         return True
     for prefix in _NOISE_PREFIXES:
         if s.startswith(prefix):
@@ -368,6 +374,8 @@ class ClaudeCodeAdapter(AgentAdapter):
         "login successful",               # "Logged in as … Press Enter to continue"
         "press enter to continue",        # generic continue prompt
         "security notes",                 # security reminder → Enter
+        # Feedback survey (dismiss immediately)
+        "how is claude doing",            # → 0 (Dismiss)
         # Bypass permissions confirmation
         "bypass permissions mode",        # → 2 (Yes, I accept)
         "accept all responsibility",      # same screen, alternate match
@@ -402,6 +410,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         "login successful": "",           # dismiss login confirmation
         "security notes": "",             # dismiss security reminder
         "press enter to continue": "",    # generic continue
+        "how is claude doing": "0",       # dismiss feedback survey
         "bypass permissions mode": "2",   # Yes, I accept
         "accept all responsibility": "2", # same screen
         "yes, i trust this folder": "1",  # trust workspace
