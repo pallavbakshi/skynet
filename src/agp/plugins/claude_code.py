@@ -257,6 +257,11 @@ class ClaudeCodeAdapter(AgentAdapter):
             sleep(self.idle_poll_seconds)
             screen = _strip_ansi(host.read_visible(session))
             if self._looks_like_gate_prompt(screen):
+                if self._is_fatal_gate(screen):
+                    raise RecoverableExecutionError(
+                        "claude code requires interactive login — complete OAuth "
+                        "setup in the container and re-commit the image"
+                    )
                 host.send_text(session, self._gate_response(screen), enter=True)
                 continue
             if self._looks_like_ready(screen):
@@ -349,25 +354,29 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         return True
 
-    _GATE_PATTERNS = (
+    # ── Gate screen classification ─────────────────────────────────────
+    #
+    # AUTO gates are dismissed automatically (Enter or numbered choice).
+    # FATAL gates require user action — the adapter raises an error so
+    # the job fails with a clear message instead of timing out silently.
+
+    _AUTO_GATE_PATTERNS = (
+        # First-run setup (auto-dismiss)
+        "choose the text style",          # theme picker → Enter (accept default)
+        "syntax highlighting",            # theme preview → Enter
+        # Login success / security notes (auto-dismiss with Enter)
+        "login successful",               # "Logged in as … Press Enter to continue"
+        "press enter to continue",        # generic continue prompt
+        "security notes",                 # security reminder → Enter
+        # Bypass permissions confirmation
+        "bypass permissions mode",        # → 2 (Yes, I accept)
+        "accept all responsibility",      # same screen, alternate match
         # Trust prompts
-        "trust the contents",
-        "do you trust",
-        "i trust this folder",
-        "i trust this project",
-        # Generic confirmations
-        "yes, proceed",
-        "yes, allow",
-        "enter to confirm",
-        "press enter to continue",
-        # Login / auth
-        "log in",
-        "sign in",
-        "authenticate",
-        # Terms / legal
-        "terms of service",
-        "accept the terms",
-        "i agree",
+        "yes, i trust this folder",       # workspace trust → 1
+        "i trust this folder",            # alternate phrasing
+        "i trust this project",           # alternate phrasing
+        "trust the contents",             # alternate phrasing
+        "quick safety check",             # workspace trust intro
         # Permission prompts (fallback if --dangerously-skip-permissions not active)
         "allow tool",
         "allow bash",
@@ -377,19 +386,43 @@ class ClaudeCodeAdapter(AgentAdapter):
         "(y/n)",
     )
 
-    # Preferred choices for numbered gate menus.
+    _FATAL_GATE_PATTERNS = (
+        # Login required — needs browser-based OAuth, cannot auto-resolve.
+        "select login method",
+        "paste code here",
+        "browser didn't open",
+        "oauth error",
+    )
+
+    # Preferred choices for auto-dismiss numbered gate menus.
+    # Empty string = press Enter to accept the default selection.
     _GATE_CHOICES = {
+        "choose the text style": "",      # accept default theme (Dark mode)
+        "syntax highlighting": "",        # dismiss theme preview
+        "login successful": "",           # dismiss login confirmation
+        "security notes": "",             # dismiss security reminder
+        "press enter to continue": "",    # generic continue
+        "bypass permissions mode": "2",   # Yes, I accept
+        "accept all responsibility": "2", # same screen
+        "yes, i trust this folder": "1",  # trust workspace
         "i trust this folder": "1",
         "i trust this project": "1",
-        "i agree": "1",
+        "trust the contents": "1",
+        "quick safety check": "1",        # trust workspace intro
     }
 
     def _looks_like_gate_prompt(self, text: str) -> bool:
         lower = text.lower()
-        return any(pat in lower for pat in self._GATE_PATTERNS)
+        return (any(pat in lower for pat in self._AUTO_GATE_PATTERNS)
+                or any(pat in lower for pat in self._FATAL_GATE_PATTERNS))
+
+    def _is_fatal_gate(self, text: str) -> bool:
+        """Return True if the gate requires user action (e.g. OAuth login)."""
+        lower = text.lower()
+        return any(pat in lower for pat in self._FATAL_GATE_PATTERNS)
 
     def _gate_response(self, text: str) -> str:
-        """Return the key to send for a gate prompt."""
+        """Return the key to send for an auto-dismissable gate prompt."""
         lower = text.lower()
         for phrase, choice in self._GATE_CHOICES.items():
             if phrase in lower:
@@ -513,6 +546,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                 raise RecoverableExecutionError("claude code cli exited during execution")
 
             if self._looks_like_gate_prompt(screen):
+                if self._is_fatal_gate(screen):
+                    raise RecoverableExecutionError(
+                        "claude code requires interactive login — complete OAuth "
+                        "setup in the container and re-commit the image"
+                    )
                 host.send_text(session, self._gate_response(screen), enter=True)
                 prev_screen = snap
                 unchanged = 0

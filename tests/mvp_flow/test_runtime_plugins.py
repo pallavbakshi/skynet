@@ -1478,6 +1478,103 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         shell_screen = "\u276f ls\nfile1 file2\n\u276f \n"
         self.assertFalse(adapter._looks_like_ready(shell_screen))
 
+    def test_claude_code_gate_detection_first_run_screens(self) -> None:
+        """Gate patterns detect and correctly classify all first-run screens."""
+        adapter = ClaudeCodeAdapter()
+
+        # ── Auto-dismiss gates ────────────────────────────────────────
+
+        # Theme picker
+        theme_screen = (
+            "Welcome to Claude Code v2.1.81\n"
+            "Let's get started.\n"
+            "Choose the text style that looks best with your terminal\n"
+            "To change this later, run /theme\n"
+            "\u276f 1. Dark mode \u2714\n"
+            "  2. Light mode\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(theme_screen))
+        self.assertFalse(adapter._is_fatal_gate(theme_screen))
+        self.assertEqual(adapter._gate_response(theme_screen), "")
+        self.assertFalse(adapter._looks_like_ready(theme_screen))
+
+        # Syntax highlighting preview
+        highlight_screen = "Syntax highlighting available only in native build\n"
+        self.assertTrue(adapter._looks_like_gate_prompt(highlight_screen))
+        self.assertFalse(adapter._is_fatal_gate(highlight_screen))
+
+        # Login success confirmation
+        login_success = (
+            "Logged in as user@example.com\n"
+            "Login successful. Press Enter to continue\u2026\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(login_success))
+        self.assertFalse(adapter._is_fatal_gate(login_success))
+        self.assertEqual(adapter._gate_response(login_success), "")
+
+        # Security notes
+        security_screen = (
+            "Security notes:\n"
+            "1. Claude can make mistakes\n"
+            "2. Due to prompt injection risks\n"
+            "Press Enter to continue\u2026\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(security_screen))
+        self.assertFalse(adapter._is_fatal_gate(security_screen))
+        self.assertEqual(adapter._gate_response(security_screen), "")
+
+        # Bypass permissions warning
+        bypass_screen = (
+            "WARNING: Claude Code running in Bypass Permissions mode\n"
+            "By proceeding, you accept all responsibility for actions taken.\n"
+            "\u276f 1. No, exit\n"
+            "  2. Yes, I accept\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(bypass_screen))
+        self.assertFalse(adapter._is_fatal_gate(bypass_screen))
+        self.assertEqual(adapter._gate_response(bypass_screen), "2")
+
+        # Workspace trust (quick safety check variant)
+        trust_screen = (
+            "Accessing workspace:\n/app\n"
+            "Quick safety check: Is this a project you trust?\n"
+            "\u276f 1. Yes, I trust this folder\n"
+            "  2. No, exit\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(trust_screen))
+        self.assertFalse(adapter._is_fatal_gate(trust_screen))
+        self.assertEqual(adapter._gate_response(trust_screen), "1")
+
+        # Trust prompt (alternate phrasing)
+        trust_alt = "Do you trust the contents of /workspace?\n1. I trust this folder\n"
+        self.assertTrue(adapter._looks_like_gate_prompt(trust_alt))
+        self.assertEqual(adapter._gate_response(trust_alt), "1")
+
+        # ── Fatal gates (require user action) ────────────────────────
+
+        # Login method selection
+        login_screen = (
+            "Select login method:\n"
+            "\u276f 1. Claude account with subscription\n"
+            "  2. Anthropic Console account\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(login_screen))
+        self.assertTrue(adapter._is_fatal_gate(login_screen))
+
+        # OAuth paste code prompt
+        oauth_screen = (
+            "Browser didn't open? Use the url below to sign in\n"
+            "https://claude.ai/oauth/authorize?...\n"
+            "Paste code here if prompted >\n"
+        )
+        self.assertTrue(adapter._looks_like_gate_prompt(oauth_screen))
+        self.assertTrue(adapter._is_fatal_gate(oauth_screen))
+
+        # OAuth error
+        oauth_error = "OAuth error: Invalid code.\nPress Enter to retry.\n"
+        self.assertTrue(adapter._looks_like_gate_prompt(oauth_error))
+        self.assertTrue(adapter._is_fatal_gate(oauth_error))
+
     def test_claude_code_shell_returned_detection(self) -> None:
         adapter = ClaudeCodeAdapter()
         # Shell returned (no TUI indicators)

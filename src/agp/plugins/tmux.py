@@ -54,9 +54,12 @@ def _provider_env() -> dict[str, str]:
     agp_server_url = os.environ.get("AGP_SERVER_URL")
     if agp_server_url:
         env["AGP_SERVER_URL"] = agp_server_url
-    server_url = os.environ.get("AGP_SERVER_URL")
-    if server_url:
-        env["AGP_SERVER_URL"] = server_url
+    # Container-friendly vars: prevent Claude Code auto-updater and telemetry
+    # prompts that would block headless/autonomous execution.
+    for passthrough in ("DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY"):
+        val = os.environ.get(passthrough)
+        if val:
+            env[passthrough] = val
     return env
 
 
