@@ -22,7 +22,7 @@ else
   PYTHON_CMD=(python)
 fi
 
-"${DOCKER[@]}" compose -f compose.phase3.yaml up -d --build
+"${DOCKER[@]}" compose -f compose.yaml up -d --build
 "${PYTHON_CMD[@]}" scripts/smoke_local_stack.py
 
 echo

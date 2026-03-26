@@ -820,7 +820,7 @@ class TestLifecycleDockerUp(unittest.TestCase):
             toml_path.write_text(textwrap.dedent("""\
                 [stack]
                 mode = "docker"
-                compose_file = "compose.phase3.yaml"
+                compose_file = "compose.yaml"
                 project_name = "agp"
             """))
             cfg = load_config(toml_path)
@@ -1329,7 +1329,7 @@ class TestValidateCommand(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
-            toml_path.write_text("[stack]\nmode = 'docker'\ncompose_file = 'compose.phase3.yaml'\n")
+            toml_path.write_text("[stack]\nmode = 'docker'\ncompose_file = 'compose.yaml'\n")
             cfg = load_config(toml_path)
             with patch("skyops._validate.load_config", return_value=cfg):
                 with patch("skyops._validate.shutil") as mock_shutil:

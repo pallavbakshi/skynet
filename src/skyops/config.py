@@ -30,7 +30,7 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
 @dataclass
 class StackConfig:
     mode: str = "docker"
-    compose_file: str = "compose.phase3.yaml"
+    compose_file: str = "compose.yaml"
     project_name: str = "agp"
 
 

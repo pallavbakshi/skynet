@@ -41,7 +41,7 @@ def main() -> int:
 
     docker = _docker_cmd()
     if docker:
-        checks["compose_phase3"] = _run(*docker, "compose", "-f", "compose.phase3.yaml", "config")
+        checks["compose_phase3"] = _run(*docker, "compose", "-f", "compose.yaml", "config")
     else:
         checks["compose_phase3"] = {"skipped": True, "reason": "docker not installed"}
 

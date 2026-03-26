@@ -15,7 +15,7 @@ import httpx
 
 
 ROOT = Path(__file__).resolve().parent.parent
-COMPOSE_FILE = ROOT / "compose.phase3.yaml"
+COMPOSE_FILE = ROOT / "compose.yaml"
 
 
 def _docker_cmd() -> list[str]:

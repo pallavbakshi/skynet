@@ -14,4 +14,4 @@ else
   exit 1
 fi
 
-"${DOCKER[@]}" compose -f compose.phase3.yaml down -v --remove-orphans
+"${DOCKER[@]}" compose -f compose.yaml down -v --remove-orphans

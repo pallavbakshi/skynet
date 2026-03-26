@@ -27,7 +27,7 @@ _SKYOPS_TOML_TEMPLATE = """\
 
 [stack]
 mode = "{mode}"
-compose_file = "compose.phase3.yaml"
+compose_file = "compose.yaml"
 project_name = "agp"
 
 [server]
