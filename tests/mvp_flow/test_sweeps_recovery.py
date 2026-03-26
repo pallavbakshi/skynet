@@ -4,8 +4,8 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
-    def test_idle_timeout_does_not_terminate_agent_with_active_lease(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_idle_lease", "capability_id": "cap_python"})
+    def test_idle_timeout_does_not_delete_agent_with_active_lease(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_idle_lease", "capabilities": ["python"]})
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_idle_lease", "hostname": "localhost"})
         self.client.post(
             "/messages/send",
@@ -28,39 +28,46 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             agent = session.get(Agent, "agt_idle_lease")
             assert agent is not None
             agent.status = "idle"
-            agent.last_seen_at = utc_now() - timedelta(seconds=600)
+            agent.last_heartbeat_at = utc_now() - timedelta(seconds=600)
             session.commit()
-            result = sweep_idle_agents(session, now=utc_now(), idle_timeout_seconds=300)
+            result = sweep_stale_agents(session, now=utc_now(), heartbeat_grace_seconds=300)
         finally:
             session.close()
 
-        self.assertEqual(result["terminated_agents"], 0)
+        self.assertEqual(result["deleted_stale"], 0)
 
-    def test_draining_agent_terminates_when_queue_and_leases_clear(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_drain_done", "capability_id": "cap_python"})
+    def test_draining_agent_deleted_when_queue_and_leases_clear(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_drain_done", "capabilities": ["python"]})
         down = self.client.post("/agents/agt_drain_done/down", json={"mode": "drain"})
         self.assertEqual(down.status_code, 200)
 
         session = SessionLocal()
         try:
-            result = sweep_draining_agents(session, now=utc_now())
+            result = sweep_stale_agents(session, now=utc_now())
         finally:
             session.close()
 
-        self.assertEqual(result["terminated_agents"], 1)
-        agents = self.agp.list_agents( status="terminated")
-        self.assertTrue(any(item["agent_id"] == "agt_drain_done" for item in agents["items"]))
+        self.assertEqual(result["deleted_drained"], 1)
+        # Agent should be deleted (404)
+        agent_resp = self.client.get("/agents/agt_drain_done")
+        self.assertEqual(agent_resp.status_code, 404)
 
         session = SessionLocal()
         try:
-            events = session.query(Event).filter(Event.agent_id == "agt_drain_done").all()
-            self.assertTrue(any(evt.event_type == "agent.terminated" for evt in events))
+            # agent_id is nullified on delete, so match by event_type and body content
+            events = session.query(Event).filter(Event.event_type == "agent.deleted").all()
+            self.assertTrue(any(
+                evt.body_json.get("reason") == "drain_complete"
+                for evt in events
+            ))
         finally:
             session.close()
 
-    def test_draining_agent_not_terminated_while_queued_work_exists(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_drain_queue", "capability_id": "cap_python"})
-        self.client.post(
+    def test_draining_agent_with_queued_work_cancelled_and_deleted(self) -> None:
+        """M1: Draining agents can't claim, so stranded queued work is failed
+        and the agent is deleted (prevents permanent deadlock)."""
+        self.client.post("/agents/up", json={"agent_id": "agt_drain_queue", "capabilities": ["python"]})
+        sent = self.client.post(
             "/messages/send",
             json={
                 "target": {"type": "agent", "id": "agt_drain_queue"},
@@ -68,18 +75,20 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             },
             headers={"Idempotency-Key": "drain-queue-1"},
         )
+        job_id = sent.json()["data"]["job_id"]
         down = self.client.post("/agents/agt_drain_queue/down", json={"mode": "drain"})
         self.assertEqual(down.status_code, 200)
 
         session = SessionLocal()
         try:
-            result = sweep_draining_agents(session, now=utc_now())
+            result = sweep_stale_agents(session, now=utc_now())
         finally:
             session.close()
 
-        self.assertEqual(result["terminated_agents"], 0)
-        agents = self.agp.list_agents( status="draining")
-        self.assertTrue(any(item["agent_id"] == "agt_drain_queue" for item in agents["items"]))
+        self.assertEqual(result["deleted_drained"], 1)
+        self.assertEqual(result["stranded_jobs_cancelled"], 1)
+        agents = self.agp.list_agents(status="draining")
+        self.assertFalse(any(item["agent_id"] == "agt_drain_queue" for item in agents["items"]))
 
     def test_draining_runtime_returns_to_idle_when_leases_clear(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_drain_done", "hostname": "localhost"})
@@ -100,7 +109,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
 
     def test_draining_runtime_stays_draining_with_active_lease(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_drain_busy", "hostname": "localhost"})
-        self.client.post("/agents/up", json={"agent_id": "agt_drain_busy", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_drain_busy", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -130,33 +139,29 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         runtimes = self.client.get("/runtimes", params={"status": "draining"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_drain_busy" for item in runtimes))
 
-    def test_stale_runtime_offlines_and_detaches_idle_agent(self) -> None:
+    def test_stale_runtime_offlines(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_stale_idle", "hostname": "localhost"})
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_stale_idle", "capability_id": "cap_python", "assigned_runtime_id": "rtm_stale_idle"},
+            json={"agent_id": "agt_stale_idle", "capabilities": ["python"]},
         )
 
         session = SessionLocal()
         try:
             runtime = session.get(Runtime, "rtm_stale_idle")
-            agent = session.get(Agent, "agt_stale_idle")
             assert runtime is not None
-            assert agent is not None
             runtime.last_heartbeat_at = utc_now() - timedelta(seconds=600)
-            agent.status = "degraded"
             session.commit()
             result = sweep_stale_runtimes(session, now=utc_now(), stale_timeout_seconds=90)
         finally:
             session.close()
 
         self.assertEqual(result["offline_runtimes"], 1)
-        self.assertEqual(result["detached_agents"], 1)
         runtimes = self.client.get("/runtimes", params={"status": "offline"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_stale_idle" for item in runtimes))
+        # Agent remains idle (exists independently of runtime now)
         agents = self.client.get("/agents", params={"status": "idle"}).json()["data"]["items"]
-        stale_agent = next(item for item in agents if item["agent_id"] == "agt_stale_idle")
-        self.assertIsNone(stale_agent["assigned_runtime_id"])
+        self.assertTrue(any(item["agent_id"] == "agt_stale_idle" for item in agents))
 
         session = SessionLocal()
         try:
@@ -169,7 +174,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_poll", "hostname": "localhost"})
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_poll", "capability_id": "cap_python", "assigned_runtime_id": "rtm_poll"},
+            json={"agent_id": "agt_poll", "capabilities": ["python"]},
         )
 
         session = SessionLocal()
@@ -196,11 +201,13 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         finally:
             session.close()
 
-    def test_stale_runtime_degrades_agent_with_active_lease(self) -> None:
+    def test_stale_runtime_offlines_while_agent_stays_busy(self) -> None:
+        """Runtime going offline doesn't change agent status; agent stays busy
+        with its active lease until the lease sweeper handles it."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_stale_busy", "hostname": "localhost"})
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_stale_busy", "capability_id": "cap_python", "assigned_runtime_id": "rtm_stale_busy"},
+            json={"agent_id": "agt_stale_busy", "capabilities": ["python"]},
         )
         self.client.post(
             "/messages/send",
@@ -227,18 +234,11 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             session.close()
 
         self.assertEqual(result["offline_runtimes"], 1)
-        self.assertEqual(result["degraded_agents"], 1)
-        agents = self.client.get("/agents", params={"status": "degraded"}).json()["data"]["items"]
-        stale_agent = next(item for item in agents if item["agent_id"] == "agt_stale_busy")
-        self.assertEqual(stale_agent["assigned_runtime_id"], "rtm_stale_busy")
+        # Agent stays busy — runtime sweep no longer touches agent status
+        agents = self.client.get("/agents", params={"status": "busy"}).json()["data"]["items"]
+        self.assertTrue(any(item["agent_id"] == "agt_stale_busy" for item in agents))
 
-        session = SessionLocal()
-        try:
-            events = session.query(Event).filter(Event.agent_id == "agt_stale_busy").all()
-            self.assertTrue(any(evt.event_type == "agent.degraded" for evt in events))
-        finally:
-            session.close()
-
+        # Another runtime cannot claim the agent's work (agent is still busy)
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_takeover", "hostname": "localhost"})
         takeover = self.client.post(
             "/runs/claim",
@@ -251,7 +251,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_service", "hostname": "localhost"})
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_service", "capability_id": "cap_python", "assigned_runtime_id": "rtm_service"},
+            json={"agent_id": "agt_service", "capabilities": ["python"]},
         )
         session = SessionLocal()
         try:
@@ -273,11 +273,11 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         runtimes = self.client.get("/runtimes", params={"status": "offline"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_service" for item in runtimes))
 
-    def test_detached_agent_can_reprovision_to_new_runtime_after_stale_sweep(self) -> None:
+    def test_agent_can_claim_on_new_runtime_after_stale_sweep(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_old", "hostname": "localhost"})
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_reprov", "capability_id": "cap_python", "assigned_runtime_id": "rtm_old"},
+            json={"agent_id": "agt_reprov", "capabilities": ["python"]},
         )
 
         session = SessionLocal()
@@ -310,11 +310,10 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.assertEqual(claim.json()["data"]["agent_id"], "agt_reprov")
 
         agents = self.client.get("/agents", params={"status": "busy"}).json()["data"]["items"]
-        rebound_agent = next(item for item in agents if item["agent_id"] == "agt_reprov")
-        self.assertEqual(rebound_agent["assigned_runtime_id"], "rtm_new")
+        self.assertTrue(any(item["agent_id"] == "agt_reprov" for item in agents))
 
     def test_expired_lease_exhausts_retry_budget_and_fails_job(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_exhaust", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_exhaust", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -358,7 +357,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.assertIn("job.failed", event_types)
 
     def test_claim_rejected_for_draining_or_unreachable_runtime(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_blocked", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_blocked", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -403,22 +402,18 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         )
         self.assertEqual(unreachable.status_code, 409)
 
-    def test_capability_targeted_job_claims_with_eligible_runtime_affinity(self) -> None:
+    def test_capability_targeted_job_claims_with_capability_id(self) -> None:
+        self.client.post("/capabilities/seed", json={
+            "capability_id": "cap_python", "name": "Python Tester",
+            "version": "v1", "image_ref": "img:v1", "model_ref": "model:v1",
+        })
         self.client.post(
             "/runtimes/register",
             json={"runtime_id": "rtm_cap_one", "hostname": "localhost"},
         )
         self.client.post(
-            "/runtimes/register",
-            json={"runtime_id": "rtm_cap_two", "hostname": "localhost"},
-        )
-        self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_cap_foreign", "capability_id": "cap_python", "assigned_runtime_id": "rtm_cap_two"},
-        )
-        self.client.post(
-            "/agents/up",
-            json={"agent_id": "agt_cap_local", "capability_id": "cap_python", "assigned_runtime_id": "rtm_cap_one"},
+            json={"agent_id": "agt_cap_local", "capabilities": ["cap_python"]},
         )
         sent = self.client.post(
             "/messages/send",
@@ -431,53 +426,43 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
 
         claim = self.client.post(
             "/runs/claim",
-            json={"runtime_id": "rtm_cap_one", "capability_id": "cap_python"},
+            json={"runtime_id": "rtm_cap_one", "capability": "cap_python"},
         )
         self.assertEqual(claim.status_code, 200)
         claim_data = claim.json()["data"]
         self.assertTrue(claim_data["claimed"])
         self.assertEqual(claim_data["agent_id"], "agt_cap_local")
         self.assertEqual(claim_data["job"]["job_id"], sent["data"]["job_id"])
-        self.assertEqual(claim_data["job"]["target_queue"], "capability:cap_python:v1")
+        self.assertEqual(claim_data["job"]["target_queue"], "capability:cap_python")
 
-    def test_agent_affinity_blocks_wrong_runtime_claim(self) -> None:
+    def test_any_runtime_can_claim_for_agent(self) -> None:
+        """After the dynamic agent mesh refactor, any runtime can claim work for any agent."""
         self.client.post(
             "/runtimes/register",
-            json={"runtime_id": "rtm_right", "hostname": "localhost"},
-        )
-        self.client.post(
-            "/runtimes/register",
-            json={"runtime_id": "rtm_wrong", "hostname": "localhost"},
+            json={"runtime_id": "rtm_one", "hostname": "localhost"},
         )
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_affined", "capability_id": "cap_python", "assigned_runtime_id": "rtm_right"},
+            json={"agent_id": "agt_open", "capabilities": ["python"]},
         )
         self.client.post(
             "/messages/send",
             json={
-                "target": {"type": "agent", "id": "agt_affined"},
-                "message": {"text": "affinity job", "metadata": {}},
+                "target": {"type": "agent", "id": "agt_open"},
+                "message": {"text": "any runtime job", "metadata": {}},
             },
-            headers={"Idempotency-Key": "agent-affinity-flow-1"},
+            headers={"Idempotency-Key": "any-runtime-flow-1"},
         )
 
-        wrong = self.client.post(
+        claim = self.client.post(
             "/runs/claim",
-            json={"runtime_id": "rtm_wrong", "agent_id": "agt_affined"},
+            json={"runtime_id": "rtm_one", "agent_id": "agt_open"},
         )
-        self.assertEqual(wrong.status_code, 200)
-        self.assertFalse(wrong.json()["data"]["claimed"])
-
-        right = self.client.post(
-            "/runs/claim",
-            json={"runtime_id": "rtm_right", "agent_id": "agt_affined"},
-        )
-        self.assertEqual(right.status_code, 200)
-        self.assertTrue(right.json()["data"]["claimed"])
+        self.assertEqual(claim.status_code, 200)
+        self.assertTrue(claim.json()["data"]["claimed"])
 
     def test_queued_job_with_exhausted_retries_is_not_claimable(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_retry_cap", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_retry_cap", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -513,7 +498,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.assertEqual(job["status"], "failed")
 
     def test_run_can_transition_through_recovering_and_resumed(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_recover", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_recover", "capabilities": ["python"]})
         self.client.post(
             "/runtimes/register",
             json={"runtime_id": "rtm_recover", "hostname": "localhost"},
@@ -567,7 +552,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         self.assertIn("expires_at", recovering_body)
 
     def test_runtime_worker_recovery_budget_elapsed_time_escalates_to_failure(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_recover_budget", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_recover_budget", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={

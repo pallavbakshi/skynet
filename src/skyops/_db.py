@@ -116,7 +116,7 @@ def db_seed() -> None:
         for agent_id, agent_data in cfg.agents.items():
             cap_id = agent_data.get("capability_id", "")
             workspace = cfg.resolve_agent_workspace_ref(agent_id)
-            agents = client.list_agents(capability_id=cap_id, limit=200)
+            agents = client.list_agents(capability=cap_id, limit=200)
             existing = next(
                 (item for item in agents["items"] if item["agent_id"] == agent_id),
                 None,

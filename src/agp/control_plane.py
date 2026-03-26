@@ -7,6 +7,10 @@ external code (tests, CLI, skyops) historically imported from here.
 
 from __future__ import annotations
 
+import contextlib
+import logging
+from collections.abc import AsyncIterator
+
 import httpx  # noqa: F401 — kept at module level so tests can patch `control_plane_module.httpx`
 
 from fastapi import FastAPI, HTTPException
@@ -19,11 +23,11 @@ from agp.models import SystemMetadata  # noqa: F401 — re-export for test patch
 # Tests, CLI, skyops, and _ops_helpers import these from agp.control_plane.
 
 from agp.services.sweep import (  # noqa: F401
-    sweep_draining_agents,
     sweep_draining_runtimes,
     sweep_expired_leases,
-    sweep_idle_agents,
+    sweep_stale_agents,
     sweep_stale_runtimes,
+    refresh_active_leases,
 )
 from agp.services.jobs import _block_job, _unblock_job  # noqa: F401
 from agp.services._helpers import _require_job  # noqa: F401
@@ -38,7 +42,7 @@ def __getattr__(name: str):
 
 
 # Route modules
-from agp.api.routes import admin, agents, artifacts, jobs, observability, runs, runtimes, security  # noqa: F401
+from agp.api.routes import admin, agents, artifacts, jobs, observability, ops, runs, runtimes, security  # noqa: F401
 
 # Middleware and error handlers
 from agp.api.middleware import auth_middleware
@@ -49,10 +53,33 @@ from agp.services.exceptions import DomainError
 from agp.services._helpers import _load_persisted_auth_settings
 
 
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Startup hook: refresh active leases so the sweeper doesn't mass-expire after CP restart."""
+    from agp.db import SessionLocal
+
+    session = SessionLocal()
+    try:
+        count = refresh_active_leases(session)
+        if count:
+            import logging
+            logging.getLogger("agp.control_plane").info("Refreshed %d active leases on startup", count)
+    finally:
+        session.close()
+    yield
+
+
 def build_app() -> FastAPI:
-    app = FastAPI(title=settings.app_name, version="0.1.0")
+    app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=_lifespan)
 
     _load_persisted_auth_settings()
+
+    if not settings.runtime_bearer_token and not settings.runtime_active_tokens_json:
+        logging.getLogger("agp.control_plane").warning(
+            "Runtime auth is not configured (AGP_RUNTIME_BEARER_TOKEN / AGP_RUNTIME_ACTIVE_TOKENS_JSON unset). "
+            "Agent registration endpoints (/agents/up, /agents/{id}/down, /runtimes/register, /runs/*) "
+            "are unauthenticated. Set AGP_RUNTIME_BEARER_TOKEN to secure them."
+        )
 
     app.middleware("http")(auth_middleware)
 
@@ -69,5 +96,6 @@ def build_app() -> FastAPI:
     app.include_router(artifacts.router)
     app.include_router(observability.router)
     app.include_router(security.router)
+    app.include_router(ops.router)
 
     return app

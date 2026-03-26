@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import _ok, _serialize
 from agp.db import get_db
 from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
-from agp.models import Run, utc_now
+from agp.models import Agent, Run, utc_now
 from agp.schemas import (
     CancelRunRequest,
     ClaimRunRequest,
@@ -60,7 +60,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     runtime.last_heartbeat_at = now
     runtime.updated_at = now
 
-    agent, routing_decision = resolve_claim_agent(db, runtime=runtime, agent_id=request.agent_id, capability_id=request.capability_id)
+    agent, routing_decision = resolve_claim_agent(db, runtime=runtime, agent_id=request.agent_id, capability=request.capability)
     if agent is None:
         db.commit()
         return _ok({"claimed": False, "agent_id": request.agent_id})
@@ -132,7 +132,7 @@ def cancel_run(run_id: str, request: CancelRunRequest, db: Session = Depends(get
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
     _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
-    agent = _require_agent(db, run.agent_id)
+    agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
     return _ok(cancel_run_service(db, run=run, job=job, agent=agent, runtime=runtime, lease=lease, reason=request.reason))
 
@@ -148,7 +148,7 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
     _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
-    agent = _require_agent(db, run.agent_id)
+    agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
     result_artifact_id = complete_run_service(db, run=run, job=job, agent=agent, runtime=runtime, lease=lease, artifacts=request.artifacts, summary=request.summary)
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status, "result_artifact_id": result_artifact_id})
@@ -165,7 +165,7 @@ def fail_run(run_id: str, request: FailRunRequest, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
     _reject_if_terminal(run)
     job = _require_job(db, run.job_id)
-    agent = _require_agent(db, run.agent_id)
+    agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
     fail_run_service(db, run=run, job=job, agent=agent, runtime=runtime, lease=lease, error=request.error, artifacts=request.artifacts, summary=request.summary)
     return _ok({"run_id": run_id, "job_id": job.job_id, "run_status": run.status, "job_status": job.status, "retry_count": job.retry_count})

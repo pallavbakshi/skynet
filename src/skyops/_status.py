@@ -174,15 +174,10 @@ def _platform_summary(cfg: SkyopsConfig) -> list[str]:
             lines.append(f"  Platform:  {total} jobs total, {running} running, {queued} queued")
 
             agents = client.list_agents(limit=200)
-            active_statuses = {
-                AgentStatus.PROVISIONING.value,
-                AgentStatus.IDLE.value,
-                AgentStatus.BUSY.value,
-                AgentStatus.DEGRADED.value,
-                AgentStatus.DRAINING.value,
-            }
-            agent_names = [a["agent_id"] for a in agents.get("items", []) if a.get("status") in active_statuses]
-            lines.append(f"  Agents:    {len(agent_names)} active ({', '.join(agent_names[:5])})")
+            # All agents in the DB are live (ephemeral records, deleted when dead)
+            agent_items = agents.get("items", [])
+            agent_names = [a["agent_id"] for a in agent_items]
+            lines.append(f"  Agents:    {len(agent_names)} live ({', '.join(agent_names[:5])})")
     except Exception:
         pass
     # Profile path

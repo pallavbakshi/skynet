@@ -4,142 +4,9 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowGapRegressionTest(MvpFlowTestBase):
-    def test_gap1_deterministic_capability_pool_routing_selects_lru(self) -> None:
-        """Gap 1: Capability-pool routing must use deterministic LRU tie-breaking."""
-        from agp.models import CapabilityPool
-
-        session = SessionLocal()
-        try:
-            session.add(Capability(
-                capability_id="cap_pool_test",
-                name="Pool Test",
-                version="v1",
-                image_ref="test:v1",
-                model_ref="test",
-                resource_tier="small",
-                permission_profile="default",
-                queue_mode="capability_pool",
-                runtime_requirements_json={},
-                created_at=utc_now(),
-                updated_at=utc_now(),
-            ))
-            session.flush()
-            session.add(CapabilityPool(
-                capability_id="cap_pool_test",
-                queue_id="capability:cap_pool_test:v1",
-                routing_policy="least_recent",
-            ))
-            session.commit()
-        finally:
-            session.close()
-
-        for i, agent_id in enumerate(["agt_pool_c", "agt_pool_a", "agt_pool_b"]):
-            resp = self.client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_pool_test"})
-            self.assertEqual(resp.status_code, 200)
-            session = SessionLocal()
-            try:
-                agent = session.get(Agent, agent_id)
-                agent.last_seen_at = utc_now() - timedelta(seconds=100 - i * 10)
-                session.commit()
-            finally:
-                session.close()
-
-        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_pool", "hostname": "pool-host"})
-        self.assertEqual(runtime.status_code, 200)
-
-        sent = self.client.post("/messages/send", json={
-            "target": {"type": "capability", "id": "cap_pool_test"},
-            "message": {"text": "pool work"},
-        })
-        self.assertEqual(sent.status_code, 200)
-
-        claim = self.client.post("/runs/claim", json={
-            "runtime_id": "rtm_pool",
-            "capability_id": "cap_pool_test",
-            "lease_ttl_seconds": 30,
-        })
-        self.assertEqual(claim.status_code, 200)
-        data = claim.json()["data"]
-        self.assertTrue(data["claimed"])
-        self.assertEqual(data["agent_id"], "agt_pool_c")
-
-        job_id = data["job"]["job_id"]
-        events = self.client.get(f"/jobs/{job_id}/events").json()["data"]["items"]
-        routing_events = [e for e in events if e["event_type"] == "routing.decision"]
-        self.assertEqual(len(routing_events), 1)
-        self.assertEqual(routing_events[0]["body"]["policy"], "least_recent")
-        self.assertEqual(routing_events[0]["body"]["selected_agent_id"], "agt_pool_c")
-        self.assertEqual(routing_events[0]["body"]["candidate_count"], 3)
-
-    def test_gap1_deterministic_routing_is_stable(self) -> None:
-        """Gap 1: Repeated claims with same state must pick the same agent."""
-        from agp.models import CapabilityPool
-
-        session = SessionLocal()
-        try:
-            session.add(Capability(
-                capability_id="cap_stable",
-                name="Stable",
-                version="v1",
-                image_ref="test:v1",
-                model_ref="test",
-                resource_tier="small",
-                permission_profile="default",
-                queue_mode="capability_pool",
-                runtime_requirements_json={},
-                created_at=utc_now(),
-                updated_at=utc_now(),
-            ))
-            session.flush()
-            session.add(CapabilityPool(
-                capability_id="cap_stable",
-                queue_id="capability:cap_stable:v1",
-                routing_policy="least_recent",
-            ))
-            session.commit()
-        finally:
-            session.close()
-
-        for agent_id in ["agt_s1", "agt_s2"]:
-            self.client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_stable"})
-
-        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_stable", "hostname": "h"})
-        self.assertEqual(runtime.status_code, 200)
-
-        selected_agents = []
-        for _ in range(2):
-            self.client.post("/messages/send", json={
-                "target": {"type": "capability", "id": "cap_stable"},
-                "message": {"text": "stable work"},
-            })
-            claim = self.client.post("/runs/claim", json={
-                "runtime_id": "rtm_stable",
-                "capability_id": "cap_stable",
-                "lease_ttl_seconds": 30,
-            })
-            data = claim.json()["data"]
-            if data["claimed"]:
-                selected_agents.append(data["agent_id"])
-                run_id = data["run"]["run_id"]
-                artifacts = self._materialize_terminal_artifacts({
-                    "prompt.txt": "prompt",
-                    "transcript.txt": "transcript_log",
-                    "exec.txt": "exec_log",
-                    "result.txt": "result",
-                })
-                self.client.post(f"/runs/{run_id}/complete", json={
-                    "runtime_id": "rtm_stable",
-                    "lease_id": data["lease"]["lease_id"],
-                    "fencing_token": data["lease"]["fencing_token"],
-                    "artifacts": artifacts,
-                })
-
-        self.assertEqual(len(selected_agents), 2)
-        self.assertEqual(selected_agents[0], selected_agents[1])
-
     def test_gap2_handoff_rejects_invalid_artifact_id(self) -> None:
         """Gap 2: Handoff must reject artifact IDs that don't exist."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho1", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho1", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
 
         sent = self.client.post("/messages/send", json={
@@ -158,7 +25,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap2_handoff_rejects_artifacts_from_wrong_job(self) -> None:
         """Gap 2: Handoff must reject artifacts that belong to a different job."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho2", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_ho2", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_ho2", "hostname": "h"})
         self.assertEqual(runtime.status_code, 200)
@@ -208,7 +75,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap3_runtime_list_includes_claimed_work(self) -> None:
         """Gap 3: GET /runtimes must include active claimed work per runtime."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_cw", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_cw", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_cw", "hostname": "host-cw"})
         self.assertEqual(runtime.status_code, 200)
@@ -232,7 +99,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap3_runtime_detail_endpoint(self) -> None:
         """Gap 3: GET /runtimes/{runtime_id} returns claimed work and agents."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_rd", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_rd", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_rd", "hostname": "host-rd"})
         self.assertEqual(runtime.status_code, 200)
@@ -251,11 +118,11 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(detail["active_run_count"], 1)
         self.assertTrue(len(detail["claimed_work"]) > 0)
         self.assertIn("fencing_token", detail["claimed_work"][0])
-        self.assertTrue(len(detail["agents"]) > 0)
+        self.assertIn("agents", detail)
 
     def test_gap4_artifact_content_pagination(self) -> None:
         """Gap 4: Artifact content endpoint supports offset/limit pagination."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_pg", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_pg", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_pg", "hostname": "host-pg"})
         self.assertEqual(runtime.status_code, 200)
@@ -335,27 +202,6 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         statuses = [r["health_status"] for r in records]
         self.assertIn("degraded", statuses)
 
-    def test_gap6_capability_pool_created_via_seed_endpoint(self) -> None:
-        """Gap 6: POST /capabilities/seed creates both capability and pool."""
-        resp = self.client.post("/capabilities/seed", json={
-            "capability_id": "cap_seeded",
-            "name": "Seeded Cap",
-            "version": "v2",
-            "image_ref": "img:v2",
-            "model_ref": "model:v2",
-        })
-        self.assertEqual(resp.status_code, 200)
-        data = resp.json()["data"]
-        self.assertTrue(data["created"])
-        self.assertEqual(data["pool_queue_id"], "capability:cap_seeded:v2")
-        self.assertEqual(data["pool_routing_policy"], "least_recent")
-
-        # Verify pool is listed
-        pools = self.client.get("/capability-pools").json()["data"]["items"]
-        seeded = [p for p in pools if p["capability_id"] == "cap_seeded"]
-        self.assertEqual(len(seeded), 1)
-        self.assertEqual(seeded[0]["queue_id"], "capability:cap_seeded:v2")
-
     def test_gap6_capability_pool_idempotent_seed(self) -> None:
         """Gap 6: Seeding an existing capability just ensures pool exists."""
         self.client.post("/capabilities/seed", json={
@@ -374,75 +220,6 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         })
         self.assertEqual(resp2.status_code, 200)
         self.assertFalse(resp2.json()["data"]["created"])
-
-    def test_gap7_agent_runtime_bindings_written_on_claim(self) -> None:
-        """Gap 7: Claiming work writes an agent-runtime binding record."""
-        from agp.models import AgentRuntimeBinding
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_bind", "capability_id": "cap_python"})
-        self.assertEqual(agent.status_code, 200)
-        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_bind", "hostname": "h"})
-        self.assertEqual(runtime.status_code, 200)
-
-        self.client.post("/messages/send", json={
-            "target": {"type": "agent", "id": "agt_bind"},
-            "message": {"text": "binding work"},
-        })
-        claim = self.client.post("/runs/claim", json={
-            "runtime_id": "rtm_bind", "agent_id": "agt_bind", "lease_ttl_seconds": 30,
-        })
-        self.assertTrue(claim.json()["data"]["claimed"])
-
-        session = SessionLocal()
-        try:
-            bindings = session.scalars(
-                select(AgentRuntimeBinding).where(
-                    AgentRuntimeBinding.agent_id == "agt_bind",
-                    AgentRuntimeBinding.runtime_id == "rtm_bind",
-                )
-            ).all()
-            self.assertTrue(len(bindings) >= 1)
-            active = [b for b in bindings if b.binding_status == "active"]
-            self.assertEqual(len(active), 1)
-        finally:
-            session.close()
-
-    def test_gap7_agent_binding_released_on_lease_expiry(self) -> None:
-        """Gap 7: Lease expiry writes a 'released' binding record."""
-        from agp.models import AgentRuntimeBinding
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_br", "capability_id": "cap_python"})
-        self.assertEqual(agent.status_code, 200)
-        runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_br", "hostname": "h"})
-        self.assertEqual(runtime.status_code, 200)
-
-        self.client.post("/messages/send", json={
-            "target": {"type": "agent", "id": "agt_br"},
-            "message": {"text": "expiry work"},
-        })
-        claim = self.client.post("/runs/claim", json={
-            "runtime_id": "rtm_br", "agent_id": "agt_br", "lease_ttl_seconds": 1,
-        })
-        self.assertTrue(claim.json()["data"]["claimed"])
-
-        # Sweep with future time to expire lease
-        session = SessionLocal()
-        try:
-            sweep_expired_leases(session, now=utc_now() + timedelta(seconds=5))
-        finally:
-            session.close()
-
-        session = SessionLocal()
-        try:
-            bindings = session.scalars(
-                select(AgentRuntimeBinding).where(
-                    AgentRuntimeBinding.agent_id == "agt_br",
-                    AgentRuntimeBinding.runtime_id == "rtm_br",
-                )
-            ).all()
-            statuses = [b.binding_status for b in bindings]
-            self.assertIn("active", statuses)
-            self.assertIn("released", statuses)
-        finally:
-            session.close()
 
     def test_gap8_runtime_degraded_transition(self) -> None:
         """Gap 8: Runtime transitions to degraded before going offline."""
@@ -503,7 +280,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap8_degraded_runtime_cannot_claim(self) -> None:
         """Gap 8: A degraded runtime cannot claim new work."""
-        self.client.post("/agents/up", json={"agent_id": "agt_dcl", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_dcl", "capabilities": ["python"]})
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_dcl", "hostname": "h"})
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_dcl"},
@@ -528,7 +305,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap9_operator_triage_endpoint(self) -> None:
         """Gap 9: GET /observability/triage provides consolidated operator view."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_tri", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_tri", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_tri", "hostname": "host-tri"})
         self.assertEqual(runtime.status_code, 200)
@@ -547,19 +324,18 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertIn("active_jobs_by_runtime", triage)
         self.assertIn("recent_failures", triage)
         self.assertIn("stale_runtimes", triage)
-        self.assertIn("capabilities", triage)
+        self.assertIn("agents", triage)
 
         # rtm_tri should have active work
         self.assertIn("rtm_tri", triage["active_jobs_by_runtime"])
         self.assertEqual(len(triage["active_jobs_by_runtime"]["rtm_tri"]), 1)
 
-        # Capabilities should list cap_python
-        cap_ids = [c["capability_id"] for c in triage["capabilities"]]
-        self.assertIn("cap_python", cap_ids)
+        # Agent summary should count the busy agent
+        self.assertEqual(triage["agents"]["busy"], 1)
 
     def test_gap10_duplicate_claim_prevention(self) -> None:
         """Gap 10: A job cannot be claimed twice simultaneously."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_dup", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_dup", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime1 = self.client.post("/runtimes/register", json={"runtime_id": "rtm_dup1", "hostname": "h1"})
         self.assertEqual(runtime1.status_code, 200)
@@ -585,7 +361,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap10_fencing_token_rejects_stale_terminal(self) -> None:
         """Gap 10: Expired lease's fencing token must be rejected for terminal operations."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_fence", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_fence", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_fence", "hostname": "h"})
         self.assertEqual(runtime.status_code, 200)
@@ -625,7 +401,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap10_network_partition_reconnect(self) -> None:
         """Gap 10: Runtime goes offline then re-registers; agent can be reclaimed."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_part", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_part", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_part", "hostname": "h"})
         self.assertEqual(runtime.status_code, 200)
@@ -663,7 +439,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap10_lease_expiry_and_reassignment(self) -> None:
         """Gap 10: After lease expiry, job is reassigned with a new fencing token."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_reass", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_reass", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_reass", "hostname": "h"})
         self.assertEqual(runtime.status_code, 200)
@@ -704,7 +480,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap10_agent_runtime_replacement(self) -> None:
         """Gap 10: Agent survives runtime replacement and continues processing."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_rep", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_rep", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime1 = self.client.post("/runtimes/register", json={"runtime_id": "rtm_rep1", "hostname": "h1"})
         self.assertEqual(runtime1.status_code, 200)
@@ -760,7 +536,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_gap10_operator_inspection_depth(self) -> None:
         """Gap 10: Operator APIs return sufficient detail for triage."""
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_ins", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_ins", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_ins", "hostname": "host-ins"})
         self.assertEqual(runtime.status_code, 200)
@@ -793,6 +569,10 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertIn("queue", summary)
 
     def test_agp_up_provisions_agent_from_capability_name(self) -> None:
+        self.client.post("/capabilities/seed", json={
+            "capability_id": "cap_python", "name": "Python Tester",
+            "version": "v1", "image_ref": "img:v1", "model_ref": "model:v1",
+        })
         result = self._cli_invoke(["up", "Python Tester"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[SUCCESS]", result.output)
@@ -801,6 +581,10 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertIn("CAPABILITY: Python Tester", result.output)
 
     def test_agp_up_auto_generates_agent_id(self) -> None:
+        self.client.post("/capabilities/seed", json={
+            "capability_id": "cap_python", "name": "Python Tester",
+            "version": "v1", "image_ref": "img:v1", "model_ref": "model:v1",
+        })
         result = self._cli_invoke(["up", "Python Tester"])
         self.assertEqual(result.exit_code, 0, result.output)
         for line in result.output.splitlines():
@@ -811,24 +595,27 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         else:
             self.fail("AGENT_ID not found in output")
 
-    def test_agp_up_unknown_capability_fails(self) -> None:
+    def test_agp_up_any_capability_name_succeeds(self) -> None:
+        """Self-registration model: any capability name is valid (no pre-seeding required)."""
         result = self._cli_invoke(["up", "nonexistent"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("[ERROR]", result.output)
-        self.assertIn("Unknown capability", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("CAPABILITY: nonexistent", result.output)
 
-    def test_agp_up_duplicate_agent_id_fails(self) -> None:
+    def test_agp_up_duplicate_agent_id_is_idempotent(self) -> None:
+        self.client.post("/capabilities/seed", json={
+            "capability_id": "cap_python", "name": "Python Tester",
+            "version": "v1", "image_ref": "img:v1", "model_ref": "model:v1",
+        })
         self.client.post("/agents/up", json={
-            "agent_id": "agt_dup", "capability_id": "cap_python",
+            "agent_id": "agt_dup", "capabilities": ["python"],
         })
         result = self._cli_invoke(["up", "Python Tester", "--agent-id", "agt_dup"])
-        self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("[ERROR]", result.output)
-        self.assertIn("already exists", result.output)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[SUCCESS]", result.output)
 
     def test_agp_down_idle_agent(self) -> None:
         self.client.post("/agents/up", json={
-            "agent_id": "agt_down_idle", "capability_id": "cap_python",
+            "agent_id": "agt_down_idle", "capabilities": ["python"],
         })
         result = self._cli_invoke(["down", "agt_down_idle"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -838,8 +625,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
     def test_agp_down_busy_agent_without_force_blocked(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_dwn", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_down_busy", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_dwn",
+            "agent_id": "agt_down_busy", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_down_busy"},
@@ -857,8 +643,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Force-down cancels jobs AND their runs and leases."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_dwn2", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_down_force", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_dwn2",
+            "agent_id": "agt_down_force", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_down_force"},
@@ -895,18 +680,18 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertIn("[ERROR]", result.output)
         self.assertIn("not found", result.output)
 
-    def test_agp_down_already_terminated_fails(self) -> None:
+    def test_agp_down_already_deleted_fails(self) -> None:
         self.client.post("/agents/up", json={
-            "agent_id": "agt_term", "capability_id": "cap_python",
+            "agent_id": "agt_term", "capabilities": ["python"],
         })
         self._cli_invoke(["down", "agt_term"])
         result = self._cli_invoke(["down", "agt_term"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("already terminated", result.output)
+        self.assertIn("not found", result.output)
 
     def test_agp_down_draining_without_force_blocked(self) -> None:
         self.client.post("/agents/up", json={
-            "agent_id": "agt_drain", "capability_id": "cap_python",
+            "agent_id": "agt_drain", "capabilities": ["python"],
         })
         self.client.post("/agents/agt_drain/down", json={"mode": "drain"})
         result = self._cli_invoke(["down", "agt_drain"])
@@ -918,8 +703,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Force-down cancels ALL active jobs, not just the first."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_multi", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_multi", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_multi",
+            "agent_id": "agt_multi", "capabilities": ["python"],
         })
         j1 = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_multi"},
@@ -943,8 +727,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Server rejects terminate on busy agent."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_toctou", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_toctou", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_toctou",
+            "agent_id": "agt_toctou", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_toctou"},
@@ -953,24 +736,24 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.client.post("/runs/claim", json={
             "runtime_id": "rtm_toctou", "agent_id": "agt_toctou",
         })
-        resp = self.client.post("/agents/agt_toctou/down", json={"mode": "terminate"})
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn("active work", resp.json()["error"]["message"])
+        # mode=force cancels work and deletes, should succeed even with active work
+        resp = self.client.post("/agents/agt_toctou/down", json={"mode": "force"})
+        self.assertEqual(resp.status_code, 200)
 
-    def test_agent_down_service_toctou_guard_draining(self) -> None:
-        """Server rejects terminate on draining agent (may have active work)."""
+    def test_agent_down_service_force_on_draining(self) -> None:
+        """Force-down on draining agent cancels work and deletes."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_drain_guard", "capability_id": "cap_python",
+            "agent_id": "agt_drain_guard", "capabilities": ["python"],
         })
         self.client.post("/agents/agt_drain_guard/down", json={"mode": "drain"})
-        resp = self.client.post("/agents/agt_drain_guard/down", json={"mode": "terminate"})
-        self.assertEqual(resp.status_code, 409)
-        self.assertIn("active work", resp.json()["error"]["message"])
+        resp = self.client.post("/agents/agt_drain_guard/down", json={"mode": "force"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["data"]["status"], "deleted")
 
     def test_agent_down_service_double_drain_rejected(self) -> None:
         """Server rejects drain on already-draining agent."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_dd", "capability_id": "cap_python",
+            "agent_id": "agt_dd", "capabilities": ["python"],
         })
         self.client.post("/agents/agt_dd/down", json={"mode": "drain"})
         resp = self.client.post("/agents/agt_dd/down", json={"mode": "drain"})
@@ -981,8 +764,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Force-down on a draining agent with active jobs cancels everything."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_drnf", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_drnf", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_drnf",
+            "agent_id": "agt_drnf", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_drnf"},
@@ -1016,8 +798,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Completing a run on a draining agent preserves DRAINING, not IDLE."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_drn", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_drn_pres", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_drn",
+            "agent_id": "agt_drn_pres", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_drn_pres"},
@@ -1053,8 +834,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Force-down releases all leases and transitions the runtime back to IDLE."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_rtm_idle", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_rtm_idle", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_rtm_idle",
+            "agent_id": "agt_rtm_idle", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_rtm_idle"},
@@ -1087,8 +867,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Events from force-down include previous_status for audit trail."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_evt", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_evt", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_evt",
+            "agent_id": "agt_evt", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_evt"},
@@ -1121,8 +900,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Scenario A: interrupt on an active job requests runtime cancellation."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_int", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_int",
+            "agent_id": "agt_int", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_int"},
@@ -1149,8 +927,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Scenario B: interrupt with --purge cancels active + all queued."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_purge", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_purge", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_purge",
+            "agent_id": "agt_purge", "capabilities": ["python"],
         })
         # Send 3 jobs — first will be claimed, other 2 stay queued
         job_ids = []
@@ -1183,7 +960,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
     def test_agent_interrupt_no_active_job_is_noop(self) -> None:
         """Interrupt on idle agent with no active job succeeds gracefully."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_idle_int", "capability_id": "cap_python",
+            "agent_id": "agt_idle_int", "capabilities": ["python"],
         })
         resp = self.client.post("/agents/agt_idle_int/interrupt")
         self.assertEqual(resp.status_code, 200)
@@ -1192,22 +969,21 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(data["dropped_job_ids"], [])
         self.assertEqual(data["status"], "idle")
 
-    def test_agent_interrupt_terminated_agent_rejected(self) -> None:
-        """Cannot interrupt a terminated agent."""
+    def test_agent_interrupt_deleted_agent_rejected(self) -> None:
+        """Cannot interrupt a deleted agent (404)."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_term_int", "capability_id": "cap_python",
+            "agent_id": "agt_term_int", "capabilities": ["python"],
         })
-        self.client.post("/agents/agt_term_int/down", json={"mode": "terminate"})
+        self.client.post("/agents/agt_term_int/down", json={"mode": "force"})
 
         resp = self.client.post("/agents/agt_term_int/interrupt")
-        self.assertEqual(resp.status_code, 409)
+        self.assertEqual(resp.status_code, 404)
 
     def test_agent_interrupt_preserves_active_lease_until_runtime_cancels(self) -> None:
         """Interrupt does not release the lease before the runtime handles it."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_int_rt", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_int_rt", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_int_rt",
+            "agent_id": "agt_int_rt", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_int_rt"},
@@ -1242,8 +1018,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Interrupt on a draining agent keeps DRAINING status, doesn't reset to IDLE."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_drain_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_drain_int", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_drain_int",
+            "agent_id": "agt_drain_int", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_drain_int"},
@@ -1266,8 +1041,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Interrupt creates agent.interrupted event with correct body."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_evt_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_evt_int", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_evt_int",
+            "agent_id": "agt_evt_int", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_evt_int"},
@@ -1297,7 +1071,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
     def test_job_interrupt_queued_job_via_api(self) -> None:
         """Scenario C: interrupting a queued (not yet running) job cancels it directly."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_jint", "capability_id": "cap_python",
+            "agent_id": "agt_jint", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_jint"},
@@ -1314,8 +1088,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """CLI: agp interrupt <agent_id> produces correct output."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_cli_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_cli_int", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_cli_int",
+            "agent_id": "agt_cli_int", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_cli_int"},
@@ -1335,8 +1108,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """CLI: agp interrupt <agent_id> --purge shows dropped jobs."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_cli_purge", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_cli_purge", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_cli_purge",
+            "agent_id": "agt_cli_purge", "capabilities": ["python"],
         })
         for i in range(3):
             self.client.post("/messages/send", json={
@@ -1356,7 +1128,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
     def test_cli_interrupt_job_target(self) -> None:
         """CLI: agp interrupt <job_id> cancels queued job with correct output."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_cli_jint", "capability_id": "cap_python",
+            "agent_id": "agt_cli_jint", "capabilities": ["python"],
         })
         send_resp = self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_cli_jint"},
@@ -1379,7 +1151,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
     def test_agent_interrupt_purge_no_active_job_clears_queue(self) -> None:
         """Purge with no active job but queued jobs cancels the backlog."""
         self.client.post("/agents/up", json={
-            "agent_id": "agt_purge_idle", "capability_id": "cap_python",
+            "agent_id": "agt_purge_idle", "capabilities": ["python"],
         })
         job_ids = []
         for i in range(3):
@@ -1401,34 +1173,12 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_agent_interrupt_capability_routed_active_job(self) -> None:
         """Interrupt finds and cancels a capability-routed job via Run join."""
-        from agp.db import SessionLocal
-        from agp.models import Capability, utc_now as _utc_now
-        session = SessionLocal()
-        try:
-            session.add(Capability(
-                capability_id="cap_route_int",
-                name="Route Int Tester",
-                version="v1",
-                image_ref="python:3.12",
-                model_ref="gpt-5.4",
-                resource_tier="small",
-                permission_profile="default",
-                queue_mode="capability_pool",
-                runtime_requirements_json={},
-                created_at=_utc_now(),
-                updated_at=_utc_now(),
-            ))
-            session.commit()
-        finally:
-            session.close()
-
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_route_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_route_int", "capability_id": "cap_route_int",
-            "assigned_runtime_id": "rtm_route_int",
+            "agent_id": "agt_route_int", "capabilities": ["route_int"],
         })
         send_resp = self.client.post("/messages/send", json={
-            "target": {"type": "capability", "id": "cap_route_int"},
+            "target": {"type": "capability", "id": "route_int"},
             "message": {"text": "capability work"},
         })
         job_id = send_resp.json()["data"]["job_id"]
@@ -1439,7 +1189,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         # Claim it via the capability pool
         self.client.post("/runs/claim", json={
             "runtime_id": "rtm_route_int", "agent_id": "agt_route_int",
-            "capability_id": "cap_route_int",
+            "capability": "cap_route_int",
         })
 
         # Interrupt the agent — should find the capability-routed job via Path 2
@@ -1455,8 +1205,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Calling interrupt twice is a no-op on the second call."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_dbl_int", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_dbl_int", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_dbl_int",
+            "agent_id": "agt_dbl_int", "capabilities": ["python"],
         })
         self.client.post("/messages/send", json={
             "target": {"type": "agent", "id": "agt_dbl_int"},
@@ -1479,8 +1228,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Interrupt without purge reports correct remaining queue size."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_rem", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_rem", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_rem",
+            "agent_id": "agt_rem", "capabilities": ["python"],
         })
         for i in range(4):
             self.client.post("/messages/send", json={
@@ -1500,8 +1248,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Interrupt acks dangling delivery records for cancelled jobs."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_dlv", "hostname": "localhost"})
         self.client.post("/agents/up", json={
-            "agent_id": "agt_dlv", "capability_id": "cap_python",
-            "assigned_runtime_id": "rtm_dlv",
+            "agent_id": "agt_dlv", "capabilities": ["python"],
         })
         job_ids = []
         for i in range(3):
@@ -1532,7 +1279,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_agent_interrupt_live_runtime_becomes_cancelled(self) -> None:
         """Agent-level interrupt reaches a live worker and results in cancellation."""
-        self.client.post("/agents/up", json={"agent_id": "agt_agent_interrupt", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_agent_interrupt", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={

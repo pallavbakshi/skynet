@@ -72,9 +72,12 @@ def _current_schema_version(session: Session) -> str | None:
 def _set_schema_version(session: Session, version: str) -> None:
     from agp.models import SystemMetadata, utc_now
 
+    # Expire cached state so session.get() sees rows created by raw SQL migrations
+    session.expire_all()
     existing = session.get(SystemMetadata, "schema_version")
     if existing is None:
         session.add(SystemMetadata(key="schema_version", value=version, updated_at=utc_now()))
+        session.flush()
     else:
         existing.value = version
         existing.updated_at = utc_now()

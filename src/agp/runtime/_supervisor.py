@@ -9,12 +9,16 @@ from threading import Event, Thread
 from time import monotonic
 from typing import Any
 
+import logging
+
 import httpx
 
 from agp.artifact_store import ArtifactStore, get_artifact_store
 from agp.client._runtime import RuntimeClient, RuntimeIdentity
 from agp.config import settings
 from agp.logs import append_jsonl_log
+
+_logger = logging.getLogger(__name__)
 
 from agp.runtime._types import (
     ArtifactPayload,
@@ -185,8 +189,10 @@ class RuntimeSupervisor:
         *,
         agent_id: str | None = None,
         capability_id: str | None = None,
+        capabilities: list[str] | None = None,
         lease_ttl_seconds: int = 30,
         heartbeat_interval_seconds: float = 5.0,
+        agent_heartbeat_seconds: float = 15.0,
         idle_sleep_seconds: float = 0.25,
         max_iterations: int | None = None,
         stop_event: Event | None = None,
@@ -195,23 +201,73 @@ class RuntimeSupervisor:
         outcomes: list[dict[str, Any]] = []
         iterations = 0
         stop_event = stop_event or Event()
+
+        # Register runtime
         if not self._registered:
             self.client.register()
             self._registered = True
-        while not stop_event.is_set():
-            if max_iterations is not None and iterations >= max_iterations:
-                break
-            outcome = self.run_once(
+
+        # Register agent (self-registration / initial heartbeat)
+        resolved_caps = capabilities or ([capability_id] if capability_id else [])
+        if agent_id is not None:
+            self.client.agent_up(
                 agent_id=agent_id,
-                capability_id=capability_id,
-                lease_ttl_seconds=lease_ttl_seconds,
-                heartbeat_interval_seconds=heartbeat_interval_seconds,
-                max_local_recoveries=max_local_recoveries,
+                capabilities=resolved_caps,
+                metadata=self.client.identity.metadata,
             )
-            outcomes.append(outcome)
-            iterations += 1
-            if not outcome.get("claimed"):
-                stop_event.wait(idle_sleep_seconds)
+
+        last_agent_heartbeat = monotonic()
+
+        try:
+            while not stop_event.is_set():
+                if max_iterations is not None and iterations >= max_iterations:
+                    break
+
+                # Agent heartbeat: refresh presence via /agents/up
+                if agent_id is not None:
+                    elapsed = monotonic() - last_agent_heartbeat
+                    if elapsed >= agent_heartbeat_seconds:
+                        try:
+                            self.client.agent_up(
+                                agent_id=agent_id,
+                                capabilities=resolved_caps,
+                                metadata=self.client.identity.metadata,
+                            )
+                        except Exception:  # noqa: BLE001
+                            _logger.warning("agent heartbeat failed (CP may be temporarily unreachable)", exc_info=True)
+                        last_agent_heartbeat = monotonic()
+
+                outcome = self.run_once(
+                    agent_id=agent_id,
+                    capability_id=capability_id,
+                    lease_ttl_seconds=lease_ttl_seconds,
+                    heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    max_local_recoveries=max_local_recoveries,
+                )
+                outcomes.append(outcome)
+                iterations += 1
+                if outcome.get("claimed"):
+                    # Reset heartbeat timer after job completion
+                    last_agent_heartbeat = monotonic()
+                    if agent_id is not None:
+                        try:
+                            self.client.agent_up(
+                                agent_id=agent_id,
+                                capabilities=resolved_caps,
+                                metadata=self.client.identity.metadata,
+                            )
+                        except Exception:  # noqa: BLE001
+                            _logger.warning("post-job agent heartbeat failed", exc_info=True)
+                else:
+                    stop_event.wait(idle_sleep_seconds)
+        finally:
+            # Graceful shutdown: deregister agent
+            if agent_id is not None:
+                try:
+                    self.client.agent_down(agent_id=agent_id, mode="force")
+                except Exception:  # noqa: BLE001
+                    pass  # Best-effort; sweeper will clean up
+
         return outcomes
 
     def run_once(
@@ -238,7 +294,7 @@ class RuntimeSupervisor:
         )
         claimed = self.client.claim(
             agent_id=agent_id,
-            capability_id=capability_id,
+            capability=capability_id,
             lease_ttl_seconds=lease_ttl_seconds,
         )
         if not claimed.get("claimed"):

@@ -129,19 +129,7 @@ kubectl --kubeconfig "${SMOKE_KUBECONFIG}" kustomize "${TMP_OVERLAY_DIR}" --load
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/minio --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/redis --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/control-plane --timeout=180s
-for _ in {1..180}; do
-  bootstrap_succeeded="$("${KCTL[@]}" get job agp-bootstrap --namespace agp -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
-  if [[ "${bootstrap_succeeded}" == "1" ]]; then
-    break
-  fi
-  sleep 1
-done
-if [[ "${bootstrap_succeeded:-}" != "1" ]]; then
-  echo "bootstrap job did not succeed before timeout" >&2
-  "${KCTL[@]}" get pods --namespace agp
-  "${KCTL[@]}" logs job/agp-bootstrap --namespace agp --tail=200 || true
-  exit 1
-fi
+# Bootstrap job removed — agents self-register via /agents/up.
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/lease-sweeper --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/runtime-sweeper --timeout=180s
 "${KCTL[@]}" wait --namespace agp --for=condition=available deployment/runtime --timeout=180s

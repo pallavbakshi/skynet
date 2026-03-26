@@ -26,12 +26,9 @@ class RunStatus(StrEnum):
 
 
 class AgentStatus(StrEnum):
-    PROVISIONING = "provisioning"
     IDLE = "idle"
     BUSY = "busy"
-    DEGRADED = "degraded"
     DRAINING = "draining"
-    TERMINATED = "terminated"
 
 
 class RuntimeStatus(StrEnum):

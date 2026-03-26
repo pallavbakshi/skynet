@@ -392,32 +392,38 @@ def sweep_runtimes_loop(
 
 @sweep_app.command("idle")
 def sweep_idle(
-    timeout: int | None = typer.Option(None, "--timeout", help="Idle timeout in seconds (uses config default if omitted)."),
+    timeout: int | None = typer.Option(None, "--timeout", help="Heartbeat grace period in seconds (uses config default if omitted)."),
 ) -> None:
-    """One-shot sweep of idle agents."""
-    from agp.control_plane import sweep_idle_agents
+    """One-shot sweep of stale agents (delete dead agents, drain empty draining agents)."""
+    cfg = load_config()
+    if cfg.stack.mode == "docker":
+        env = {}
+        if timeout is not None:
+            env["_HEARTBEAT_GRACE"] = str(timeout)
+        _docker_exec_python(
+            cfg,
+            "import json, os; "
+            "from agp.control_plane import sweep_stale_agents; "
+            "from agp.db import SessionLocal; "
+            "session=SessionLocal(); "
+            "kwargs={}; "
+            "g=os.environ.get('_HEARTBEAT_GRACE'); "
+            "kwargs.update({'heartbeat_grace_seconds': int(g)} if g else {}); "
+            "result=sweep_stale_agents(session, **kwargs); "
+            "session.close(); "
+            "print(json.dumps(result, indent=2, sort_keys=True, default=str))",
+            env=env or None,
+        )
+        return
+    from agp.control_plane import sweep_stale_agents
     from agp.db import SessionLocal
 
     session = SessionLocal()
     try:
         kwargs = {}
         if timeout is not None:
-            kwargs["idle_timeout_seconds"] = timeout
-        result = sweep_idle_agents(session, **kwargs)
-        _emit(result)
-    finally:
-        session.close()
-
-
-@sweep_app.command("draining")
-def sweep_draining() -> None:
-    """One-shot sweep of draining agents."""
-    from agp.control_plane import sweep_draining_agents
-    from agp.db import SessionLocal
-
-    session = SessionLocal()
-    try:
-        result = sweep_draining_agents(session)
+            kwargs["heartbeat_grace_seconds"] = timeout
+        result = sweep_stale_agents(session, **kwargs)
         _emit(result)
     finally:
         session.close()

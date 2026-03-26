@@ -111,6 +111,7 @@ def runtime_work_loop(
     hostname: str | None = None,
     agent_id: str | None = None,
     capability_id: str | None = None,
+    capabilities: str | None = typer.Option(None, help="Comma-separated capability list (e.g. 'code,python')."),
     artifact_root: str = ".agp-artifacts",
     idle_sleep_seconds: float = 0.25,
     max_iterations: int | None = None,
@@ -151,9 +152,11 @@ def runtime_work_loop(
     )
     stop_event = Event()
     try:
+        resolved_capabilities = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else None
         payload = worker.run_forever(
             agent_id=agent_id,
             capability_id=capability_id,
+            capabilities=resolved_capabilities,
             idle_sleep_seconds=idle_sleep_seconds,
             max_iterations=max_iterations,
             stop_event=stop_event,
@@ -361,7 +364,7 @@ def _poll_agent_ready(
             if status == "idle":
                 return agent
             # Terminal statuses will never become idle — exit early
-            if status in ("terminated", "error", "failed"):
+            if status in ("error", "failed"):
                 return agent
 
         now = time.monotonic()
@@ -399,25 +402,9 @@ def up(
     import httpx as _httpx
 
     with _make_client(server_url) as client:
-        # Resolve capability name → ID
+        # Self-registration model: pass capability name directly as a
+        # capability string.  No need to resolve against /capabilities table.
         typer.echo(f"[..] Provisioning capability '{capability_name}'...")
-        try:
-            cap = client.resolve_capability_by_name(capability_name)
-        except ValueError as exc:
-            _print_banner("ERROR", "Provisioning Failed")
-            typer.echo(f"FATAL: {exc}")
-            raise typer.Exit(1)
-        except Exception as exc:
-            _print_banner("ERROR", "Provisioning Failed")
-            typer.echo(f"FATAL: Could not reach control plane: {exc}")
-            raise typer.Exit(1)
-        if cap is None:
-            _print_banner("ERROR", "Provisioning Failed")
-            typer.echo(f"FATAL: Unknown capability '{capability_name}'.")
-            typer.echo("ACTION: Run `agp ls` to see available capabilities.")
-            raise typer.Exit(1)
-
-        capability_id = cap["capability_id"]
 
         # Retry loop for provisioning
         data: dict | None = None
@@ -426,8 +413,7 @@ def up(
             try:
                 data = client.register_agent(
                     agent_id=agent_id,
-                    capability_id=capability_id,
-                    assigned_runtime_id=runtime_id,
+                    capabilities=[capability_name],
                     workspace_ref=workspace_ref,
                 )
                 break
@@ -517,14 +503,8 @@ def down(
 
         agent_status = agent.get("status", "unknown")
 
-        # Already terminated — nothing to do
-        if agent_status == "terminated":
-            _print_banner("ERROR", "Teardown Failed")
-            typer.echo(f"Agent {agent_id} is already terminated.")
-            raise typer.Exit(1)
-
         # Statuses that may have active work — require --force
-        _HAS_ACTIVE_WORK = ("busy", "draining", "degraded")
+        _HAS_ACTIVE_WORK = ("busy", "draining")
 
         if agent_status in _HAS_ACTIVE_WORK and not force:
             _print_banner("ERROR", "Teardown Blocked")
@@ -540,10 +520,10 @@ def down(
             mode = "force"
         elif agent_status == "idle":
             typer.echo("[..] Agent is IDLE. Proceeding with teardown...")
-            mode = "terminate"
+            mode = "force"
         else:
             typer.echo(f"[..] Agent is {agent_status.upper()}. Proceeding with teardown...")
-            mode = "force" if force else "terminate"
+            mode = "force"
 
         try:
             result = client.agent_down(agent_id, mode=mode)
@@ -571,7 +551,7 @@ def down(
             typer.echo(f"FATAL: {detail}")
             raise typer.Exit(1)
 
-        result_status = result.get("status", "terminated").upper()
+        result_status = result.get("status", "deleted").upper()
         if mode == "force":
             _print_banner("SUCCESS", "Agent Forcefully Destroyed")
         else:
@@ -935,6 +915,17 @@ def ls(
         for c in caps:
             cap_names[c["capability_id"]] = c.get("name", c["capability_id"])
 
+        # Build agent → runtime lookup (1:1 binding)
+        agent_runtime: dict[str, str] = {}
+        try:
+            runtimes_data = client.ops_list_runtimes(limit=200)
+            for rt in runtimes_data.get("items", []):
+                aid = rt.get("agent_id")
+                if aid:
+                    agent_runtime[aid] = rt["runtime_id"]
+        except Exception:
+            pass  # ops endpoint may not be available
+
         # For busy agents, fetch their running job
         agent_jobs: dict[str, dict] = {}
         busy_agents = [a for a in agents if a.get("status") == "busy"]
@@ -953,7 +944,7 @@ def ls(
         typer.echo("")
 
         # ── Active Agents section
-        active = [a for a in agents if all_agents or a.get("status") not in ("terminated",)]
+        active = list(agents)  # All agents in DB are live
 
         typer.echo("[ACTIVE AGENTS]")
         if not active:
@@ -969,9 +960,9 @@ def ls(
             now = datetime.now(timezone.utc)
             for a in active:
                 agent_id = a["agent_id"]
-                role = cap_names.get(a.get("capability_id", ""), a.get("capability_id", "-"))
+                role = ", ".join(a.get("capabilities", [])) or "-"
                 agent_status = a.get("status", "?").upper()
-                runtime_id = a.get("assigned_runtime_id") or "-"
+                runtime_id = agent_runtime.get(agent_id, "-")
                 workspace = a.get("workspace_ref") or "-"
 
                 job = agent_jobs.get(agent_id)
@@ -1078,25 +1069,15 @@ def _info_agent(agent: dict, client) -> None:
     from datetime import datetime, timezone
 
     agent_id = agent["agent_id"]
-    cap_id = agent.get("capability_id", "")
+    cap_id = ", ".join(agent.get("capabilities", [])) or "-"
 
     typer.echo(_SEPARATOR)
     typer.echo(f"      AGENT INFO: {agent_id}")
     typer.echo(_SEPARATOR)
     typer.echo("Logical agent view. Use `skyops runtime ...` to inspect the bound runtime directly.")
 
-    # Resolve capability name
-    cap = None
-    cap_name = cap_id
-    try:
-        cap = client.get_capability(cap_id)
-        cap_name = cap.get("name", cap_id)
-    except Exception:
-        pass
-
-    typer.echo(f"CAPABILITY:   {cap_name}")
     typer.echo(f"STATUS:       {agent.get('status', '?').upper()}")
-    typer.echo(f"RUNTIME:      {agent.get('assigned_runtime_id') or '-'}")
+    typer.echo(f"CAPABILITIES: {', '.join(agent.get('capabilities', [])) or '-'}")
 
     # Current job for busy agents
     now = datetime.now(timezone.utc)
@@ -1129,11 +1110,8 @@ def _info_agent(agent: dict, client) -> None:
     workspace = agent.get("workspace_ref") or "-"
     typer.echo(f"WORKSPACE:    {workspace}")
 
-    # Capability blueprint summary
-    if cap:
-        typer.echo("")
-        typer.echo("[CAPABILITY BLUEPRINT]")
-        _print_capability_blueprint(cap)
+    # Capability blueprint section removed — agents now declare capabilities
+    # as string arrays via /agents/up, not from the capabilities table.
 
 
 def _info_capability(target: str, client) -> None:

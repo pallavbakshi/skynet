@@ -5,7 +5,7 @@ from tests.mvp_flow.base import *
 
 class MvpFlowCoreTest(MvpFlowTestBase):
     def test_agent_targeted_job_completes(self) -> None:
-        agent = self.client.post("/agents/up", json={"agent_id": "agt_one", "capability_id": "cap_python"})
+        agent = self.client.post("/agents/up", json={"agent_id": "agt_one", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
 
         runtime = self.client.post(
@@ -109,7 +109,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("job.completed", event_types)
 
     def test_inline_send_returns_inline_result_for_idle_agent(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_inline", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_inline", "capabilities": ["python"]})
         response = self.client.post(
             "/messages/send",
             json={
@@ -128,7 +128,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIsNotNone(job["result_artifact_id"])
 
     def test_jobs_list_uses_cursor_pagination(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_page", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_page", "capabilities": ["python"]})
         for idx in range(3):
             self.client.post(
                 "/messages/send",
@@ -154,24 +154,21 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertTrue(first_ids.isdisjoint(second_ids))
 
     def test_agents_and_runtimes_support_basic_filters(self) -> None:
-        self.client.post(
-            "/runtimes/register",
-            json={"runtime_id": "rtm_filter", "hostname": "localhost"},
-        )
+        # agent_up auto-creates an internal runtime (1:1 binding)
         self.client.post(
             "/agents/up",
-            json={"agent_id": "agt_filter", "capability_id": "cap_python", "assigned_runtime_id": "rtm_filter"},
+            json={"agent_id": "agt_filter", "capabilities": ["python"]},
         )
-        agents = self.client.get("/agents", params={"capability_id": "cap_python", "status": "idle"})
+        agents = self.client.get("/agents", params={"capability": "python", "status": "idle"})
         self.assertEqual(agents.status_code, 200)
         self.assertEqual(len(agents.json()["data"]["items"]), 1)
 
         runtimes = self.client.get("/runtimes", params={"status": "idle", "health_status": "healthy"})
         self.assertEqual(runtimes.status_code, 200)
-        self.assertEqual(len(runtimes.json()["data"]["items"]), 1)
+        self.assertGreaterEqual(len(runtimes.json()["data"]["items"]), 1)
 
     def test_runtime_worker_can_claim_and_complete(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_runtime", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_runtime", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -453,7 +450,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_runtime_worker_completes_with_registryfs_artifacts(self) -> None:
         settings.artifact_backend = "registryfs"
-        self.client.post("/agents/up", json={"agent_id": "agt_runtime_registry", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_runtime_registry", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -488,7 +485,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertNotEqual(artifact["checksum"], "")
 
     def test_job_can_transition_blocked_to_queued_via_operator_helpers(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_block", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_block", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -514,7 +511,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(job["status"], "queued")
 
     def test_job_can_transition_blocked_to_queued_via_http_endpoints(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_block_http", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_block_http", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -539,7 +536,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("job.queued", event_types)
 
     def test_watch_helper_tracks_ordered_events_until_terminal(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_watch", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_watch", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -566,7 +563,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         )
 
     def test_orchestration_helpers_cover_send_list_interrupt_and_fetch(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_orc", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_orc", "capabilities": ["python"]})
 
         sent = self.agp.send(
             target_type="agent",
@@ -579,7 +576,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         jobs = self.agp.list_jobs( target_agent_id="agt_orc")
         self.assertTrue(any(item["job_id"] == job_id for item in jobs["items"]))
 
-        agents = self.agp.list_agents( capability_id="cap_python")
+        agents = self.agp.list_agents( capability="python")
         self.assertTrue(any(item["agent_id"] == "agt_orc" for item in agents["items"]))
 
         interrupted = self.agp.interrupt( job_id=job_id)
@@ -602,7 +599,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
     def test_inmemory_artifact_backend_supports_inline_result_fetch(self) -> None:
         settings.artifact_backend = "inmemory"
         reset_artifact_store_state("inmemory")
-        self.client.post("/agents/up", json={"agent_id": "agt_memart", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_memart", "capabilities": ["python"]})
 
         inline_sent = self.agp.send(
             target_type="agent",
@@ -621,7 +618,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_sharedfs_artifact_backend_supports_inline_result_fetch(self) -> None:
         settings.artifact_backend = "sharedfs"
-        self.client.post("/agents/up", json={"agent_id": "agt_sharedart", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_sharedart", "capabilities": ["python"]})
 
         inline_sent = self.agp.send(
             target_type="agent",
@@ -640,7 +637,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_registryfs_artifact_backend_supports_inline_result_fetch(self) -> None:
         settings.artifact_backend = "registryfs"
-        self.client.post("/agents/up", json={"agent_id": "agt_registryart", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_registryart", "capabilities": ["python"]})
 
         inline_sent = self.agp.send(
             target_type="agent",
@@ -728,7 +725,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_localfs_artifact_backend_populates_checksum(self) -> None:
         settings.artifact_backend = "localfs"
-        self.client.post("/agents/up", json={"agent_id": "agt_localart", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_localart", "capabilities": ["python"]})
         inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_localart",
@@ -742,7 +739,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertNotEqual(artifact["checksum"], "")
 
     def test_job_and_run_artifact_listing_exposes_transcript_and_exec_roles(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_artlist", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_artlist", "capabilities": ["python"]})
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_artlist", "hostname": "localhost"})
         sent = self.client.post(
             "/messages/send",
@@ -795,7 +792,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("transcript_log", transcript_content["content"])
 
     def test_observability_summary_reports_core_counts(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_obs", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_obs", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -822,7 +819,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertGreater(summary["events"]["latest_event_seq"], 0)
 
     def test_observability_metrics_export_prometheus_text(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_metrics", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_metrics", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={

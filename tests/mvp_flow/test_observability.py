@@ -5,7 +5,7 @@ from tests.mvp_flow.base import *
 
 class MvpFlowObservabilityTest(MvpFlowTestBase):
     def test_observability_job_trace_reports_ordered_timeline_and_durations(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_trace", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_trace", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -42,7 +42,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         self.assertIsNotNone(trace["trace"]["durations_seconds"]["total"])
 
     def test_observability_control_plane_logs_report_structured_lifecycle_entries(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_logs", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_logs", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -78,7 +78,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
 
     def test_observability_control_plane_logs_span_rotated_files(self) -> None:
         settings.observability_log_rotation_bytes = 1
-        self.client.post("/agents/up", json={"agent_id": "agt_logs_rot", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_logs_rot", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -92,12 +92,11 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
 
         logs = self.agp.logs_control_plane( limit=200)
         event_types = {item["event_type"] for item in logs["items"] if item.get("kind") == "control_plane_event"}
-        self.assertIn("agent.provisioning", event_types)
-        self.assertIn("agent.idle", event_types)
+        self.assertIn("agent.registered", event_types)
         self.assertIn("job.accepted", event_types)
 
     def test_observability_runtime_logs_report_supervision_entries(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_runtime_logs", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_runtime_logs", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -160,7 +159,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
     def test_observability_alerts_report_dead_letters_and_failure_rate(self) -> None:
         for idx in range(3):
             agent_id = f"agt_alerts_{idx}"
-            self.client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_python"})
+            self.client.post("/agents/up", json={"agent_id": agent_id, "capabilities": ["python"]})
             sent = self.client.post(
                 "/messages/send",
                 json={
@@ -197,7 +196,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             self.assertEqual(failed.status_code, 200)
             self.assertEqual(self.client.get(f"/jobs/{sent['job_id']}").json()["data"]["status"], "failed")
 
-        self.client.post("/agents/up", json={"agent_id": "agt_alerts_dead", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_alerts_dead", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -249,7 +248,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         finally:
             session.close()
 
-        self.client.post("/agents/up", json={"agent_id": "agt_alert_cfg", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_alert_cfg", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -315,7 +314,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             settings.observability_alert_webhook_url = None
 
     def test_backup_and_restore_snapshot_preserves_state_and_artifacts(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_backup", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_backup", "capabilities": ["python"]})
         inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_backup",
@@ -354,7 +353,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         self.assertIn("inline result", restored_artifact["content"])
 
     def test_validate_restored_state_reports_missing_artifacts(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_validate", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_validate", "capabilities": ["python"]})
         inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_validate",
@@ -382,7 +381,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
 
     def test_reconstruct_queue_from_state_rebuilds_pending_delivery_and_dedupes_stale_rows(self) -> None:
         settings.queue_backend = "delivery_table"
-        self.client.post("/agents/up", json={"agent_id": "agt_reconstruct", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_reconstruct", "capabilities": ["python"]})
         sent = self.agp.send(
             target_type="agent",
             target_id="agt_reconstruct",
@@ -441,7 +440,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
 
     def test_restore_and_recover_snapshot_rebuilds_queue_and_validates_artifacts(self) -> None:
         settings.queue_backend = "delivery_table"
-        self.client.post("/agents/up", json={"agent_id": "agt_dr", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_dr", "capabilities": ["python"]})
         inline_sent = self.agp.send(
             target_type="agent",
             target_id="agt_dr",
@@ -571,14 +570,14 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
 
     def test_upgrade_status_and_mark_persist_previous_versions(self) -> None:
         initial = get_upgrade_status()
-        self.assertEqual(initial["schema_version"], "0001_initial")
+        self.assertEqual(initial["schema_version"], "0002_dynamic_agent_mesh")
         self.assertEqual(initial["release_version"], "0.1.0")
         self.assertIsNone(initial["previous_release_version"])
 
         updated = mark_upgrade(schema_version="0002_queue_backends", release_version="0.2.0")
         self.assertEqual(updated["schema_version"], "0002_queue_backends")
         self.assertEqual(updated["release_version"], "0.2.0")
-        self.assertEqual(updated["previous_schema_version"], "0001_initial")
+        self.assertEqual(updated["previous_schema_version"], "0002_dynamic_agent_mesh")
         self.assertEqual(updated["previous_release_version"], "0.1.0")
         self.assertEqual(updated["rollback_target_release_version"], "0.1.0")
 
@@ -586,7 +585,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         mark_upgrade(schema_version="0002_queue_backends", release_version="0.2.0")
         rolled_back = rollback_to_previous_version()
         self.assertEqual(rolled_back["release_version"], "0.1.0")
-        self.assertEqual(rolled_back["schema_version"], "0001_initial")
+        self.assertEqual(rolled_back["schema_version"], "0002_dynamic_agent_mesh")
         self.assertEqual(rolled_back["previous_release_version"], "0.2.0")
         self.assertEqual(rolled_back["previous_schema_version"], "0002_queue_backends")
 
@@ -598,7 +597,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         response = self.client.get("/system/upgrade-status")
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
-        self.assertEqual(data["schema_version"], "0001_initial")
+        self.assertEqual(data["schema_version"], "0002_dynamic_agent_mesh")
         self.assertEqual(data["release_version"], "0.1.0")
 
     def test_runtime_registration_enforces_supported_version_skew(self) -> None:

@@ -17,7 +17,6 @@ resources:
   - minio.yaml
   - redis.yaml
   - control-plane.yaml
-  - bootstrap-job.yaml
   - runtime.yaml
   - lease-sweeper.yaml
   - runtime-sweeper.yaml

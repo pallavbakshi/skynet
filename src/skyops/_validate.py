@@ -158,32 +158,33 @@ def k8s_smoke(
 ) -> None:
     """Full kind cluster lifecycle + smoke test.
 
-    Creates a kind cluster, builds the images, deploys, waits for bootstrap,
+    Creates a kind cluster, builds the images, deploys, waits for services,
     runs a smoke job, and validates it succeeds.
     """
     kctl = ["kubectl"]
 
     # ── Cluster setup ─────────────────────────────────────────────
-    typer.echo(f"[1/7] Creating kind cluster: {cluster_name}...")
+    import time as _time
+    typer.echo(f"[1/6] Creating kind cluster: {cluster_name}...")
     subprocess.run(["kind", "delete", "cluster", "--name", cluster_name], capture_output=True)
     subprocess.run(["kind", "create", "cluster", "--name", cluster_name], check=True)
 
     if not skip_build:
-        typer.echo(f"[2/7] Building images: {control_plane_image}, {runtime_image}...")
+        typer.echo(f"[2/6] Building images: {control_plane_image}, {runtime_image}...")
         subprocess.run(["docker", "build", "--target", "agp-control-plane", "-t", control_plane_image, "."], check=True)
         subprocess.run(["docker", "build", "--target", "agp-runtime", "-t", runtime_image, "."], check=True)
     else:
-        typer.echo("[2/7] Skipping image build.")
+        typer.echo("[2/6] Skipping image build.")
 
     if not skip_load:
-        typer.echo("[3/7] Loading images into kind cluster...")
+        typer.echo("[3/6] Loading images into kind cluster...")
         subprocess.run(["kind", "load", "docker-image", control_plane_image, "--name", cluster_name], check=True)
         subprocess.run(["kind", "load", "docker-image", runtime_image, "--name", cluster_name], check=True)
     else:
-        typer.echo("[3/7] Skipping image load.")
+        typer.echo("[3/6] Skipping image load.")
 
     # ── Generate dev secret + apply manifests ────────────────────
-    typer.echo("[4/7] Applying k8s manifests (with generated dev secrets)...")
+    typer.echo("[4/6] Applying k8s manifests (with generated dev secrets)...")
     import tempfile
     tmp_dir = tempfile.mkdtemp(prefix="agp-k8s-smoke-")
     try:
@@ -227,7 +228,7 @@ def k8s_smoke(
         _shutil.rmtree(tmp_dir, ignore_errors=True)
 
     # ── Wait for core services ────────────────────────────────────
-    typer.echo("[5/7] Waiting for core services...")
+    typer.echo("[5/6] Waiting for core services...")
     for deploy in ["postgres", "minio", "redis", "control-plane"]:
         subprocess.run(
             kctl + ["wait", "--namespace", "agp", "--for=condition=available",
@@ -235,25 +236,7 @@ def k8s_smoke(
             check=True,
         )
 
-    # ── Wait for bootstrap job ────────────────────────────────────
-    typer.echo("[6/7] Waiting for bootstrap job...")
-    import time as _time
-    deadline = _time.monotonic() + timeout
-    bootstrap_ok = False
-    while _time.monotonic() < deadline:
-        result = subprocess.run(
-            kctl + ["get", "job", "agp-bootstrap", "--namespace", "agp",
-                    "-o", "jsonpath={.status.succeeded}"],
-            capture_output=True, text=True,
-        )
-        if result.stdout.strip() == "1":
-            bootstrap_ok = True
-            break
-        _time.sleep(2)
-    if not bootstrap_ok:
-        subprocess.run(kctl + ["logs", "job/agp-bootstrap", "--namespace", "agp", "--tail=50"])
-        typer.echo("Bootstrap job did not succeed.", err=True)
-        raise typer.Exit(1)
+    # Bootstrap job removed — agents self-register via /agents/up.
 
     for deploy in ["lease-sweeper", "runtime-sweeper", "runtime"]:
         subprocess.run(
@@ -263,7 +246,7 @@ def k8s_smoke(
         )
 
     # ── Run smoke job ─────────────────────────────────────────────
-    typer.echo("[7/7] Running smoke job...")
+    typer.echo("[6/6] Running smoke job...")
     smoke_manifest = """\
 apiVersion: batch/v1
 kind: Job

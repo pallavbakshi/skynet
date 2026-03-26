@@ -56,7 +56,7 @@ class TestSkyopsConfig(unittest.TestCase):
         data = {
             "stack": {"mode": "bare-metal"},
             "server": {"port": 9999},
-            "agents": {"agt_local": {"capability_id": "cap_python"}},
+            "agents": {"agt_local": {"capabilities": ["python"]}},
         }
         cfg = SkyopsConfig.from_dict(data)
         self.assertEqual(cfg.stack.mode, "bare-metal")
@@ -104,7 +104,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_feature_a": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "feature_a",
                 }
             },
@@ -137,7 +137,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_orc": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                     "mounts": ["@shared_docs:/workspace/shared-docs"],
                 }
@@ -163,7 +163,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_local": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                 }
             },
@@ -179,7 +179,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_local": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                 }
             },
@@ -204,7 +204,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_local": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                 }
             },
@@ -230,7 +230,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_local": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                 }
             },
@@ -264,7 +264,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_git": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                     "workspace_mode": "git",
                     "repo_ref": "feature-a",
@@ -306,7 +306,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_feature_a": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                     "workspace_mode": "worktree",
                     "worktree_name": "feature-a",
@@ -352,7 +352,7 @@ class TestSkyopsConfig(unittest.TestCase):
             },
             "agents": {
                 "agt_feature_a": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                     "workspace_mode": "worktree",
                     "worktree_name": "feature-a",
@@ -805,7 +805,7 @@ class TestStatus(unittest.TestCase):
             result = runner.invoke(app, ["status"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Platform:  7 jobs total, 2 running, 1 queued", result.output)
-        self.assertIn("Agents:    1 active (agt_local)", result.output)
+        self.assertIn("Agents:    1 live (agt_local)", result.output)
 
 
 # ── Phase C: lifecycle, db, health ────────────────────────────────
@@ -1069,7 +1069,7 @@ class TestDispatchAgents(unittest.TestCase):
 
 class TestDispatchCapabilities(unittest.TestCase):
     def test_list_capabilities_command(self):
-        mock_client = _mock_agp_client(list_capabilities={"items": [{"capability_id": "cap_python", "name": "python"}]})
+        mock_client = _mock_agp_client(list_capabilities={"items": [{"capability_id": "cap_python", "name": "python", "version": "v1"}]})
         with patch("skyops._dispatch._client", return_value=mock_client):
             result = runner.invoke(app, ["capabilities"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1568,7 +1568,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         cfg = SkyopsConfig.from_dict({
             "host_profiles": {"default": {"mount_sources": {"repo": "/srv/repo"}}},
             "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
-            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+            "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
             result = runner.invoke(app, ["workspace", "resolve", "agt_local"])
@@ -1580,7 +1580,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         cfg = SkyopsConfig.from_dict({
             "host_profiles": {"default": {"mount_sources": {"repo": "/srv/repo"}}},
             "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
-            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+            "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg), \
              patch("skyops._workspace.Path.exists", return_value=True):
@@ -1592,7 +1592,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         cfg = SkyopsConfig.from_dict({
             "host_profiles": {"server-a": {"mount_sources": {"repo": "/srv/repo"}}},
             "workspace_profiles": {"main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]}},
-            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+            "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg), \
              patch("skyops._workspace.Path.exists", return_value=False):
@@ -1616,7 +1616,7 @@ class TestWorkspaceCommands(unittest.TestCase):
             },
             "agents": {
                 "agt_local": {
-                    "capability_id": "cap_python",
+                    "capabilities": ["python"],
                     "workspace_profile": "main",
                     "workspace_mode": "git",
                     "repo_url": "git@github.com:example/repo.git",
@@ -1631,7 +1631,7 @@ class TestWorkspaceCommands(unittest.TestCase):
 
     def test_workspace_resolve_unknown_agent_fails(self):
         cfg = SkyopsConfig.from_dict({
-            "agents": {"agt_local": {"capability_id": "cap_python"}},
+            "agents": {"agt_local": {"capabilities": ["python"]}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
             result = runner.invoke(app, ["workspace", "resolve", "agt_missing"])
@@ -1647,7 +1647,7 @@ class TestWorkspaceCommands(unittest.TestCase):
             "workspace_profiles": {
                 "main": {"workspace_ref": "/workspace/main", "mounts": ["@repo:/workspace/main"]},
             },
-            "agents": {"agt_local": {"capability_id": "cap_python", "workspace_profile": "main"}},
+            "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
             result = runner.invoke(app, ["workspace", "resolve", "agt_local"])

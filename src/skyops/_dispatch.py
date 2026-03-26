@@ -69,7 +69,7 @@ def list_agents(
 ) -> None:
     """List agents."""
     with _client() as client:
-        result = client.list_agents(status=status, capability_id=capability, limit=limit)
+        result = client.list_agents(status=status, capability=capability, limit=limit)
     _emit(result)
 
 

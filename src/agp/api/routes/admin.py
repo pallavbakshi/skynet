@@ -8,11 +8,10 @@ from sqlalchemy.orm import Session
 
 from agp.api.helpers import _apply_created_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
-from agp.models import Capability, CapabilityPool, Nudge, QueueDeliveryRecord, utc_now
+from agp.models import Capability, Nudge, QueueDeliveryRecord, utc_now
 from agp.schemas import CapabilitySeedRequest, CreateNudgeRequest, HealthResponse
 from agp.services._helpers import (
     _enqueue_nudge,
-    _ensure_capability_pool,
     _get_upgrade_status,
     _new_id,
     _require_capability,
@@ -72,7 +71,7 @@ def list_capabilities(
     ))
 
 
-@router.post("/capabilities/seed")
+@router.post("/capabilities/seed", deprecated=True)
 def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db)) -> dict:
     capability_id = request.capability_id
     existing = db.get(Capability, capability_id)
@@ -86,10 +85,8 @@ def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db
         existing.queue_mode = request.queue_mode
         existing.runtime_requirements_json = request.runtime_requirements
         existing.updated_at = utc_now()
-        db.flush()
-        pool = _ensure_capability_pool(db, capability_id)
         db.commit()
-        return _ok({"capability_id": capability_id, "created": False, "pool_queue_id": pool.queue_id, "pool_routing_policy": pool.routing_policy})
+        return _ok({"capability_id": capability_id, "created": False})
     capability = Capability(
         capability_id=capability_id,
         name=request.name,
@@ -102,17 +99,9 @@ def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db
         runtime_requirements_json=request.runtime_requirements,
     )
     db.add(capability)
-    db.flush()
-    pool = _ensure_capability_pool(db, capability_id)
-    _create_event(db, event_type="capability.seeded", body={"capability_id": capability_id, "pool_queue_id": pool.queue_id})
+    _create_event(db, event_type="capability.seeded", body={"capability_id": capability_id})
     db.commit()
-    return _ok({"capability_id": capability_id, "created": True, "pool_queue_id": pool.queue_id, "pool_routing_policy": pool.routing_policy})
-
-
-@router.get("/capability-pools")
-def list_capability_pools(db: Session = Depends(get_db)) -> dict:
-    pools = db.scalars(select(CapabilityPool).order_by(CapabilityPool.capability_id.asc())).all()
-    return _ok({"items": [{"capability_id": p.capability_id, "queue_id": p.queue_id, "routing_policy": p.routing_policy} for p in pools]})
+    return _ok({"capability_id": capability_id, "created": True})
 
 
 @router.post("/nudges")

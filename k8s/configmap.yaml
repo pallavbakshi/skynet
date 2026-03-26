@@ -16,6 +16,3 @@ data:
   AGP_S3_REGION: "us-east-1"
   AGP_S3_FORCE_PATH_STYLE: "true"
   AGP_SERVER_URL: "http://control-plane:7860"
-  AGP_BOOTSTRAP_CAPABILITY_ID: "cap_python"
-  AGP_BOOTSTRAP_AGENT_ID: "agt_local"
-  AGP_BOOTSTRAP_RUNTIME_ID: "rtm_local"

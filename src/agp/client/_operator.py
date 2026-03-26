@@ -161,20 +161,20 @@ class AgpClient:
 
     def register_agent(
         self,
-        agent_id: str | None,
-        capability_id: str,
+        agent_id: str | None = None,
         *,
-        assigned_runtime_id: str | None = None,
+        capabilities: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
         workspace_ref: str | None = None,
     ) -> dict:
         """Register (bring up) an agent with the control plane."""
-        payload: dict[str, Any] = {
-            "capability_id": capability_id,
-        }
+        payload: dict[str, Any] = {}
         if agent_id is not None:
             payload["agent_id"] = agent_id
-        if assigned_runtime_id is not None:
-            payload["assigned_runtime_id"] = assigned_runtime_id
+        if capabilities is not None:
+            payload["capabilities"] = capabilities
+        if metadata is not None:
+            payload["metadata"] = metadata
         if workspace_ref is not None:
             payload["workspace_ref"] = workspace_ref
         response = self._client.post("/agents/up", json=payload)
@@ -199,15 +199,15 @@ class AgpClient:
         self,
         *,
         status: str | None = None,
-        capability_id: str | None = None,
+        capability: str | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> dict:
         params: dict[str, object] = {"limit": limit}
         if status is not None:
             params["status"] = status
-        if capability_id is not None:
-            params["capability_id"] = capability_id
+        if capability is not None:
+            params["capability"] = capability
         if cursor is not None:
             params["cursor"] = cursor
         response = self._client.get("/agents", params=params)
@@ -351,71 +351,59 @@ class AgpClient:
     # ── Observability ─────────────────────────────────────────────
 
     def observability_summary(self) -> dict:
-        response = self._client.get("/observability/summary")
-        response.raise_for_status()
-        return response.json()["data"]
+        """Deprecated: use ops_health() instead."""
+        import warnings
+        warnings.warn("observability_summary() is deprecated, use ops_health()", DeprecationWarning, stacklevel=2)
+        return self.ops_health()
 
     def observability_alerts(self) -> dict:
-        response = self._client.get("/observability/alerts")
-        response.raise_for_status()
-        return response.json()["data"]
+        """Deprecated: use ops_alerts() instead."""
+        import warnings
+        warnings.warn("observability_alerts() is deprecated, use ops_alerts()", DeprecationWarning, stacklevel=2)
+        return self.ops_alerts()
 
     def observability_metrics(self) -> str:
-        response = self._client.get("/observability/metrics")
-        response.raise_for_status()
-        return response.text
+        """Deprecated: use ops_metrics() instead."""
+        import warnings
+        warnings.warn("observability_metrics() is deprecated, use ops_metrics()", DeprecationWarning, stacklevel=2)
+        return self.ops_metrics()
 
     def observability_dispatch_alerts(self) -> dict:
-        response = self._client.post("/observability/alerts/dispatch")
+        response = self._client.post("/ops/alerts/dispatch")
         response.raise_for_status()
         return response.json()["data"]
 
     def job_trace(self, job_id: str) -> dict:
-        response = self._client.get(f"/observability/jobs/{job_id}/trace")
+        response = self._client.get(f"/ops/jobs/{job_id}/trace")
         response.raise_for_status()
         return response.json()["data"]
 
     def get_runtime(self, runtime_id: str) -> dict | None:
-        """Get a runtime by ID. Returns None if not found."""
-        response = self._client.get(f"/runtimes/{runtime_id}")
-        if response.status_code == 404:
-            return None
-        response.raise_for_status()
-        return response.json()["data"]
+        """Deprecated: use ops_get_runtime() instead."""
+        import warnings
+        warnings.warn("get_runtime() is deprecated, use ops_get_runtime()", DeprecationWarning, stacklevel=2)
+        return self.ops_get_runtime(runtime_id)
 
-    def list_runtimes(
-        self,
-        *,
-        status: str | None = None,
-        health_status: str | None = None,
-        limit: int = 50,
-        cursor: str | None = None,
-    ) -> dict:
-        params: dict[str, object] = {"limit": limit}
-        if status is not None:
-            params["status"] = status
-        if health_status is not None:
-            params["health_status"] = health_status
-        if cursor is not None:
-            params["cursor"] = cursor
-        response = self._client.get("/runtimes", params=params)
-        response.raise_for_status()
-        return response.json()["data"]
+    def list_runtimes(self, **kwargs) -> dict:
+        """Deprecated: use ops_list_runtimes() instead."""
+        import warnings
+        warnings.warn("list_runtimes() is deprecated, use ops_list_runtimes()", DeprecationWarning, stacklevel=2)
+        return self.ops_list_runtimes(**kwargs)
 
     def observability_audit(self, *, limit: int = 100) -> dict:
-        """Fetch the audit trail (security and lifecycle events)."""
-        response = self._client.get("/observability/audit", params={"limit": limit})
-        response.raise_for_status()
-        return response.json()["data"]
+        """Deprecated: use ops_audit() instead."""
+        import warnings
+        warnings.warn("observability_audit() is deprecated, use ops_audit()", DeprecationWarning, stacklevel=2)
+        return self.ops_audit(limit=limit)
 
     def logs_control_plane(self, *, limit: int = 100) -> dict:
-        response = self._client.get("/observability/logs/control-plane", params={"limit": limit})
+        response = self._client.get("/ops/logs/control-plane", params={"limit": limit})
         response.raise_for_status()
         return response.json()["data"]
 
     def logs_runtime(self, runtime_id: str, *, limit: int = 100) -> dict:
         response = self._client.get(
-            f"/observability/logs/runtimes/{runtime_id}", params={"limit": limit}
+            f"/ops/logs/runtimes/{runtime_id}", params={"limit": limit}
         )
         response.raise_for_status()
         return response.json()["data"]
@@ -571,5 +559,99 @@ class AgpClient:
                 "runtime_active_tokens_json": runtime_active_tokens_json,
             },
         )
+        response.raise_for_status()
+        return response.json()["data"]
+
+    # ── Ops namespace ──────────────────────────────────────────────
+
+    def ops_list_runtimes(
+        self,
+        *,
+        status: str | None = None,
+        health_status: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        if health_status is not None:
+            params["health_status"] = health_status
+        if cursor is not None:
+            params["cursor"] = cursor
+        response = self._client.get("/ops/runtimes", params=params)
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_get_runtime(self, runtime_id: str) -> dict | None:
+        """Get a runtime by ID via the ops namespace. Returns None if not found."""
+        response = self._client.get(f"/ops/runtimes/{runtime_id}")
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_drain_runtime(self, runtime_id: str) -> dict:
+        response = self._client.post(f"/ops/runtimes/{runtime_id}/drain")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_restart_runtime(self, runtime_id: str) -> dict:
+        response = self._client.post(f"/ops/runtimes/{runtime_id}/restart")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_health(self) -> dict:
+        response = self._client.get("/ops/health")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_alerts(self) -> dict:
+        response = self._client.get("/ops/alerts")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_audit(self, *, limit: int = 100) -> dict:
+        response = self._client.get("/ops/audit", params={"limit": limit})
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_metrics(self) -> str:
+        response = self._client.get("/ops/metrics")
+        response.raise_for_status()
+        return response.text
+
+    def ops_dispatch_alerts(self) -> dict:
+        response = self._client.post("/ops/alerts/dispatch")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_job_trace(self, job_id: str) -> dict:
+        response = self._client.get(f"/ops/jobs/{job_id}/trace")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_logs_control_plane(self, *, limit: int = 100) -> dict:
+        response = self._client.get("/ops/logs/control-plane", params={"limit": limit})
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_logs_runtime(self, runtime_id: str, *, limit: int = 100) -> dict:
+        response = self._client.get(f"/ops/logs/runtimes/{runtime_id}", params={"limit": limit})
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_triage(self) -> dict:
+        response = self._client.get("/ops/triage")
+        response.raise_for_status()
+        return response.json()["data"]
+
+    def ops_health_records(self, *, entity_type: str | None = None, entity_id: str | None = None, limit: int = 50) -> dict:
+        params: dict[str, object] = {"limit": limit}
+        if entity_type is not None:
+            params["entity_type"] = entity_type
+        if entity_id is not None:
+            params["entity_id"] = entity_id
+        response = self._client.get("/ops/health-records", params=params)
         response.raise_for_status()
         return response.json()["data"]

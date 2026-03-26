@@ -37,6 +37,8 @@ def _required_operator_role(method: str, path: str) -> str | None:
         or path.startswith("/agents")
         or path.startswith("/capabilities")
         or path.startswith("/artifacts")
+        or path.startswith("/nudges")
+        or path.startswith("/ops")
         or (path.startswith("/runtimes") and path != "/runtimes/register")
     ):
         return None
@@ -49,6 +51,8 @@ def _required_operator_role(method: str, path: str) -> str | None:
         return "operator"
     if path.startswith("/agents"):
         return "lifecycle"
+    if path.startswith("/ops"):
+        return "operator"
     return "security_admin"
 
 
@@ -75,13 +79,23 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[override
         return await call_next(request)
 
     token = _extract_bearer_token(request.headers.get("Authorization"))
-    is_runtime_write = path == "/runtimes/register" or path.startswith("/runs/")
+    is_runtime_write = (
+        path == "/runtimes/register"
+        or path.startswith("/runs/")
+        or path == "/agents/up"
+        or (path.startswith("/agents/") and path.endswith("/down"))
+    )
     required_role = _required_operator_role(method, path)
-    is_operator_surface = required_role is not None
+    # Runtime-write endpoints are authed by runtime token, not operator token
+    is_operator_surface = required_role is not None and not is_runtime_write
 
     if is_runtime_write and (settings.runtime_bearer_token or settings.runtime_active_tokens_json):
         if not _runtime_token_allowed(token):
-            return _error_response(401, "unauthenticated", "runtime authentication required", False)
+            # /agents/{id}/down also accepts operator tokens (force-delete
+            # requires lifecycle role, checked in the route handler).
+            is_agent_down = path.startswith("/agents/") and path.endswith("/down")
+            if not (is_agent_down and _operator_role_for_token(token) is not None):
+                return _error_response(401, "unauthenticated", "runtime authentication required", False)
     if is_operator_surface and (settings.operator_bearer_token or settings.operator_token_roles_json):
         role = _operator_role_for_token(token)
         if role is None:

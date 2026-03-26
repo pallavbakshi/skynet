@@ -30,7 +30,7 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
     )
 
 
-@router.get("/runtimes")
+@router.get("/runtimes", deprecated=True)
 def list_runtimes(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -66,7 +66,7 @@ def list_runtimes(
     return _ok(_page(items, limit=limit, next_cursor=next_cursor))
 
 
-@router.get("/runtimes/{runtime_id}")
+@router.get("/runtimes/{runtime_id}", deprecated=True)
 def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, runtime_id)
     data = _serialize(runtime, ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at", "created_at"))
@@ -87,6 +87,6 @@ def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
         })
     data["claimed_work"] = claimed_work
     data["active_run_count"] = len(active_leases)
-    agents = db.scalars(select(Agent).where(Agent.assigned_runtime_id == runtime.runtime_id)).all()
-    data["agents"] = [_serialize(agent, ("agent_id", "capability_id", "status")) for agent in agents]
+    agents = db.scalars(select(Agent).join(Runtime, Runtime.agent_id == Agent.agent_id).where(Runtime.runtime_id == runtime.runtime_id)).all()
+    data["agents"] = [_serialize(agent, ("agent_id", "capabilities", "status")) for agent in agents]
     return _ok(data)

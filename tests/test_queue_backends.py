@@ -25,10 +25,11 @@ from tests._base import AgpTestCase, FakeRedisClient
 def _seed_agent(session, agent_id: str = "agt_q") -> Agent:
     agent = Agent(
         agent_id=agent_id,
-        capability_id="cap_python",
+        capabilities=["python"],
+        metadata_json={},
         queue_id=f"agent:{agent_id}",
         status="idle",
-        last_seen_at=utc_now(),
+        last_heartbeat_at=utc_now(),
         created_at=utc_now(),
         updated_at=utc_now(),
     )

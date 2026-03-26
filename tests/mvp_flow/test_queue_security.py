@@ -5,8 +5,8 @@ from tests.mvp_flow.base import *
 
 class MvpFlowQueueSecurityTest(MvpFlowTestBase):
     def test_handoff_creates_child_job_that_can_be_claimed(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_parent", "capability_id": "cap_python"})
-        self.client.post("/agents/up", json={"agent_id": "agt_child", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_parent", "capabilities": ["python"]})
+        self.client.post("/agents/up", json={"agent_id": "agt_child", "capabilities": ["python"]})
 
         parent = self.client.post(
             "/messages/send",
@@ -40,7 +40,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertEqual(payload["job"]["job_id"], child_job_id)
 
     def test_delivery_table_backend_persists_and_acks_deliveries(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_queue", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_queue", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -77,7 +77,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             session.close()
 
     def test_delivery_table_backend_redrives_stale_deliveries(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_redrive", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_redrive", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -115,7 +115,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             session.close()
 
     def test_delivery_table_backend_dead_letters_poison_delivery(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_dead", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_dead", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -165,7 +165,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
     def test_inmemory_broker_backend_claims_without_db_delivery_table(self) -> None:
         settings.queue_backend = "inmemory_broker"
         reset_queue_backend_state("inmemory_broker")
-        self.client.post("/agents/up", json={"agent_id": "agt_memq", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_memq", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -197,7 +197,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         queue_backend_module._REDIS_CLIENT_FACTORY = lambda url: fake_redis
         reset_queue_backend_state("redis")
 
-        self.client.post("/agents/up", json={"agent_id": "agt_redis", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_redis", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -251,7 +251,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertEqual(missing_body["ok"], False)
         self.assertEqual(missing_body["error"]["code"], "not_found")
 
-        self.client.post("/agents/up", json={"agent_id": "agt_err", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_err", "capabilities": ["python"]})
         self.client.post(
             "/runtimes/register",
             json={"runtime_id": "rtm_err", "hostname": "localhost"},
@@ -340,12 +340,15 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             self.assertEqual(viewer_send.status_code, 403)
             self.assertEqual(viewer_send.json()["error"]["code"], "forbidden")
 
+            # /agents/up is on the runtime surface (not operator surface),
+            # so it's accessible without operator lifecycle role when no
+            # runtime token is configured.
             viewer_up = protected_client.post(
                 "/agents/up",
-                json={"agent_id": "agt_rbac_blocked", "capability_id": "cap_python"},
+                json={"agent_id": "agt_rbac_viewer", "capabilities": ["python"]},
                 headers=viewer_headers,
             )
-            self.assertEqual(viewer_up.status_code, 403)
+            self.assertEqual(viewer_up.status_code, 200)
 
             lifecycle_send = protected_client.post(
                 "/messages/send",
@@ -359,7 +362,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
 
             lifecycle_up = protected_client.post(
                 "/agents/up",
-                json={"agent_id": "agt_rbac_ok", "capability_id": "cap_python"},
+                json={"agent_id": "agt_rbac_ok", "capabilities": ["python"]},
                 headers=lifecycle_headers,
             )
             self.assertEqual(lifecycle_up.status_code, 200)
@@ -542,7 +545,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             settings.runtime_active_tokens_json = []
 
     def test_explicit_runtime_failure_is_terminal(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_fail", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_fail", "capabilities": ["python"]})
         self.client.post(
             "/runtimes/register",
             json={"runtime_id": "rtm_fail", "hostname": "localhost"},
@@ -588,7 +591,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertEqual(job["status"], "failed")
 
     def test_complete_rejects_missing_artifact_refs(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_missing_art", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_missing_art", "capabilities": ["python"]})
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_missing_art", "hostname": "localhost"})
         sent = self.client.post(
             "/messages/send",
@@ -629,7 +632,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertEqual(job["status"], "running")
 
     def test_interrupt_requested_run_becomes_cancelled(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_interrupt", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_interrupt", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -698,7 +701,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertIn("job.cancelled", event_types)
 
     def test_expired_lease_requeues_job(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_expire", "capability_id": "cap_python"})
+        self.client.post("/agents/up", json={"agent_id": "agt_expire", "capabilities": ["python"]})
         sent = self.client.post(
             "/messages/send",
             json={
@@ -737,26 +740,28 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         self.assertIn("run.abandoned", event_types)
         self.assertIn("job.requeued", event_types)
 
-    def test_idle_timeout_terminates_truly_idle_agent(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_idle", "capability_id": "cap_python"})
+    def test_idle_timeout_deletes_truly_idle_agent(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_idle", "capabilities": ["python"]})
         session = SessionLocal()
         try:
             from agp.models import Agent
 
             agent = session.get(Agent, "agt_idle")
             assert agent is not None
-            agent.last_seen_at = utc_now() - timedelta(seconds=600)
+            agent.last_heartbeat_at = utc_now() - timedelta(seconds=600)
             session.commit()
-            result = sweep_idle_agents(session, now=utc_now(), idle_timeout_seconds=300)
+            result = sweep_stale_agents(session, now=utc_now(), heartbeat_grace_seconds=300)
         finally:
             session.close()
 
-        self.assertEqual(result["terminated_agents"], 1)
-        agents = self.agp.list_agents( status="terminated")
-        self.assertTrue(any(item["agent_id"] == "agt_idle" for item in agents["items"]))
+        self.assertEqual(result["deleted_stale"], 1)
+        # Agent should be deleted (404)
+        agent_resp = self.client.get("/agents/agt_idle")
+        self.assertEqual(agent_resp.status_code, 404)
 
-    def test_idle_timeout_does_not_terminate_agent_with_queued_work(self) -> None:
-        self.client.post("/agents/up", json={"agent_id": "agt_idle_queued", "capability_id": "cap_python"})
+    def test_idle_timeout_deletes_agent_with_queued_work(self) -> None:
+        """Stale idle agents are deleted even with queued work (PRD: binary presence model)."""
+        self.client.post("/agents/up", json={"agent_id": "agt_idle_queued", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
             json={
@@ -771,12 +776,12 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
 
             agent = session.get(Agent, "agt_idle_queued")
             assert agent is not None
-            agent.last_seen_at = utc_now() - timedelta(seconds=600)
+            agent.last_heartbeat_at = utc_now() - timedelta(seconds=600)
             session.commit()
-            result = sweep_idle_agents(session, now=utc_now(), idle_timeout_seconds=300)
+            result = sweep_stale_agents(session, now=utc_now(), heartbeat_grace_seconds=300)
         finally:
             session.close()
 
-        self.assertEqual(result["terminated_agents"], 0)
-        agent = self.client.get("/agents", params={"status": "idle"}).json()["data"]["items"]
-        self.assertTrue(any(item["agent_id"] == "agt_idle_queued" for item in agent))
+        self.assertEqual(result["deleted_stale"], 1)
+        agents = self.client.get("/agents", params={"status": "idle"}).json()["data"]["items"]
+        self.assertFalse(any(item["agent_id"] == "agt_idle_queued" for item in agents))

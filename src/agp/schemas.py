@@ -58,9 +58,9 @@ class ListParams(BaseModel):
 
 class AgentUpRequest(BaseModel):
     agent_id: str | None = None
-    capability_id: str
+    capabilities: list[str] | None = None
+    metadata: dict[str, Any] | None = None
     workspace_ref: str | None = None
-    assigned_runtime_id: str | None = None
 
 
 class AgentPatchRequest(BaseModel):
@@ -76,7 +76,7 @@ class CreateNudgeRequest(BaseModel):
 
 
 class AgentDownRequest(BaseModel):
-    mode: Literal["drain", "terminate", "force"] = "drain"
+    mode: Literal["drain", "force"] = "drain"
 
 
 class AgentInterruptRequest(BaseModel):
@@ -103,7 +103,7 @@ class RotateRuntimeTokensRequest(BaseModel):
 class ClaimRunRequest(BaseModel):
     runtime_id: str
     agent_id: str | None = None
-    capability_id: str | None = None
+    capability: str | None = None
     lease_ttl_seconds: int = 30
 
 
@@ -189,7 +189,7 @@ class CapabilitySeedRequest(BaseModel):
     model_ref: str = ""
     resource_tier: str = "small"
     permission_profile: str = "default"
-    queue_mode: Literal["agent", "capability_pool"] = "agent"
+    queue_mode: Literal["agent"] = "agent"
     runtime_requirements: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -211,11 +211,12 @@ class EventResponse(BaseModel):
 class AgentResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     agent_id: str
-    capability_id: str
-    assigned_runtime_id: str | None = None
+    capabilities: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
     queue_id: str
     status: str
     workspace_ref: str | None = None
+    last_heartbeat_at: Any = None
 
 
 class RuntimeResponse(BaseModel):
@@ -244,7 +245,7 @@ class RunResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     run_id: str
     job_id: str
-    agent_id: str
+    agent_id: str | None = None
     runtime_id: str
     attempt: int
     status: str
@@ -254,7 +255,7 @@ class LeaseResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     lease_id: str
     run_id: str
-    agent_id: str
+    agent_id: str | None = None
     runtime_id: str
     fencing_token: int
     status: str

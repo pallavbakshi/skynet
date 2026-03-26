@@ -16,9 +16,7 @@ from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
 from agp.logs import append_jsonl_log
 from agp.models import (
     Agent,
-    AgentRuntimeBinding,
     Capability,
-    CapabilityPool,
     HealthRecord,
     Job,
     Nudge,
@@ -68,36 +66,6 @@ def _record_health_transition(
         health_status=health_status,
         reason=reason,
     ))
-
-
-def _record_agent_binding(
-    db: Session,
-    *,
-    agent_id: str,
-    runtime_id: str,
-    status: str,
-) -> None:
-    db.add(AgentRuntimeBinding(
-        agent_id=agent_id,
-        runtime_id=runtime_id,
-        binding_status=status,
-    ))
-
-
-def _ensure_capability_pool(db: Session, capability_id: str) -> CapabilityPool:
-    pool = db.get(CapabilityPool, capability_id)
-    if pool is not None:
-        return pool
-    capability = _require_capability(db, capability_id)
-    queue_id = f"capability:{capability.capability_id}:{capability.version}"
-    pool = CapabilityPool(
-        capability_id=capability_id,
-        queue_id=queue_id,
-        routing_policy="least_recent",
-    )
-    db.add(pool)
-    db.flush()
-    return pool
 
 
 def _require_capability(db: Session, capability_id: str) -> Capability:
@@ -225,12 +193,9 @@ def _queue_for_target(target_type: str, target_id: str) -> str:
     raise BadRequestError(f"unsupported target type: {target_type}")
 
 
-def _capability_queue_for(db: Session, capability_id: str) -> str:
-    pool = db.get(CapabilityPool, capability_id)
-    if pool is not None:
-        return pool.queue_id
-    capability = _require_capability(db, capability_id)
-    return f"capability:{capability.capability_id}:{capability.version}"
+def _capability_queue_for(db: Session, capability_name: str) -> str:
+    """Return a queue ID for capability-based best-effort routing."""
+    return f"capability:{capability_name}"
 
 
 _NUDGE_SEP = "========================================="

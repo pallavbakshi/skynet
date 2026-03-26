@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     queue_visibility_timeout_seconds: int = 30
     queue_max_delivery_attempts: int = 3
     lease_heartbeat_interval_seconds: int = 10
-    agent_idle_timeout_seconds: int = 300
+    agent_heartbeat_grace_seconds: int = 60
+    agent_idle_timeout_seconds: int = 300  # legacy, replaced by agent_heartbeat_grace_seconds
     runtime_stale_timeout_seconds: int = 90
     runtime_degraded_timeout_seconds: int = 45
     observability_unreachable_runtime_threshold: int = 1

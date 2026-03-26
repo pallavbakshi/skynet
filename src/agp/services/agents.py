@@ -5,9 +5,9 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agp.enums import AgentStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
-from agp.services._helpers import _new_id, _queue_backend, _require_agent, _require_capability, _require_runtime
+from agp.services._helpers import _new_id, _queue_backend, _require_agent
 from agp.services.events import _create_event
 from agp.services.exceptions import ConflictError
 
@@ -32,29 +32,92 @@ def agent_up_service(
     db: Session,
     *,
     agent_id: str | None,
-    capability_id: str,
-    assigned_runtime_id: str | None,
-    workspace_ref: str | None,
+    capabilities: list[str] | None = None,
+    metadata: dict | None = None,
+    workspace_ref: str | None = None,
 ) -> Agent:
-    _require_capability(db, capability_id)
+    """Register an agent or refresh its heartbeat (idempotent).
+
+    First call creates the agent; subsequent calls update last_heartbeat_at.
+    This doubles as the heartbeat mechanism — no separate endpoint needed.
+    """
     resolved_id = agent_id or _new_id("agt")
-    if db.get(Agent, resolved_id) is not None:
-        raise ConflictError(f"agent already exists: {resolved_id}")
-    if assigned_runtime_id is not None:
-        _require_runtime(db, assigned_runtime_id)
+    now = utc_now()
+    existing = db.get(Agent, resolved_id)
+
+    if existing is not None:
+        # Heartbeat: update timestamps and optionally capabilities/metadata
+        existing.last_heartbeat_at = now
+        existing.updated_at = now
+        if capabilities is not None:
+            existing.capabilities = capabilities
+        if metadata is not None:
+            existing.metadata_json = metadata
+        if workspace_ref is not None:
+            existing.workspace_ref = workspace_ref
+        # If agent was draining but re-registers, stay draining (operator decision)
+        # Also refresh linked runtime so the runtime sweeper doesn't mark it stale
+        linked_runtime = db.scalar(
+            select(Runtime).where(Runtime.agent_id == existing.agent_id).limit(1)
+        )
+        if linked_runtime is not None:
+            linked_runtime.last_heartbeat_at = now
+            linked_runtime.last_seen_at = now
+        db.commit()
+        return existing
+
+    # New registration
     agent = Agent(
         agent_id=resolved_id,
-        capability_id=capability_id,
-        assigned_runtime_id=assigned_runtime_id,
+        capabilities=capabilities or [],
+        metadata_json=metadata or {},
         queue_id=f"agent:{resolved_id}",
-        status=AgentStatus.PROVISIONING.value,
+        status=AgentStatus.IDLE.value,
         workspace_ref=workspace_ref,
-        last_seen_at=utc_now(),
+        last_heartbeat_at=now,
     )
     db.add(agent)
-    _create_event(db, agent_id=agent.agent_id, event_type="agent.provisioning", body={"capability_id": agent.capability_id})
-    agent.status = AgentStatus.IDLE.value
-    _create_event(db, agent_id=agent.agent_id, event_type="agent.idle", body={"capability_id": agent.capability_id})
+    db.flush()
+
+    # Auto-create an internal runtime for this agent (1:1 binding).
+    # First check if any runtime is already linked to this agent (bootstrap-era).
+    runtime_id = f"rtm_{resolved_id}"
+    runtime = db.scalar(
+        select(Runtime).where(Runtime.agent_id == agent.agent_id).limit(1)
+    )
+    if runtime is None:
+        # Fall back to synthetic-ID lookup.
+        runtime = db.get(Runtime, runtime_id)
+    if runtime is None:
+        # Third: check run history for orphaned bootstrap-era runtimes
+        # (non-standard ID, no agent_id set after migration).
+        runtime = db.scalar(
+            select(Runtime)
+            .join(Run, Run.runtime_id == Runtime.runtime_id)
+            .where(Run.agent_id == agent.agent_id, Runtime.agent_id.is_(None))
+            .limit(1)
+        )
+    if runtime is None:
+        runtime = Runtime(
+            runtime_id=runtime_id,
+            agent_id=agent.agent_id,
+            hostname=(metadata or {}).get("hostname", "unknown"),
+            status=RuntimeStatus.IDLE.value,
+            health_status=HealthStatus.HEALTHY.value,
+            metadata_json=metadata or {},
+            last_seen_at=now,
+            last_heartbeat_at=now,
+        )
+        db.add(runtime)
+    else:
+        runtime.agent_id = agent.agent_id
+        runtime.last_seen_at = now
+        runtime.last_heartbeat_at = now
+
+    _create_event(db, agent_id=agent.agent_id, event_type="agent.registered", body={
+        "capabilities": agent.capabilities,
+        "runtime_id": runtime.runtime_id,
+    })
     db.commit()
     return agent
 
@@ -84,47 +147,40 @@ def agent_undrain_service(db: Session, *, agent_id: str) -> Agent:
     return agent
 
 
-def agent_down_service(db: Session, *, agent_id: str, mode: str) -> Agent:
+def agent_down_service(db: Session, *, agent_id: str, mode: str) -> dict:
+    """Shut down an agent: drain or force-delete.
+
+    mode=drain: transition to draining, sweeper deletes when queue empty.
+    mode=force: cancel all work and delete the agent record immediately.
+    """
     agent = _require_agent(db, agent_id)
     now = utc_now()
     previous_status = agent.status
 
-    # Idempotency: already terminated is a no-op conflict.
-    if previous_status == AgentStatus.TERMINATED.value:
-        raise ConflictError(f"agent is already terminated: {agent_id}")
-
-    # Double-drain guard.
     if mode == "drain" and previous_status == AgentStatus.DRAINING.value:
         raise ConflictError(f"agent is already draining: {agent_id}")
 
-    # TOCTOU guard: if caller asked for terminate but agent may have
-    # active work, reject rather than silently orphaning it.
-    _ACTIVE_WORK_STATUSES = (
-        AgentStatus.BUSY.value,
-        AgentStatus.DRAINING.value,
-        AgentStatus.DEGRADED.value,
-    )
-    if mode == "terminate" and previous_status in _ACTIVE_WORK_STATUSES:
-        raise ConflictError(
-            f"agent has active work (status={previous_status}); use mode='force' to cancel"
-        )
-
     if mode == "drain":
         agent.status = AgentStatus.DRAINING.value
-        event_type = "agent.draining"
-    else:
-        agent.status = AgentStatus.TERMINATED.value
-        event_type = "agent.terminated"
-        if mode == "force":
-            _force_cancel_agent_work(db, agent_id, now)
+        agent.updated_at = now
+        _create_event(
+            db, agent_id=agent.agent_id, event_type="agent.draining",
+            body={"mode": mode, "previous_status": previous_status},
+        )
+        db.commit()
+        return {"agent_id": agent_id, "status": "draining"}
 
-    agent.updated_at = now
+    # mode=force: cancel work then delete the agent record
+    _force_cancel_agent_work(db, agent_id, now)
     _create_event(
-        db, agent_id=agent.agent_id, event_type=event_type,
+        db, agent_id=agent.agent_id, event_type="agent.deleted",
         body={"mode": mode, "previous_status": previous_status},
     )
+    from agp.services.sweep import _nullify_agent_references
+    _nullify_agent_references(db, agent_id)
+    db.delete(agent)
     db.commit()
-    return agent
+    return {"agent_id": agent_id, "status": "deleted"}
 
 
 def _cancel_job_cascade(db: Session, job: Job, now, *, reason: str) -> set[str]:
@@ -285,9 +341,6 @@ def agent_interrupt_service(
     now = utc_now()
     agent_queue = f"agent:{agent_id}"
 
-    if agent.status == AgentStatus.TERMINATED.value:
-        raise ConflictError(f"agent is already terminated: {agent_id}")
-
     # ── Find the active (running) job ──
     # An agent should have at most one active job; limit(1) is a guard.
     # Path 1: directly targeted
@@ -352,7 +405,6 @@ def agent_interrupt_service(
 
     # ── Update agent status ──
     _PRESERVE_STATUSES = frozenset({
-        AgentStatus.TERMINATED.value,
         AgentStatus.DRAINING.value,
     })
     if active_job is None and agent.status not in _PRESERVE_STATUSES:

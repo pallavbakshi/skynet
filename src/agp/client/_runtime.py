@@ -82,11 +82,37 @@ class RuntimeClient:
         )
         return payload
 
+    def agent_up(
+        self,
+        agent_id: str,
+        capabilities: list[str] | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict:
+        """Register an agent or refresh its heartbeat (idempotent)."""
+        body: dict[str, Any] = {"agent_id": agent_id}
+        if capabilities is not None:
+            body["capabilities"] = capabilities
+        if metadata is not None:
+            body["metadata"] = metadata
+        response = self._client.post("/agents/up", json=body)
+        response.raise_for_status()
+        payload = response.json()["data"]
+        self._log({"kind": "runtime_client", "action": "agent_up", "agent_id": agent_id})
+        return payload
+
+    def agent_down(self, agent_id: str, mode: str = "force") -> dict:
+        """Shut down an agent (drain or force-delete)."""
+        response = self._client.post(f"/agents/{agent_id}/down", json={"mode": mode})
+        response.raise_for_status()
+        payload = response.json()["data"]
+        self._log({"kind": "runtime_client", "action": "agent_down", "agent_id": agent_id, "mode": mode})
+        return payload
+
     def claim(
         self,
         *,
         agent_id: str | None = None,
-        capability_id: str | None = None,
+        capability: str | None = None,
         lease_ttl_seconds: int = 30,
     ) -> dict:
         response = self._client.post(
@@ -94,7 +120,7 @@ class RuntimeClient:
             json={
                 "runtime_id": self.identity.runtime_id,
                 "agent_id": agent_id,
-                "capability_id": capability_id,
+                "capability": capability,
                 "lease_ttl_seconds": lease_ttl_seconds,
             },
         )
@@ -105,7 +131,7 @@ class RuntimeClient:
                 "kind": "runtime_client",
                 "action": "claim",
                 "agent_id": agent_id,
-                "capability_id": capability_id,
+                "capability": capability,
                 "claimed": payload.get("claimed", False),
                 "job_id": payload.get("job", {}).get("job_id"),
                 "run_id": payload.get("run", {}).get("run_id"),

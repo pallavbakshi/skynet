@@ -16,6 +16,7 @@ tags:
   - name: runs
   - name: artifacts
   - name: health
+  - name: ops
 security:
   - bearerAuth: []
 paths:
@@ -212,7 +213,7 @@ paths:
   /agents:
     get:
       tags: [agents]
-      summary: List durable agents
+      summary: List registered agents
       operationId: listAgents
       parameters:
         - in: query
@@ -220,7 +221,7 @@ paths:
           schema:
             $ref: '#/components/schemas/AgentStatus'
         - in: query
-          name: capability_id
+          name: capability
           schema:
             type: string
         - in: query
@@ -242,7 +243,7 @@ paths:
   /agents/up:
     post:
       tags: [agents]
-      summary: Instantiate durable agent from capability blueprint
+      summary: Register ephemeral agent via self-registration
       operationId: createAgent
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
@@ -265,10 +266,97 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /agents/{agent_id}:
+    get:
+      tags: [agents]
+      summary: Get agent details
+      operationId: getAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '200':
+          description: Agent detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    patch:
+      tags: [agents]
+      summary: Update agent capabilities or metadata
+      operationId: patchAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentPatchRequest'
+      responses:
+        '200':
+          description: Agent updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /agents/{agent_id}/interrupt:
+    post:
+      tags: [agents]
+      summary: Request interrupt on agent's active job
+      operationId: interruptAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentInterruptRequest'
+      responses:
+        '200':
+          description: Interrupt requested
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /agents/{agent_id}/undrain:
+    post:
+      tags: [agents]
+      summary: Cancel drain and return agent to idle
+      operationId: undrainAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentId'
+      responses:
+        '200':
+          description: Agent undrained
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
   /agents/{agent_id}/down:
     post:
       tags: [agents]
-      summary: Destroy durable agent
+      summary: Deregister agent (drain or force-delete)
       operationId: destroyAgent
       parameters:
         - $ref: '#/components/parameters/AgentId'
@@ -314,11 +402,147 @@ paths:
                 $ref: '#/components/schemas/CapabilityListEnvelope'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+  /capabilities/{capability_id}:
+    get:
+      tags: [capabilities]
+      summary: Get capability blueprint
+      operationId: getCapability
+      parameters:
+        - in: path
+          name: capability_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Capability detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /capabilities/seed:
+    post:
+      tags: [capabilities]
+      summary: Seed a capability blueprint (legacy)
+      operationId: seedCapability
+      deprecated: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OkEnvelope'
+      responses:
+        '200':
+          description: Capability seeded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /nudges:
+    post:
+      tags: [orchestration]
+      summary: Create a nudge for a target agent
+      operationId: createNudge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateNudgeRequest'
+      responses:
+        '200':
+          description: Nudge created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    get:
+      tags: [orchestration]
+      summary: List nudges
+      operationId: listNudges
+      parameters:
+        - in: query
+          name: target_agent_id
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Nudge list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /nudges/next:
+    get:
+      tags: [orchestration]
+      summary: Dequeue next pending nudge for agent
+      operationId: nextNudge
+      parameters:
+        - in: query
+          name: target_agent_id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Next nudge or null
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /queue/deliveries:
+    get:
+      tags: [orchestration]
+      summary: List queue delivery records
+      operationId: listQueueDeliveries
+      parameters:
+        - in: query
+          name: state
+          schema:
+            type: string
+        - in: query
+          name: job_id
+          schema:
+            type: string
+        - in: query
+          name: target_queue
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Delivery records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
   /runtimes/register:
     post:
       tags: [runtimes]
       summary: Register or refresh runtime identity
       operationId: registerRuntime
+      deprecated: true
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -343,6 +567,7 @@ paths:
       tags: [runtimes]
       summary: List runtimes
       operationId: listRuntimes
+      deprecated: true
       parameters:
         - in: query
           name: status
@@ -625,6 +850,261 @@ paths:
                 $ref: '#/components/schemas/UpgradeStatusEnvelope'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+  /ops/runtimes:
+    get:
+      tags: [ops]
+      summary: List managed runtimes
+      operationId: opsListRuntimes
+      parameters:
+        - in: query
+          name: status
+          schema:
+            $ref: '#/components/schemas/RuntimeStatus'
+        - in: query
+          name: health_status
+          schema:
+            $ref: '#/components/schemas/HealthStatus'
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Runtime list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeListEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/runtimes/{runtime_id}:
+    get:
+      tags: [ops]
+      summary: Get runtime details
+      operationId: opsGetRuntime
+      parameters:
+        - $ref: '#/components/parameters/RuntimeId'
+      responses:
+        '200':
+          description: Runtime detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/runtimes/{runtime_id}/drain:
+    post:
+      tags: [ops]
+      summary: Drain a runtime
+      operationId: opsDrainRuntime
+      parameters:
+        - $ref: '#/components/parameters/RuntimeId'
+      responses:
+        '200':
+          description: Runtime draining
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/runtimes/{runtime_id}/restart:
+    post:
+      tags: [ops]
+      summary: Restart a runtime
+      operationId: opsRestartRuntime
+      parameters:
+        - $ref: '#/components/parameters/RuntimeId'
+      responses:
+        '200':
+          description: Runtime restarted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/health:
+    get:
+      tags: [ops]
+      summary: Infrastructure health summary
+      operationId: opsHealth
+      responses:
+        '200':
+          description: Health summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/alerts:
+    get:
+      tags: [ops]
+      summary: Active alerts
+      operationId: opsAlerts
+      responses:
+        '200':
+          description: Alert list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/audit:
+    get:
+      tags: [ops]
+      summary: Audit log
+      operationId: opsAudit
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: Audit events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus metrics
+      operationId: opsMetrics
+      responses:
+        '200':
+          description: Metrics in Prometheus exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/alerts/dispatch:
+    post:
+      tags: [ops]
+      summary: Dispatch alerts to configured webhook
+      operationId: opsDispatchAlerts
+      responses:
+        '200':
+          description: Alerts dispatched
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/jobs/{job_id}/trace:
+    get:
+      tags: [ops]
+      summary: Full execution trace for a job
+      operationId: opsJobTrace
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        '200':
+          description: Job trace
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/logs/control-plane:
+    get:
+      tags: [ops]
+      summary: Control plane logs
+      operationId: opsControlPlaneLogs
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/logs/runtimes/{runtime_id}:
+    get:
+      tags: [ops]
+      summary: Runtime logs
+      operationId: opsRuntimeLogs
+      parameters:
+        - $ref: '#/components/parameters/RuntimeId'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Log entries
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/triage:
+    get:
+      tags: [ops]
+      summary: Triage dashboard
+      operationId: opsTriage
+      responses:
+        '200':
+          description: Triage data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/health-records:
+    get:
+      tags: [ops]
+      summary: Health transition records
+      operationId: opsHealthRecords
+      parameters:
+        - in: query
+          name: entity_type
+          schema:
+            type: string
+        - in: query
+          name: entity_id
+          schema:
+            type: string
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Health records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OkEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /ops/upgrade-status:
+    get:
+      tags: [ops]
+      summary: Persisted release and schema version state
+      operationId: opsUpgradeStatus
+      responses:
+        '200':
+          description: Upgrade status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpgradeStatusEnvelope'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
 components:
   parameters:
     IdempotencyKey:
@@ -667,6 +1147,12 @@ components:
     ArtifactId:
       in: path
       name: artifact_id
+      required: true
+      schema:
+        type: string
+    RuntimeId:
+      name: runtime_id
+      in: path
       required: true
       schema:
         type: string
@@ -730,7 +1216,7 @@ components:
       enum: [created, leased, running, recovering, completed, failed, abandoned, cancelled]
     AgentStatus:
       type: string
-      enum: [provisioning, idle, busy, degraded, draining, terminated]
+      enum: [idle, busy, draining]
     RuntimeStatus:
       type: string
       enum: [registering, idle, busy, degraded, offline, draining]
@@ -880,20 +1366,28 @@ components:
           format: date-time
     AgentSummary:
       type: object
-      required: [agent_id, capability_id, status, queue_id]
+      required: [agent_id, status, queue_id]
       properties:
         agent_id:
           type: string
-        capability_id:
-          type: string
-        assigned_runtime_id:
-          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        metadata_json:
+          type: object
         queue_id:
           type: string
         status:
           $ref: '#/components/schemas/AgentStatus'
         workspace_ref:
           type: string
+        last_heartbeat_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
     RuntimeSummary:
       type: object
       required: [runtime_id, hostname, release_version, status, health_status, last_heartbeat_at]
@@ -1113,7 +1607,7 @@ components:
           const: true
         data:
           type: object
-          required: [handoff_id, created_job_ids]
+          required: [handoff_id, child_job_ids]
           properties:
             handoff_id:
               type: string
@@ -1123,24 +1617,61 @@ components:
               type: array
               items:
                 type: string
+    AgentPatchRequest:
+      type: object
+      properties:
+        capabilities:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          additionalProperties: true
+        workspace_ref:
+          type: string
+    AgentInterruptRequest:
+      type: object
+      required: [fencing_token]
+      properties:
+        fencing_token:
+          type: integer
+          format: int64
+        reason:
+          type: string
+    CreateNudgeRequest:
+      type: object
+      required: [target_agent_id]
+      properties:
+        target_agent_id:
+          type: string
+        priority:
+          type: integer
+        source:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        job_id:
+          type: string
     AgentUpRequest:
       type: object
-      required: [capability_id]
       properties:
         agent_id:
           type: string
-        capability_id:
-          type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
         workspace_ref:
-          type: string
-        assigned_runtime_id:
           type: string
     AgentDownRequest:
       type: object
       properties:
         mode:
           type: string
-          enum: [drain, terminate, force]
+          enum: [drain, force]
     AgentEnvelope:
       type: object
       required: [ok, data]
@@ -1258,7 +1789,7 @@ components:
           type: string
         agent_id:
           type: string
-        capability_id:
+        capability:
           type: string
         lease_ttl_seconds:
           type: integer
@@ -1463,6 +1994,16 @@ components:
             components:
               type: object
               additionalProperties: true
+    OkEnvelope:
+      type: object
+      required: [ok, data]
+      properties:
+        ok:
+          type: boolean
+          const: true
+        data:
+          type: object
+          additionalProperties: true
   securitySchemes:
     bearerAuth:
       type: http

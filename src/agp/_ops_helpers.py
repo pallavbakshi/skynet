@@ -226,7 +226,7 @@ def run_failure_injection_scenario(*, scenario: str) -> dict:
         settings.queue_backend = "delivery_table"
         client = TestClient(build_app())
         try:
-            agent = client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_python"})
+            agent = client.post("/agents/up", json={"agent_id": agent_id, "capabilities": ["python"]})
             if agent.status_code != 200:
                 raise ValueError(f"failed to provision drill agent: {agent.text}")
             sent = client.post(
@@ -357,7 +357,7 @@ def run_failure_injection_scenario(*, scenario: str) -> dict:
             settings.queue_backend = original_backend
 
     with TestClient(build_app()) as client:
-        agent = client.post("/agents/up", json={"agent_id": agent_id, "capability_id": "cap_python"})
+        agent = client.post("/agents/up", json={"agent_id": agent_id, "capabilities": ["python"]})
         if agent.status_code != 200:
             raise ValueError(f"failed to provision drill agent: {agent.text}")
 

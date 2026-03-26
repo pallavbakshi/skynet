@@ -17,7 +17,6 @@ resources:
   - ../../minio.yaml
   - ../../redis.yaml
   - ../../control-plane.yaml
-  - ../../bootstrap-job.yaml
   - ../../runtime.yaml
   - ../../lease-sweeper.yaml
   - ../../runtime-sweeper.yaml
@@ -31,7 +30,6 @@ patches:
   - path: patch-runtime.yaml
   - path: patch-lease-sweeper.yaml
   - path: patch-runtime-sweeper.yaml
-  - path: patch-bootstrap-job.yaml
   - path: patch-postgres.yaml
   - path: patch-minio.yaml
   - path: patch-backup.yaml

@@ -143,6 +143,10 @@ if [[ -n "${AGP_RUNTIME_CAPABILITY_ID:-}" ]]; then
   ARGS+=(--capability-id "${AGP_RUNTIME_CAPABILITY_ID}")
 fi
 
+if [[ -n "${AGP_RUNTIME_CAPABILITIES:-}" ]]; then
+  ARGS+=(--capabilities "${AGP_RUNTIME_CAPABILITIES}")
+fi
+
 # ── Build env for the runtime user ───────────────────────────────────
 USER_ENV=(
   HOME="${AGP_USER_HOME}"
@@ -160,7 +164,7 @@ for _var in \
   ANTHROPIC_DEFAULT_HAIKU_MODEL CLAUDE_CODE_SUBAGENT_MODEL \
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS \
   OPENAI_API_KEY OPENAI_BASE_URL OPENROUTER_API_KEY \
-  AGP_SERVER_URL; do
+  AGP_SERVER_URL AGP_RUNTIME_BEARER_TOKEN; do
   if [[ -v "$_var" ]]; then
     USER_ENV+=("${_var}=${!_var}")
   fi

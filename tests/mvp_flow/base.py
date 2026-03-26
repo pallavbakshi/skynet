@@ -84,11 +84,11 @@ from agp.runtime import (
 )
 
 from agp.control_plane import (
-    sweep_draining_agents,
     sweep_draining_runtimes,
     sweep_expired_leases,
-    sweep_idle_agents,
+    sweep_stale_agents,
     sweep_stale_runtimes,
+    refresh_active_leases,
 )
 
 from agp.control_plane import _block_job, _require_job, _unblock_job
@@ -171,26 +171,6 @@ class MvpFlowTestBase(unittest.TestCase):
         engine.dispose()
         _reset_sqlite_database()
         init_db()
-        session = SessionLocal()
-        try:
-            session.add(
-                Capability(
-                    capability_id="cap_python",
-                    name="Python Tester",
-                    version="v1",
-                    image_ref="python:3.12",
-                    model_ref="gpt-5.4",
-                    resource_tier="small",
-                    permission_profile="default",
-                    queue_mode="agent",
-                    runtime_requirements_json={},
-                    created_at=utc_now(),
-                    updated_at=utc_now(),
-                )
-            )
-            session.commit()
-        finally:
-            session.close()
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
         self.client = TestClient(build_app())
         self.agp = AgpClient(http_client=self.client)

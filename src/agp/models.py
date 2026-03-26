@@ -7,6 +7,7 @@ so that ORM-level validation is consistent with the Postgres schema.
 from datetime import UTC, datetime
 
 from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.ext.hybrid import hybrid_property
 from sqlalchemy.orm import Mapped, mapped_column
 
 from agp.db import Base
@@ -21,7 +22,7 @@ class Capability(Base):
     __table_args__ = (
         UniqueConstraint("name", "version", name="uq_capabilities_name_version"),
         CheckConstraint("resource_tier IN ('small', 'medium', 'large', 'gpu')", name="chk_capabilities_resource_tier"),
-        CheckConstraint("queue_mode IN ('agent', 'capability_pool')", name="chk_capabilities_queue_mode"),
+        CheckConstraint("queue_mode IN ('agent')", name="chk_capabilities_queue_mode"),
     )
 
     capability_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -57,6 +58,7 @@ class Runtime(Base):
     )
 
     runtime_id: Mapped[str] = mapped_column(String, primary_key=True)
+    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id", ondelete="SET NULL"), nullable=True, unique=True)
     hostname: Mapped[str] = mapped_column(String)
     release_version: Mapped[str] = mapped_column(String, default="0.1.0")
     status: Mapped[str] = mapped_column(String)
@@ -72,36 +74,27 @@ class Agent(Base):
     __tablename__ = "agents"
     __table_args__ = (
         Index("ix_agents_status_created", "status", "created_at"),
+        Index("ix_agents_status_heartbeat", "status", "last_heartbeat_at"),
         CheckConstraint(
-            "status IN ('provisioning', 'idle', 'busy', 'degraded', 'draining', 'terminated')",
+            "status IN ('idle', 'busy', 'draining')",
             name="chk_agents_status",
         ),
     )
 
     agent_id: Mapped[str] = mapped_column(String, primary_key=True)
-    capability_id: Mapped[str] = mapped_column(ForeignKey("capabilities.capability_id"))
-    assigned_runtime_id: Mapped[str | None] = mapped_column(ForeignKey("runtimes.runtime_id"), nullable=True)
+    capabilities: Mapped[list] = mapped_column(JSON, default=list)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     queue_id: Mapped[str] = mapped_column(String, unique=True)
     status: Mapped[str] = mapped_column(String)
     workspace_ref: Mapped[str | None] = mapped_column(String, nullable=True)
-    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
-
-class AgentRuntimeBinding(Base):
-    __tablename__ = "agent_runtime_bindings"
-    __table_args__ = (
-        CheckConstraint(
-            "binding_status IN ('active', 'released', 'failed')",
-            name="chk_bindings_status",
-        ),
-    )
-
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id"), primary_key=True)
-    runtime_id: Mapped[str] = mapped_column(ForeignKey("runtimes.runtime_id"), primary_key=True)
-    bound_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), primary_key=True, default=utc_now)
-    binding_status: Mapped[str] = mapped_column(String)
+    @hybrid_property
+    def registered_at(self) -> datetime:
+        """PRD alias for created_at."""
+        return self.created_at
 
 
 class Message(Base):
@@ -134,7 +127,7 @@ class Job(Base):
 
     job_id: Mapped[str] = mapped_column(String, primary_key=True)
     message_id: Mapped[str] = mapped_column(ForeignKey("messages.message_id"))
-    target_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id"), nullable=True)
+    target_agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id", ondelete="SET NULL"), nullable=True)
     target_queue: Mapped[str] = mapped_column(String)
     status: Mapped[str] = mapped_column(String)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
@@ -183,7 +176,7 @@ class Run(Base):
 
     run_id: Mapped[str] = mapped_column(String, primary_key=True)
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"))
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id"))
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     runtime_id: Mapped[str] = mapped_column(ForeignKey("runtimes.runtime_id"))
     attempt: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String)
@@ -204,7 +197,7 @@ class Lease(Base):
 
     lease_id: Mapped[str] = mapped_column(String, primary_key=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.run_id"))
-    agent_id: Mapped[str] = mapped_column(ForeignKey("agents.agent_id"))
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     runtime_id: Mapped[str] = mapped_column(ForeignKey("runtimes.runtime_id"))
     fencing_token: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String)
@@ -297,7 +290,7 @@ class Event(Base):
     event_seq: Mapped[int] = mapped_column(Integer, unique=True)
     job_id: Mapped[str | None] = mapped_column(ForeignKey("jobs.job_id"), nullable=True)
     run_id: Mapped[str | None] = mapped_column(ForeignKey("runs.run_id"), nullable=True)
-    agent_id: Mapped[str | None] = mapped_column(ForeignKey("agents.agent_id"), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True)
     runtime_id: Mapped[str | None] = mapped_column(ForeignKey("runtimes.runtime_id"), nullable=True)
     event_type: Mapped[str] = mapped_column(String)
     body_json: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -341,16 +334,6 @@ class HealthRecord(Base):
     health_status: Mapped[str] = mapped_column(String)
     reason: Mapped[str] = mapped_column(String)
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-
-
-class CapabilityPool(Base):
-    __tablename__ = "capability_pools"
-
-    capability_id: Mapped[str] = mapped_column(ForeignKey("capabilities.capability_id"), primary_key=True)
-    queue_id: Mapped[str] = mapped_column(String, unique=True)
-    routing_policy: Mapped[str] = mapped_column(String, default="least_recent")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
 class Nudge(Base):

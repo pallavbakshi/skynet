@@ -37,6 +37,8 @@ spec:
               value: default
             - name: AGP_CODEX_TUI_MODE
               value: "false"
+            - name: AGP_RUNTIME_CAPABILITIES
+              value: "python"
             - name: AGP_RUNTIME_IDLE_SLEEP_SECONDS
               value: "1"
           volumeMounts:

@@ -28,9 +28,7 @@ from agp.services._helpers import (
     _new_id,
     _queue_backend,
     _queue_for_target,
-    _record_agent_binding,
     _require_agent,
-    _require_capability,
     _require_job,
     _write_control_plane_artifact,
 )
@@ -111,12 +109,10 @@ def create_and_enqueue_job(
     """Create a message and queued job — the core dispatch path."""
     if target_type == "agent":
         agent = _require_agent(db, target_id)
-        if agent.status == AgentStatus.TERMINATED.value:
-            raise ConflictError(f"agent is terminated: {target_id}")
         if agent.status == AgentStatus.DRAINING.value:
             raise ConflictError(f"agent is draining: {target_id}")
     elif target_type == "capability":
-        _require_capability(db, target_id)
+        pass  # Capability is a self-declared string; no DB lookup needed
     else:
         raise BadRequestError("target.type must be agent or capability")
 
@@ -188,8 +184,6 @@ def execute_inline(db: Session, *, job: Job, agent, message: Message) -> SendRes
     job.latest_run_id = run.run_id
     job.updated_at = utc_now()
     agent.status = AgentStatus.BUSY.value
-    _record_agent_binding(db, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, status="active")
-    agent.assigned_runtime_id = runtime.runtime_id
     runtime.status = RuntimeStatus.BUSY.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, event_type="lease.acquired", body={"lease_id": lease.lease_id, "fencing_token": lease.fencing_token, "expires_at": lease.expires_at.isoformat()})
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, event_type="run.running", body={"started_by": runtime.runtime_id})
@@ -245,8 +239,6 @@ def execute_handoff(
     for target in targets:
         if target.type == "agent":
             _require_agent(db, target.id)
-        else:
-            _require_capability(db, target.id)
         msg = Message(
             message_id=_new_id("msg"),
             target_type=target.type,

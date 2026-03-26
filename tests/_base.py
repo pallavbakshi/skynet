@@ -10,7 +10,7 @@ from sqlalchemy import text
 
 from agp.config import settings
 from agp.db import Base, SessionLocal, engine, init_db
-from agp.models import Capability, CapabilityPool, utc_now
+from agp.models import Capability, utc_now
 from agp.queue_backend import reset_queue_backend_state
 from agp.artifact_store import reset_artifact_store_state
 from agp.services.events import reset_event_seq
@@ -141,13 +141,13 @@ class AgpTestCase(unittest.TestCase):
         engine.dispose()
         _reset_sqlite_database()
         init_db()
-        self._seed_capability()
 
     def tearDown(self) -> None:
         for key, val in _ORIGINAL_SETTINGS.items():
             setattr(settings, key, val)
 
     def _seed_capability(self) -> None:
+        """Seed a capability record for tests that route to capability targets."""
         session = SessionLocal()
         try:
             session.add(
@@ -163,13 +163,6 @@ class AgpTestCase(unittest.TestCase):
                     runtime_requirements_json={},
                     created_at=utc_now(),
                     updated_at=utc_now(),
-                )
-            )
-            session.add(
-                CapabilityPool(
-                    capability_id="cap_python",
-                    queue_id="capability:cap_python:v1",
-                    routing_policy="least_recent",
                 )
             )
             session.commit()

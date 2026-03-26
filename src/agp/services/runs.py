@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import case, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from agp.enums import (
@@ -21,7 +21,6 @@ from agp.enums import (
 from agp.models import (
     Agent,
     Artifact,
-    CapabilityPool,
     Job,
     JobArtifact,
     Lease,
@@ -38,7 +37,6 @@ from agp.services._helpers import (
     _format_job_nudge,
     _new_id,
     _queue_backend,
-    _record_agent_binding,
     _require_agent,
     _require_job,
     _require_runtime,
@@ -49,9 +47,7 @@ from agp.services.exceptions import BadRequestError, ConflictError, InternalErro
 # Agent statuses that must NOT be reverted to IDLE when a run completes/fails.
 # These represent operator-set or sweeper-set states that take precedence.
 _PRESERVE_AGENT_STATUSES = frozenset({
-    AgentStatus.TERMINATED.value,
     AgentStatus.DRAINING.value,
-    AgentStatus.DEGRADED.value,
 })
 from agp.services.jobs import _fail_exhausted_queued_jobs
 
@@ -159,9 +155,9 @@ def resolve_claim_agent(
     *,
     runtime: Runtime,
     agent_id: str | None,
-    capability_id: str | None,
+    capability: str | None,
 ) -> tuple[Agent | None, dict | None]:
-    """Resolve the target agent for a claim — by direct ID or capability routing.
+    """Resolve the target agent for a claim — by direct ID or capability-based best-effort routing.
 
     Returns (agent, routing_decision) or (None, None) if no eligible agent.
     """
@@ -169,49 +165,48 @@ def resolve_claim_agent(
         agent = _require_agent(db, agent_id)
         if agent.status != AgentStatus.IDLE.value:
             return None, None
-        if agent.assigned_runtime_id is not None and agent.assigned_runtime_id != runtime.runtime_id:
-            return None, None
         return agent, None
 
-    if capability_id is not None:
-        pool = db.get(CapabilityPool, capability_id)
-        routing_policy = pool.routing_policy if pool else "least_recent"
-        candidate_query = (
-            select(Agent)
-            .outerjoin(Runtime, Agent.assigned_runtime_id == Runtime.runtime_id)
-            .where(
-                Agent.capability_id == capability_id,
-                Agent.status == AgentStatus.IDLE.value,
-                or_(Agent.assigned_runtime_id.is_(None), Agent.assigned_runtime_id == runtime.runtime_id),
-                or_(Agent.assigned_runtime_id.is_(None), Runtime.status.notin_([RuntimeStatus.DRAINING.value, RuntimeStatus.OFFLINE.value])),
-                or_(Agent.assigned_runtime_id.is_(None), Runtime.health_status.notin_([HealthStatus.UNREACHABLE.value])),
-            )
-        )
-        if routing_policy == "least_recent":
-            candidate_query = candidate_query.order_by(
-                case(
-                    (Runtime.health_status == HealthStatus.HEALTHY.value, 0),
-                    (Runtime.health_status == HealthStatus.DEGRADED.value, 1),
-                    else_=2,
-                ).asc(),
-                Agent.last_seen_at.asc().nulls_first(),
-                Agent.agent_id.asc(),
+    if capability is not None:
+        # Best-effort routing: query agents by self-declared capabilities JSONB
+        # For Postgres: 'cap_name' = ANY(capabilities) via JSON contains
+        # For SQLite: use text match as fallback
+        from agp.db import engine
+        is_pg = str(engine.url).startswith("postgresql")
+
+        if is_pg:
+            candidate_query = (
+                select(Agent)
+                .where(
+                    Agent.status == AgentStatus.IDLE.value,
+                    Agent.capabilities.op("@>")(f'["{capability}"]'),
+                )
+                .order_by(Agent.last_heartbeat_at.asc(), Agent.agent_id.asc())
             )
         else:
-            candidate_query = candidate_query.order_by(Agent.agent_id.asc())
+            # SQLite: json_each for exact array element match
+            candidate_query = (
+                select(Agent)
+                .where(
+                    Agent.status == AgentStatus.IDLE.value,
+                    text("EXISTS (SELECT 1 FROM json_each(agents.capabilities) je WHERE je.value = :cap)").bindparams(cap=capability),
+                )
+                .order_by(Agent.last_heartbeat_at.asc(), Agent.agent_id.asc())
+            )
+
         candidates = db.scalars(candidate_query).all()
         if not candidates:
             return None, None
         agent = candidates[0]
         routing_decision = {
-            "policy": routing_policy,
+            "policy": "least_recent",
+            "capability": capability,
             "candidate_count": len(candidates),
             "selected_agent_id": agent.agent_id,
-            "candidate_agent_ids": [c.agent_id for c in candidates],
         }
         return agent, routing_decision
 
-    raise BadRequestError("claim requires agent_id or capability_id")
+    raise BadRequestError("claim requires agent_id or capability")
 
 
 def execute_claim(
@@ -227,8 +222,9 @@ def execute_claim(
     Owns all ORM mutations for the claim path. Returns a ClaimResult with
     the created entities, or claimed=False if no work available.
     """
-    capability_queue = _capability_queue_for(db, agent.capability_id)
-    target_queues = [f"agent:{agent.agent_id}", capability_queue]
+    target_queues = [f"agent:{agent.agent_id}"]
+    for cap in (agent.capabilities or []):
+        target_queues.append(f"capability:{cap}")
     exhausted_count = _fail_exhausted_queued_jobs(db, target_queues=target_queues)
 
     delivery = _queue_backend().dequeue_candidate(db, target_queues=target_queues)
@@ -277,8 +273,6 @@ def execute_claim(
     job.latest_run_id = run.run_id
     job.updated_at = utc_now()
     agent.status = AgentStatus.BUSY.value
-    _record_agent_binding(db, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, status="active")
-    agent.assigned_runtime_id = runtime.runtime_id
     runtime.status = RuntimeStatus.BUSY.value
     runtime.last_heartbeat_at = utc_now()
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=agent.agent_id, runtime_id=runtime.runtime_id, event_type="agent.busy", body={"run_id": run.run_id})
@@ -295,7 +289,7 @@ def complete_run_service(
     *,
     run: Run,
     job: Job,
-    agent: Agent,
+    agent: Agent | None,
     runtime: Runtime,
     lease: Lease,
     artifacts: list,
@@ -313,7 +307,8 @@ def complete_run_service(
     job.status = JobStatus.COMPLETED.value
     job.result_artifact_id = result_artifact_id
     job.updated_at = utc_now()
-    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
+    if agent is not None:
+        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
@@ -335,7 +330,7 @@ def fail_run_service(
     *,
     run: Run,
     job: Job,
-    agent: Agent,
+    agent: Agent | None,
     runtime: Runtime,
     lease: Lease,
     error: str,
@@ -354,7 +349,8 @@ def fail_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.FAILED.value
     job.updated_at = utc_now()
-    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
+    if agent is not None:
+        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
@@ -432,7 +428,7 @@ def resumed_run_service(db: Session, *, run: Run, runtime_id: str, details: dict
 
 
 def cancel_run_service(
-    db: Session, *, run: Run, job: Job, agent: Agent, runtime: Runtime, lease: Lease, reason: str,
+    db: Session, *, run: Run, job: Job, agent: Agent | None, runtime: Runtime, lease: Lease, reason: str,
 ) -> dict:
     """Cancel a run — release lease, transition states, emit events."""
     run.status = RunStatus.CANCELLED.value
@@ -441,7 +437,8 @@ def cancel_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.CANCELLED.value
     job.updated_at = utc_now()
-    agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
+    if agent is not None:
+        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
     runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="run.cancelled", body={"reason": reason})
