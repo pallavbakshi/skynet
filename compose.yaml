@@ -1,3 +1,5 @@
+# AGP Control Plane — infrastructure, API server, sweepers, monitoring.
+# Runtime agents are deployed separately via `docker run` or orchestration.
 services:
   postgres:
     image: postgres:16-alpine
@@ -15,7 +17,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    # Queue transport is intentionally volatile in this local/dev stack.
+    # Queue transport is intentionally volatile.
     # AGP reconstructs queue state from the authoritative database on recovery.
     command: ["redis-server", "--save", "", "--appendonly", "no"]
 
@@ -107,43 +109,6 @@ services:
         condition: service_healthy
     restart: "no"
 
-  runtime:
-    build:
-      context: .
-      target: agp-runtime
-    hostname: agp-runtime
-    mac_address: "02:42:37:fc:f5:93"
-    environment:
-      AGP_DATABASE_URL: postgresql+psycopg://agp:agp@postgres:5432/agp
-      AGP_QUEUE_BACKEND: redis
-      AGP_REDIS_URL: redis://redis:6379/0
-      AGP_REDIS_QUEUE_KEY_PREFIX: agp-phase3
-      AGP_ARTIFACT_BACKEND: s3
-      AGP_ARTIFACT_ROOT: /artifacts
-      AGP_LOG_ROOT: /logs
-      AGP_S3_ENDPOINT_URL: http://minio:9000
-      AGP_S3_ACCESS_KEY_ID: minioadmin
-      AGP_S3_SECRET_ACCESS_KEY: minioadmin
-      AGP_S3_BUCKET: agp-artifacts
-      AGP_S3_REGION: us-east-1
-      AGP_S3_FORCE_PATH_STYLE: "true"
-      AGP_SERVER_URL: http://control-plane:7860
-      AGP_RUNTIME_ID: rtm_local
-      AGP_RUNTIME_HOSTNAME: runtime-1
-      AGP_RUNTIME_AGENT_ID: agt_local
-      AGP_RUNTIME_TERMINAL_HOST_KIND: tmux
-      AGP_RUNTIME_AGENT_ADAPTER_KIND: codex
-      AGP_CODEX_TUI_MODE: "true"
-      AGP_RUNTIME_IDLE_SLEEP_SECONDS: "1"
-    volumes:
-      - agp_credentials:/credentials
-      - agp_logs:/logs
-    depends_on:
-      control-plane:
-        condition: service_healthy
-      bootstrap:
-        condition: service_completed_successfully
-
   lease-sweeper:
     build:
       context: .
@@ -220,7 +185,7 @@ services:
       - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
       - agp_grafana:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "3370:3000"
     depends_on:
       - prometheus
 
@@ -228,12 +193,5 @@ volumes:
   agp_pgdata:
   agp_minio:
   agp_logs:
-  agp_credentials:
-    # Shared credentials volume — initialized by `skyops runtime auth`.
-    # Pre-populated with OAuth tokens, API keys, and .env config.
-    # Mount name uses compose project prefix: agp_agp_credentials
-    # To use the standalone volume instead: external: true, name: agp-credentials
-    external: true
-    name: agp-credentials
   agp_prometheus:
   agp_grafana:
