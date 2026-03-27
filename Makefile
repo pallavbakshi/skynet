@@ -1,15 +1,15 @@
 # ── AGP / Skynet Makefile ─────────────────────────────────────────────
 #
-# Quick start:
-#   1. cp .env.example .env        — fill in your API keys
-#   2. make install-server          — install everything
-#   3. make local-serve             — start local CP (SQLite, no infra)
-#   4. make runtime                 — start a runtime (tmux + codex)
-#   5. agp send agt_local "hello"   — send work
+# Quick start (local, no infra):
+#   make local-up                    — reset + init + serve CP
+#   make runtime                     — start a runtime (agent self-registers)
+#   agp send coder-1 "hello"         — send work
+#   make local-status                — check what's running
+#   make local-down                  — stop everything
 #
-# Remote CP:
-#   make runtime-remote             — connect local runtime to remote CP
-#   agp send agt_local "hello" --server-url $AGP_REMOTE_SERVER_URL
+# Docker stack:
+#   make up                          — start full docker compose stack
+#   make down                        — stop + wipe volumes
 #
 # ──────────────────────────────────────────────────────────────────────
 
@@ -44,13 +44,18 @@ AGP_LOG_ROOT           ?= $(ROOT)/.agp-logs
 # Remote CP — where runtime-remote connects
 AGP_REMOTE_SERVER_URL  ?= http://your-server.example.com:7860
 
-# Runtime identity
-AGP_RUNTIME_ID         ?= rtm_mac
+# Runtime identity (self-registration model)
+AGP_RUNTIME_ID         ?= rtm_local
 AGP_RUNTIME_AGENT_ID   ?= agt_local
+AGP_RUNTIME_CAPS       ?= code,python
+
+# Provider auto-detection: prefer OPENAI_API_KEY, fall back to OPENROUTER_API_KEY
+_RUNTIME_API_KEY       := $(or $(OPENAI_API_KEY),$(OPENROUTER_API_KEY))
+_RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),https://openrouter.ai/api/v1))
 
 # Codex launch command. Defaults to the same local path that works when
 # ncodex is started manually on this host; callers can still override it.
-AGP_CODEX_CLI_COMMAND  ?= ncodex -a never -s danger-full-access
+AGP_CODEX_CLI_COMMAND  ?= ncodex -p openrouter -a never -s danger-full-access
 
 # ── Validation helpers ────────────────────────────────────────────────
 define require_env
@@ -82,7 +87,7 @@ install-runtime: ## Install runtime only — no infra (any OS)
 
 # ── Local bare-metal targets (SQLite, no infra) ──────────────────────
 
-.PHONY: local-reset local-initdb local-seed local-serve local-status
+.PHONY: local-reset local-initdb local-serve local-up local-down local-status
 
 local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
 	@rm -f agp.db agp.db-wal agp.db-shm
@@ -90,23 +95,16 @@ local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
 	@echo "Local state cleared."
 
 local-initdb: export AGP_DATABASE_URL=sqlite+pysqlite:///$(ROOT)/agp.db
-local-initdb: export AGP_QUEUE_BACKEND=db
+local-initdb: export AGP_QUEUE_BACKEND=delivery_table
 local-initdb: export AGP_ARTIFACT_BACKEND=localfs
 local-initdb: ## Init local SQLite database
 	@mkdir -p .agp-artifacts .agp-logs .agp-checkpoints
 	$(RUN) agp initdb
 
-local-seed: export AGP_SERVER_URL=http://127.0.0.1:$(AGP_PORT)
-local-seed: export AGP_DATABASE_URL=sqlite+pysqlite:///$(ROOT)/agp.db
-local-seed: export AGP_QUEUE_BACKEND=db
-local-seed: export AGP_ARTIFACT_BACKEND=localfs
-local-seed: ## Seed capabilities and agents into local stack
-	$(RUN) skyops db seed
-
 local-serve: export AGP_DATABASE_URL=sqlite+pysqlite:///$(ROOT)/agp.db
-local-serve: export AGP_QUEUE_BACKEND=db
+local-serve: export AGP_QUEUE_BACKEND=delivery_table
 local-serve: export AGP_ARTIFACT_BACKEND=localfs
-local-serve: ## Start local CP + sweepers (SQLite/memory)
+local-serve: ## Start local CP + sweepers (SQLite, no infra)
 	@mkdir -p $(PID_DIR) .agp-logs .agp-artifacts .agp-checkpoints
 	@if lsof -nP -iTCP:$(AGP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
 		echo "ERROR: Port $(AGP_PORT) already in use."; \
@@ -127,9 +125,15 @@ local-serve: ## Start local CP + sweepers (SQLite/memory)
 	@$(RUN) agp sweep-runtimes-loop --interval-seconds 10 > .agp-logs/runtime-sweeper.out 2>&1 & echo $$! > $(PID_DIR)/runtime-sweeper.pid
 	@echo ""
 	@echo "Local CP running at http://127.0.0.1:$(AGP_PORT)"
+	@echo "Agents self-register — no seeding needed."
 	@echo "Next: make runtime"
 
-local-status: ## Show local stack health
+local-up: local-reset local-initdb local-serve ## Clean start: reset + init + serve (one command)
+
+local-down: stop-cp stop-runtime ## Stop local CP + any running runtimes
+	@echo "Local stack stopped."
+
+local-status: ## Show local stack health and registered agents
 	@echo "=== Processes ==="
 	@found=0; \
 	for pidfile in $(PID_DIR)/control-plane.pid $(PID_DIR)/lease-sweeper.pid $(PID_DIR)/runtime-sweeper.pid $(PID_DIR)/nudge-loop.pid; do \
@@ -146,16 +150,19 @@ local-status: ## Show local stack health
 	@echo ""
 	@echo "=== Health ==="
 	@curl -s http://127.0.0.1:$(AGP_PORT)/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Local CP not reachable"
+	@echo ""
+	@echo "=== Agents ==="
+	@curl -s http://127.0.0.1:$(AGP_PORT)/agents 2>/dev/null | python3 -c \
+		"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
+		[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
+		or print('  (none registered)')" 2>/dev/null || echo "  CP not reachable"
 
 # ── Postgres/Redis targets (standard infrastructure) ─────────────────
 
-.PHONY: initdb seed serve
+.PHONY: initdb serve
 
 initdb: ## Initialize database schema (requires running Postgres)
 	$(RUN) agp initdb
-
-seed: ## Seed capabilities and agents from skyops.toml
-	$(RUN) skyops db seed
 
 serve: ## Start CP + sweepers (bare-metal, Postgres/Redis)
 	@mkdir -p .skyops-pids .agp-logs .agp-artifacts
@@ -177,20 +184,17 @@ nudge-loop: ## Start nudge delivery daemon for orc
 
 stop: stop-cp stop-runtime stop-docker stop-kind ## Stop everything
 
-stop-cp: ## Stop control plane + sweepers
+stop-cp: ## Stop local control plane + sweepers (does not touch Docker)
 	@for pidfile in $(PID_DIR)/control-plane.pid $(PID_DIR)/lease-sweeper.pid $(PID_DIR)/runtime-sweeper.pid $(PID_DIR)/nudge-loop.pid; do \
-		if [ -f $$pidfile ]; then rm -f $$pidfile; fi; \
-	done
-	@for port in $(AGP_PORT); do \
-		pids="$$(lsof -tiTCP:$$port -sTCP:LISTEN 2>/dev/null || true)"; \
-		if [ -n "$$pids" ]; then \
-			$(SUDO) kill $$pids 2>/dev/null || kill $$pids 2>/dev/null || true; \
-			sleep 1; \
-			pids="$$(lsof -tiTCP:$$port -sTCP:LISTEN 2>/dev/null || true)"; \
-			if [ -n "$$pids" ]; then $(SUDO) kill -9 $$pids 2>/dev/null || kill -9 $$pids 2>/dev/null || true; fi; \
+		if [ -f $$pidfile ]; then \
+			pid="$$(cat $$pidfile)"; \
+			kill "$$pid" 2>/dev/null || true; \
+			rm -f $$pidfile; \
 		fi; \
 	done
-	@rm -f $(PID_DIR)/control-plane.pid $(PID_DIR)/lease-sweeper.pid $(PID_DIR)/runtime-sweeper.pid $(PID_DIR)/nudge-loop.pid
+	@for pid in $$(ps -eo pid=,args= | awk '/[a]gp (serve|sweep)/ {print $$1}'); do \
+		kill $$pid 2>/dev/null || true; \
+	done
 	@echo "CP stopped."
 
 stop-runtime: ## Stop runtime worker
@@ -201,7 +205,7 @@ stop-runtime: ## Stop runtime worker
 
 stop-docker: ## Stop docker compose stack
 	@if command -v docker >/dev/null 2>&1; then \
-		docker compose -f compose.phase3.yaml -p agp down -v --remove-orphans >/dev/null 2>&1 || true; \
+		docker compose -p agp down -v --remove-orphans >/dev/null 2>&1 || true; \
 	fi
 	@echo "Docker stack stopped."
 
@@ -214,34 +218,49 @@ stop-kind: ## Delete kind clusters
 	@rm -f .kubeconfig-kind-agp-phase3 .kubeconfig-kind-agp-phase3-debug .kind-agp-phase3.yaml
 	@echo "Kind clusters stopped."
 
-status: ## Show running services
-	@echo "=== AGP Processes ==="
-	@ps aux | head -1
-	@ps aux | grep '[a]gp' || echo "(none running)"
+status: ## Show running services, health, and agents
+	@echo "=== Docker Containers ==="
+	@if docker compose -p agp ps --status running 2>/dev/null | grep -q agp; then \
+		docker compose -p agp ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null; \
+	else \
+		echo "(no docker stack running)"; \
+	fi
+	@echo ""
+	@echo "=== Local Processes ==="
+	@ps -eo pid=,lstart=,args= | grep '[a]gp' | grep -v 'docker' || echo "(none running)"
 	@echo ""
 	@echo "=== Health ==="
 	@curl -s http://127.0.0.1:$(AGP_PORT)/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "CP not reachable at :$(AGP_PORT)"
+	@echo ""
+	@echo "=== Agents ==="
+	@curl -s http://127.0.0.1:$(AGP_PORT)/agents 2>/dev/null | python3 -c \
+		"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
+		[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
+		or print('  (none registered)')" 2>/dev/null || echo "  CP not reachable"
 
 # ── Docker targets ───────────────────────────────────────────────────
 
 .PHONY: up down ps
 
 up: ## Start full stack via docker compose
-	docker compose -f compose.phase3.yaml -p agp up -d --build
+	docker compose -p agp up -d --build
 
 down: ## Stop docker stack and remove volumes
-	docker compose -f compose.phase3.yaml -p agp down -v --remove-orphans
+	docker compose -p agp down -v --remove-orphans
 
 ps: ## Show docker compose status
-	docker compose -f compose.phase3.yaml -p agp ps
+	docker compose -p agp ps
 
 # ── Runtime targets ──────────────────────────────────────────────────
 
 .PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm runtime-clean runtime-deploy
 
-runtime: ## Start a local runtime (tmux + codex, connects to local CP)
+runtime: ## Start a local runtime (agent self-registers with CP)
 	$(call require_provider_env)
-	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID))"
+	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
+	OPENAI_API_KEY="$(_RUNTIME_API_KEY)" \
+	OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" \
+	OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
@@ -250,16 +269,17 @@ runtime: ## Start a local runtime (tmux + codex, connects to local CP)
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
 	AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
 	AGP_CODEX_IDLE_AFTER=5 \
-	$(RUN) agp runtime-work-loop rtm_local \
+	$(RUN) agp runtime-work-loop $(AGP_RUNTIME_ID) \
 		--server-url http://127.0.0.1:$(AGP_PORT) \
 		--host-kind tmux \
 		--adapter-kind codex \
-		--agent-id agt_local
+		--agent-id $(AGP_RUNTIME_AGENT_ID) \
+		--capabilities $(AGP_RUNTIME_CAPS)
 
 runtime-remote: ## Start a runtime connecting to remote CP
 	$(call require_provider_env)
 	$(call require_env,AGP_REMOTE_SERVER_URL)
-	@echo "Starting runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID))"
+	@echo "Starting runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
 	AGP_SERVER_URL="$(AGP_REMOTE_SERVER_URL)" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
@@ -274,12 +294,13 @@ runtime-remote: ## Start a runtime connecting to remote CP
 		--server-url "$(AGP_REMOTE_SERVER_URL)" \
 		--host-kind tmux \
 		--adapter-kind codex \
-		--agent-id "$(AGP_RUNTIME_AGENT_ID)"
+		--agent-id "$(AGP_RUNTIME_AGENT_ID)" \
+		--capabilities $(AGP_RUNTIME_CAPS)
 
 runtime-wezterm: ## Start a WezTerm runtime connecting to remote CP
 	$(call require_provider_env)
 	$(call require_env,AGP_REMOTE_SERVER_URL)
-	@echo "Starting WezTerm runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID))"
+	@echo "Starting WezTerm runtime $(AGP_RUNTIME_ID) -> $(AGP_REMOTE_SERVER_URL) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
 	AGP_SERVER_URL="$(AGP_REMOTE_SERVER_URL)" \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_RUNTIME_TERMINAL_HOST_KIND=wezterm \
@@ -294,7 +315,8 @@ runtime-wezterm: ## Start a WezTerm runtime connecting to remote CP
 		--server-url "$(AGP_REMOTE_SERVER_URL)" \
 		--host-kind wezterm \
 		--adapter-kind codex \
-		--agent-id "$(AGP_RUNTIME_AGENT_ID)"
+		--agent-id "$(AGP_RUNTIME_AGENT_ID)" \
+		--capabilities $(AGP_RUNTIME_CAPS)
 
 runtime-stop-remote: ## Stop local runtime worker process
 	@for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \

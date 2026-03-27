@@ -3,10 +3,11 @@ FROM node:20-bookworm-slim AS agp-node
 
 FROM python:3.12-slim AS agp-base
 
-ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 COPY pyproject.toml /app/
 COPY research/master-prd.md /app/research/master-prd.md
@@ -14,7 +15,7 @@ COPY src /app/src
 COPY migrations /app/migrations
 COPY scripts /app/scripts
 
-RUN pip install ".[server]"
+RUN uv pip install --system ".[server]"
 
 
 FROM agp-base AS agp-control-plane

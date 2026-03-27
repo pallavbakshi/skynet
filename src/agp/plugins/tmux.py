@@ -50,20 +50,20 @@ def _provider_env() -> dict[str, str]:
     openai_key = os.environ.get("OPENAI_API_KEY")
     openrouter_key = os.environ.get("OPENROUTER_API_KEY")
     openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if openai_key and not openai_base_url:
+    if openai_key:
         env["OPENAI_API_KEY"] = openai_key
-    elif openrouter_key:
+    if openai_base_url:
         from agp.plugins.codex import _ensure_codex_config
-        base_url = openai_base_url or "https://openrouter.ai/api/v1"
-        _ensure_codex_config(base_url)
+        _ensure_codex_config(openai_base_url)
+        env["OPENAI_BASE_URL"] = openai_base_url
+    if openrouter_key:
         env["OPENROUTER_API_KEY"] = openrouter_key
-        env["OPENAI_API_KEY"] = openrouter_key
-    else:
-        if openai_key:
-            env["OPENAI_API_KEY"] = openai_key
-        if openai_base_url:
+        if not openai_key:
+            env["OPENAI_API_KEY"] = openrouter_key
+        if not openai_base_url:
             from agp.plugins.codex import _ensure_codex_config
-            _ensure_codex_config(openai_base_url)
+            _ensure_codex_config("https://openrouter.ai/api/v1")
+            env["OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
 
     # ── Claude Code / Anthropic endpoint ─────────────────────────────
     # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code
@@ -175,13 +175,21 @@ class TmuxHost(TerminalHost):
         if cwd:
             args.extend(["-c", cwd])
         self._run(args)
-        # Forward environment variables that agent adapters may need
-        # (tmux new-session does not inherit the parent's full env).
-        for key, val in _provider_env().items():
+        # Forward environment variables that agent adapters may need.
+        # tmux set-environment only applies to NEW panes; the initial shell
+        # in pane 0 was already spawned.  So we also export into it directly.
+        provider_env = _provider_env()
+        for key, val in provider_env.items():
             try:
                 self._run(["set-environment", "-t", name, key, val], allow_failure=True)
             except Exception:
                 pass  # best-effort; test mocks may not support set-environment
+        if provider_env:
+            exports = " ".join(f'{k}="{v}"' for k, v in provider_env.items())
+            try:
+                self._run(["send-keys", "-t", name, f"export {exports}", "Enter"], allow_failure=True)
+            except Exception:
+                pass
         return TerminalSession(
             session_id=name,
             agent_id=agent_id,
