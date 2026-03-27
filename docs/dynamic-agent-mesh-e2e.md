@@ -217,13 +217,14 @@ assert d['status'] in ('queued', 'accepted')
 print(f'PASS: Capability-routed job created: {d[\"job_id\"]}')
 "
 
-# The job should be targeted at coder-1 (the idle agent with "code" capability)
+# Capability jobs resolve the agent at claim time, not at send time.
+# target_agent_id is None until a runtime claims the job.
 JOB_ID=$(echo "$SEND" | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['job_id'])")
 curl -s "http://localhost:7860/jobs/$JOB_ID" | python3 -c "
 import sys,json
 d = json.load(sys.stdin)['data']
-assert d['target_agent_id'] == 'coder-1', f'Routed to {d[\"target_agent_id\"]}, expected coder-1'
-print(f'PASS: Capability \"code\" routed to {d[\"target_agent_id\"]}')
+assert d['target_queue'].startswith('capability:'), f'Expected capability queue, got {d[\"target_queue\"]}'
+print(f'PASS: Job queued to {d[\"target_queue\"]} (resolved at claim time)')
 "
 ```
 

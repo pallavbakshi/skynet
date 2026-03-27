@@ -45,43 +45,31 @@ _NOISE_INFIXES = (
 
 
 def _ensure_codex_config(base_url: str) -> None:
-    """Write ``openai_base_url`` into ``~/.codex/config.toml``.
+    """Best-effort: set ``openai_base_url`` in ``~/.codex/config.toml``.
 
-    Codex >= 0.116 reads the base URL from config.toml and warns when
-    the deprecated ``OPENAI_BASE_URL`` env var is used.
+    Codex >= 0.116 reads the base URL from config.toml.  We only touch
+    the file when a non-profile env-var flow needs it.  If the existing
+    config can't be parsed (codex writes non-strict TOML), we skip
+    silently — the env var will still work as a fallback.
     """
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return
     config_dir = Path.home() / ".codex"
     config_path = config_dir / "config.toml"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    existing: dict = {}
-    if config_path.exists():
+    if not config_path.exists():
+        config_dir.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(f'openai_base_url = "{base_url}"\n')
+        return
+    try:
         existing = tomllib.loads(config_path.read_text())
+    except Exception:
+        return  # codex writes non-strict TOML; don't corrupt the file
     if existing.get("openai_base_url") == base_url:
         return
-    existing["openai_base_url"] = base_url
-    # Write back as minimal TOML (top-level keys first, then tables)
-    lines: list[str] = []
-    tables: list[tuple[str, dict]] = []
-    for k, v in existing.items():
-        if isinstance(v, dict):
-            tables.append((k, v))
-        elif isinstance(v, str):
-            lines.append(f'{k} = "{v}"')
-        else:
-            lines.append(f"{k} = {v}")
-    for tbl_name, tbl in tables:
-        lines.append(f"\n[{tbl_name}]")
-        for k, v in tbl.items():
-            if isinstance(v, dict):
-                lines.append(f"\n[{tbl_name}.{k}]")
-                for kk, vv in v.items():
-                    lines.append(f'"{kk}" = "{vv}"' if isinstance(vv, str) else f'"{kk}" = {vv}')
-            elif isinstance(v, str):
-                lines.append(f'"{k}" = "{v}"')
-            else:
-                lines.append(f'"{k}" = {v}')
-    config_path.write_text("\n".join(lines) + "\n")
+    # Don't rewrite the file — codex owns its config format.
+    # The env var OPENAI_BASE_URL serves as the runtime override.
 
 
 def _runtime_env_prefix() -> str:

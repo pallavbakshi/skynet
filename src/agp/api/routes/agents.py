@@ -37,7 +37,9 @@ def list_agents(
         from agp.db import engine
         from sqlalchemy import text as _text
         if str(engine.url).startswith("postgresql"):
-            query = query.where(Agent.capabilities.op("@>")(f'["{capability}"]'))
+            from sqlalchemy import cast, literal
+            from sqlalchemy.dialects.postgresql import JSONB
+            query = query.where(Agent.capabilities.op("@>")(cast(literal(f'["{capability}"]'), JSONB)))
         else:
             # json_each for exact array element match (avoids substring false positives)
             query = query.where(_text("EXISTS (SELECT 1 FROM json_each(agents.capabilities) je WHERE je.value = :cap)").bindparams(cap=capability))

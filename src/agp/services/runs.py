@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, func, or_, select, text
+from sqlalchemy import case, cast, func, literal, or_, select, text
 from sqlalchemy.orm import Session
 
 from agp.enums import (
@@ -175,11 +175,12 @@ def resolve_claim_agent(
         is_pg = str(engine.url).startswith("postgresql")
 
         if is_pg:
+            from sqlalchemy.dialects.postgresql import JSONB
             candidate_query = (
                 select(Agent)
                 .where(
                     Agent.status == AgentStatus.IDLE.value,
-                    Agent.capabilities.op("@>")(f'["{capability}"]'),
+                    Agent.capabilities.op("@>")(cast(literal(f'["{capability}"]'), JSONB)),
                 )
                 .order_by(Agent.last_heartbeat_at.asc(), Agent.agent_id.asc())
             )
