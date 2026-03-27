@@ -117,8 +117,8 @@ else
   ok "Node.js installed"
 fi
 
-if command -v ncodex >/dev/null 2>&1; then
-  ok "ncodex already installed"
+if command -v codex >/dev/null 2>&1; then
+  ok "codex already installed"
 elif command -v codex >/dev/null 2>&1; then
   ok "codex already installed"
 elif command -v claude >/dev/null 2>&1; then
@@ -174,9 +174,9 @@ echo "=== Verification ==="
 (python3 -c "from agp.client import AgpClient" 2>/dev/null) || \
   (command -v uv >/dev/null 2>&1 && uv run python -c "from agp.client import AgpClient" 2>/dev/null) && ok "agp SDK" || warn "agp SDK import failed"
 tmux -V >/dev/null 2>&1                 && ok "tmux"      || warn "tmux not in PATH"
-(command -v ncodex >/dev/null 2>&1 && ok "ncodex") || \
-  (command -v codex >/dev/null 2>&1 && ok "codex (ncodex not found)") || \
-  warn "codex/ncodex not in PATH"
+(command -v codex >/dev/null 2>&1 && ok "codex") || \
+  (command -v codex >/dev/null 2>&1 && ok "codex (codex not found)") || \
+  warn "codex/codex not in PATH"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

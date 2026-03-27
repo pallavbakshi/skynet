@@ -177,12 +177,12 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         class TuiHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if text.startswith("ncodex"):
+                if text.startswith("codex"):
                     # Simulate Codex TUI ready state with › prompt marker.
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a Summarize recent commits\n"
                     )
-                elif text and not text.startswith("ncodex"):
+                elif text and not text.startswith("codex"):
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a explain this code\n\u2022 Here is the result of your task.\n"
                     )
@@ -201,7 +201,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             tui_mode=True,
-            cli_command="ncodex",
+            cli_command="codex",
             idle_poll_seconds=0.0,
             idle_after=1,
             idle_timeout_seconds=0.1,
@@ -211,7 +211,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         adapter.ensure_bootstrapped(host=host, session=session, claimed={})
         self.assertTrue(session.metadata.get("codex_bootstrapped"))
         history = host._history.get(session.session_id, [])
-        self.assertTrue(any("ncodex" in entry for entry in history))
+        self.assertTrue(any("codex" in entry for entry in history))
 
         claimed = {
             "agent_id": "agt_tui",
@@ -243,7 +243,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             tui_mode=True,
-            cli_command="ncodex",
+            cli_command="codex",
             idle_poll_seconds=0.0,
             idle_after=1,
             idle_timeout_seconds=0.05,
@@ -279,7 +279,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 self.sent.append(text)
                 super().send_text(session, text, enter=enter)
-                if "ncodex " in text:
+                if "codex " in text:
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a What is 2 + 2? Reply with just the number.\n\u2022 4\n"
                     )
@@ -298,7 +298,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             tui_mode=True,
-            cli_command="ncodex --full-auto",
+            cli_command="codex --full-auto",
             idle_poll_seconds=0.0,
             idle_after=1,
             idle_timeout_seconds=0.1,
@@ -317,7 +317,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         }
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(host.reset_calls, 1)
-        self.assertTrue(any("ncodex --full-auto " in text for text in host.sent))
+        self.assertTrue(any("codex --full-auto " in text for text in host.sent))
         self.assertEqual(result.artifacts[-1].content, "4")
         self.assertEqual(result.summary["mode"], "tui")
 
@@ -333,7 +333,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if "ncodex " in text:
+                if "codex " in text:
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a Delegate to agt_local\n"
                         "\u2022 LOCAL_OK\n"
@@ -360,7 +360,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             tui_mode=True,
-            cli_command="ncodex --full-auto",
+            cli_command="codex --full-auto",
             idle_poll_seconds=0.0,
             idle_after=2,
             idle_timeout_seconds=0.1,
@@ -415,7 +415,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             tui_mode=True,
-            cli_command="ncodex --full-auto",
+            cli_command="codex --full-auto",
             idle_poll_seconds=0.0,
             idle_after=2,
             idle_timeout_seconds=0.1,
@@ -476,7 +476,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def read_visible(self, session):
                 return "loading...\n"
 
-        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_timeout_seconds=0.01)
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex", idle_poll_seconds=0.0, idle_timeout_seconds=0.01)
         host = NeverReadyHost()
         session = host.get_or_create_session(agent_id="agt_timeout_boot")
         with self.assertRaises(RecoverableExecutionError) as ctx:
@@ -544,7 +544,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         class ExitDuringRunHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if text.startswith("ncodex"):
+                if text.startswith("codex"):
                     self._history.setdefault(session.session_id, []).append(
                         "\u203a Summarize recent commits\n"
                     )
@@ -565,7 +565,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
                 return {"status": "ok"}
 
-        adapter = CodexAdapter(tui_mode=True, cli_command="ncodex", idle_poll_seconds=0.0, idle_after=1)
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex", idle_poll_seconds=0.0, idle_after=1)
         host = ExitDuringRunHost()
         session = host.get_or_create_session(agent_id="agt_exit_run")
         adapter.ensure_bootstrapped(host=host, session=session, claimed={})

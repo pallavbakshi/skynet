@@ -53,9 +53,12 @@ AGP_RUNTIME_CAPS       ?= code,python
 _RUNTIME_API_KEY       := $(or $(OPENAI_API_KEY),$(OPENROUTER_API_KEY))
 _RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),https://openrouter.ai/api/v1))
 
-# Codex launch command. Defaults to the same local path that works when
-# ncodex is started manually on this host; callers can still override it.
-AGP_CODEX_CLI_COMMAND  ?= ncodex -p openrouter -a never -s danger-full-access
+# Codex profile and launch command.
+#   make runtime                        — uses default profile (openrouter)
+#   make runtime CODEX_PROFILE=openai   — use openai profile
+#   make runtime CODEX_PROFILE=         — no profile (uses codex defaults)
+CODEX_PROFILE          ?= openrouter
+AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) -a never -s danger-full-access
 
 # ── Validation helpers ────────────────────────────────────────────────
 define require_env

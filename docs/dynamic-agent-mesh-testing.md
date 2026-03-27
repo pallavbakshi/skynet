@@ -5,7 +5,7 @@
 - Python 3.12+ with `uv`
 - Docker Desktop (for Docker stack mode)
 - `OPENROUTER_API_KEY` set in `.env` or environment
-- `ncodex` (codex CLI) installed with an `openrouter` profile in `~/.codex/config.toml`
+- `codex` (codex CLI) installed with an `openrouter` profile in `~/.codex/config.toml`
 
 ## Local Mode (SQLite, no infra)
 
@@ -223,10 +223,10 @@ The codex CLI needs API credentials forwarded into the tmux session. Verify:
 tmux show-environment -t agp-agt_local | grep -E "OPENAI|OPENROUTER"
 ```
 
-If using OpenRouter with `ncodex`, use the profile flag:
+If using OpenRouter with `codex`, use the profile flag:
 
 ```bash
-AGP_CODEX_CLI_COMMAND="ncodex -p openrouter -a never -s danger-full-access" make runtime
+AGP_CODEX_CLI_COMMAND="codex -p openrouter -a never -s danger-full-access" make runtime
 ```
 
 ### Stale tmux session

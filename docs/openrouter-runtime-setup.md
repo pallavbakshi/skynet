@@ -5,7 +5,7 @@ How to configure a machine to run AGP runtimes with Codex CLI through OpenRouter
 ## Prerequisites
 
 - AGP installed (`uv pip install -e .` from the skynet repo)
-- `ncodex` or `codex` CLI installed (`npm install -g @openai/codex`)
+- `codex` or `codex` CLI installed (`npm install -g @openai/codex`)
 - tmux or WezTerm installed
 - An OpenRouter API key from https://openrouter.ai/keys
 
@@ -22,7 +22,7 @@ npm install -g @openai/codex
 codex --version
 ```
 
-If you use `ncodex` (a fork), make sure it is also up to date.
+If you use `codex` (a fork), make sure it is also up to date.
 
 ## 2. Set the OpenRouter API key
 
@@ -150,7 +150,7 @@ correctly.
 - **Cause**: Codex CLI doesn't have OpenRouter configured as a provider
 - **Fix**: Add the `[model_providers.openrouter]` block to config.toml (step 3)
 
-### "ncodex version 0.0.0"
+### "codex version 0.0.0"
 
 - **Cause**: Dev build that predates the provider config system
 - **Fix**: Install the latest release: `npm install -g @openai/codex`
@@ -174,7 +174,7 @@ on session creation, so Codex can read them from the tmux environment. The
 inline prefix in `codex.py:_runtime_env_prefix()` is a fallback for cases
 where `set-environment` doesn't propagate (e.g. nested shells). If your
 setup works without the inline prefix, you can set
-`AGP_CODEX_CLI_COMMAND="ncodex -m MODEL"` without the env prefix.
+`AGP_CODEX_CLI_COMMAND="codex -m MODEL"` without the env prefix.
 
 Long-term fix: move all secrets to tmux session environment only and strip
 them from transcript artifacts before upload.

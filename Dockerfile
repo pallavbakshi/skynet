@@ -46,7 +46,7 @@ RUN apt-get update \
         sqlite3 \
         tmux=3.5a-3 \
     && npm install -g @openai/codex@0.116.0 @anthropic-ai/claude-code@2.1.81 \
-    && ln -sf /usr/local/bin/codex /usr/local/bin/ncodex \
+    && true \
     && ln -sf /usr/local/bin/claude /usr/local/bin/claude-code \
     && chmod +x /usr/local/bin/agp-runtime-entrypoint \
     && rm -rf /var/lib/apt/lists/*

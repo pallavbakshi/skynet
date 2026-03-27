@@ -17,7 +17,7 @@ The default path below uses `tmux` and `make runtime-remote`.
 │ your-server.example.com            │                  │                         │
 │                         │  claim / hb /    │ agp runtime-work-loop   │
 │ agp serve               │◄────────────────►│ tmux or WezTerm         │
-│ agp sweep-loop          │   artifact HTTP  │ ncodex / codex          │
+│ agp sweep-loop          │   artifact HTTP  │ codex / codex          │
 │ agp sweep-runtimes-loop │                  │                         │
 │ .agp-artifacts/         │                  │ local checkout          │
 └─────────────────────────┘                  └─────────────────────────┘
@@ -45,7 +45,7 @@ The default path below uses `tmux` and `make runtime-remote`.
 Recommended manual check on the Mac:
 
 ```bash
-ncodex -a never -s danger-full-access "What is 2 + 2? Reply with just the number."
+codex -a never -s danger-full-access "What is 2 + 2? Reply with just the number."
 ```
 
 If your working manual command is different, override
@@ -187,7 +187,7 @@ Current defaults from the `Makefile`:
 - `AGP_REMOTE_SERVER_URL=http://your-server.example.com:7860`
 - `AGP_RUNTIME_ID=rtm_mac`
 - `AGP_RUNTIME_AGENT_ID=agt_local`
-- `AGP_CODEX_CLI_COMMAND="ncodex -a never -s danger-full-access"`
+- `AGP_CODEX_CLI_COMMAND="codex -a never -s danger-full-access"`
 
 If your working local Codex command is different:
 
@@ -324,7 +324,7 @@ In that mode, send and wait commands should also use:
 |---|---|---|
 | `curl http://your-server.example.com:7860/health` times out from the Mac | Ubuntu ingress blocked | `sudo ufw allow 7860/tcp`, then retest |
 | `make runtime-remote` sits there with no output | Normal idle worker loop | Send a job; the runtime is long-lived |
-| Job is accepted but never finishes | Codex CLI path on the Mac is wrong | Run your manual `ncodex` or `codex` command first, then set `AGP_CODEX_CLI_COMMAND` to match it |
+| Job is accepted but never finishes | Codex CLI path on the Mac is wrong | Run your manual `codex` or `codex` command first, then set `AGP_CODEX_CLI_COMMAND` to match it |
 | Runtime starts but claims nothing | Wrong agent id | Keep `AGP_RUNTIME_AGENT_ID=agt_local` or reseed a matching agent |
 | Codex opens in the wrong directory | Wrong `workspace_ref` on Ubuntu seed config | Fix `skyops.local.toml`, then `make local-reset && make local-initdb && make local-seed` |
 | No result artifact on Ubuntu | Runtime not using HTTP artifact backend | `make runtime-remote` and `make runtime-wezterm` already set `AGP_ARTIFACT_BACKEND=http` |

@@ -1,13 +1,13 @@
 """Run a complete AGP orchestrator → control-plane → runtime → Codex-on-WezTerm flow.
 
-One script, one command.  Discovers WezTerm socket and ncodex binary
+One script, one command.  Discovers WezTerm socket and codex binary
 automatically, starts the control plane, bootstraps state, dispatches a job,
 runs the runtime worker, and prints the result.
 
 Usage:
     uv run python scripts/run_local_codex.py "What is 2 + 2?"
     uv run python scripts/run_local_codex.py --socket /path/to/gui-sock-XXXX "explain this code"
-    uv run python scripts/run_local_codex.py --ncodex /usr/local/bin/ncodex "refactor main.py"
+    uv run python scripts/run_local_codex.py --codex /usr/local/bin/codex "refactor main.py"
 """
 from __future__ import annotations
 
@@ -44,21 +44,21 @@ def discover_wezterm_socket(explicit: str | None = None) -> str:
     return str(socks[0])
 
 
-def discover_ncodex(explicit: str | None = None) -> str:
-    """Find the ncodex binary."""
+def discover_codex(explicit: str | None = None) -> str:
+    """Find the codex binary."""
     if explicit:
         if not Path(explicit.split()[0]).exists():
-            _die(f"ncodex not found: {explicit}")
+            _die(f"codex not found: {explicit}")
         return explicit
     for candidate in [
-        shutil.which("ncodex"),
-        str(Path.home() / ".local" / "bin" / "ncodex"),
-        "/usr/local/bin/ncodex",
-        "/opt/homebrew/bin/ncodex",
+        shutil.which("codex"),
+        str(Path.home() / ".local" / "bin" / "codex"),
+        "/usr/local/bin/codex",
+        "/opt/homebrew/bin/codex",
     ]:
         if candidate and Path(candidate).exists():
             return candidate
-    _die("ncodex not found in PATH or common locations")
+    _die("codex not found in PATH or common locations")
 
 
 def _die(msg: str) -> None:
@@ -144,14 +144,14 @@ def send_job(prompt: str) -> str:
         return result["job_id"]
 
 
-def run_worker(socket: str, ncodex_cmd: str, timeout: int) -> dict:
+def run_worker(socket: str, codex_cmd: str, timeout: int) -> dict:
     env = {
         **os.environ,
         "WEZTERM_UNIX_SOCKET": socket,
         "AGP_RUNTIME_TERMINAL_HOST_KIND": "wezterm",
         "AGP_RUNTIME_AGENT_ADAPTER_KIND": "codex",
         "AGP_CODEX_TUI_MODE": "true",
-        "AGP_CODEX_CLI_COMMAND": f"{ncodex_cmd} --full-auto",
+        "AGP_CODEX_CLI_COMMAND": f"{codex_cmd} --full-auto",
         "AGP_WEZTERM_DEFAULT_CWD": os.getcwd(),
         "AGP_CODEX_IDLE_POLL_SECONDS": "2.0",
         "AGP_CODEX_IDLE_AFTER": "4",
@@ -191,16 +191,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run AGP end-to-end with Codex on WezTerm")
     parser.add_argument("prompt", help="Task prompt to send to Codex")
     parser.add_argument("--socket", help="WezTerm unix socket path (auto-discovered if omitted)")
-    parser.add_argument("--ncodex", help="Path to ncodex binary (auto-discovered if omitted)")
+    parser.add_argument("--codex", help="Path to codex binary (auto-discovered if omitted)")
     parser.add_argument("--timeout", type=int, default=180, help="Idle timeout in seconds (default: 180)")
     parser.add_argument("--keep", action="store_true", help="Keep the control plane running after completion")
     args = parser.parse_args()
 
     socket = discover_wezterm_socket(args.socket)
-    ncodex = discover_ncodex(args.ncodex)
+    codex = discover_codex(args.codex)
 
     print(f"WezTerm socket : {socket}")
-    print(f"ncodex binary  : {ncodex}")
+    print(f"codex binary  : {codex}")
     print(f"Prompt         : {args.prompt}")
     print()
 
@@ -221,7 +221,7 @@ def main() -> int:
         print(f"[3/5] Job queued: {job_id}")
 
         print("[4/5] Runtime worker starting (this may take a while)...")
-        outcome = run_worker(socket, ncodex, args.timeout)
+        outcome = run_worker(socket, codex, args.timeout)
 
         if outcome.get("error"):
             print(f"\nFAILED: {outcome['error']}")
