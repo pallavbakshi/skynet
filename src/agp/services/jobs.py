@@ -22,7 +22,7 @@ from agp.models import (
     Run,
     utc_now,
 )
-from agp.schemas import OutputContract
+from agp.schemas import AttachmentRef, OutputContract
 from agp.services._helpers import (
     _capability_queue_for,
     _ensure_inline_runtime,
@@ -109,6 +109,7 @@ def create_and_enqueue_job(
     output_contract: OutputContract | None = None,
     conversation_id: str | None = None,
     reply_to_message_id: str | None = None,
+    attachments: list[AttachmentRef] | None = None,
 ) -> tuple[Message, Job]:
     """Create a message and queued job — the core dispatch path."""
     if target_type == "agent":
@@ -162,6 +163,22 @@ def create_and_enqueue_job(
     )
     db.add(job)
     db.flush()
+
+    for attachment in attachments or []:
+        stored = _write_control_plane_artifact(job_id=job.job_id, name=attachment.name, content=attachment.content, role=attachment.role)
+        artifact = Artifact(
+            artifact_id=_new_id("art"),
+            job_id=job.job_id,
+            run_id=None,
+            kind=attachment.role,
+            content_type=stored.content_type,
+            storage_ref=stored.storage_ref,
+            checksum=stored.checksum,
+            size_bytes=stored.size_bytes,
+        )
+        db.add(artifact)
+        db.flush()
+        db.add(JobArtifact(job_id=job.job_id, artifact_id=artifact.artifact_id, role=attachment.role))
 
     _create_event(db, job_id=job.job_id, event_type="job.accepted", body={"message_id": message.message_id, "target_type": target_type, "target_id": target_id})
     _create_event(db, job_id=job.job_id, event_type="job.queued", body={"target_queue": job.target_queue})

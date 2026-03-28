@@ -49,6 +49,7 @@ def send_message(
         output_contract=request.message.output_contract,
         conversation_id=request.message.conversation_id,
         reply_to_message_id=request.message.reply_to_message_id,
+        attachments=request.message.attachments,
     )
 
     # Inline execution path

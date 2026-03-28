@@ -45,12 +45,19 @@ class OutputContract(BaseModel):
     json_schema: dict[str, Any] = Field(default_factory=dict)
 
 
+class AttachmentRef(BaseModel):
+    name: str
+    role: str
+    content: str
+
+
 class SendMessagePayload(BaseModel):
     text: str
     metadata: dict = Field(default_factory=dict)
     output_contract: OutputContract | None = None
     conversation_id: str | None = None
     reply_to_message_id: str | None = None
+    attachments: list[AttachmentRef] = Field(default_factory=list)
 
 
 class SendMessageRequest(BaseModel):

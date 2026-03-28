@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from urllib.parse import unquote
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -11,7 +12,7 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import _ok, _serialize
 from agp.db import get_db
 from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
-from agp.models import Agent, Job, Message, Run, utc_now
+from agp.models import Agent, Artifact, Job, JobArtifact, Message, Run, utc_now
 from agp.schemas import (
     CancelRunRequest,
     ClaimRunRequest,
@@ -68,6 +69,24 @@ def _conversation_context(db: Session, *, message: Message) -> list[dict]:
     ]
 
 
+def _job_attachments(db: Session, *, job_id: str) -> list[dict]:
+    rows = db.execute(
+        select(JobArtifact, Artifact)
+        .join(Artifact, Artifact.artifact_id == JobArtifact.artifact_id)
+        .where(JobArtifact.job_id == job_id)
+        .order_by(Artifact.created_at.asc(), Artifact.artifact_id.asc())
+    ).all()
+    return [
+        {
+            "artifact_id": artifact.artifact_id,
+            "role": link.role,
+            "storage_ref": artifact.storage_ref,
+            "name": unquote(artifact.storage_ref.rsplit("/", 1)[-1]),
+        }
+        for link, artifact in rows
+    ]
+
+
 @router.post("/runs/claim")
 def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, request.runtime_id)
@@ -102,6 +121,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
         "claimed": True,
         "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json", "conversation_id")),
         "message": {"message_id": result.message.message_id, "target_type": result.message.target_type, "target_id": result.message.target_id, "text": result.message.text, "metadata": result.message.metadata_json},
+        "job_attachments": _job_attachments(db, job_id=result.job.job_id),
         "conversation_context": _conversation_context(db, message=result.message),
         "run": _serialize(result.run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status")),
         "lease": _serialize(result.lease, ("lease_id", "run_id", "agent_id", "runtime_id", "fencing_token", "status", "expires_at")),

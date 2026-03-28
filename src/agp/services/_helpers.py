@@ -239,7 +239,7 @@ def _enqueue_nudge(
     return nudge
 
 
-def _write_control_plane_artifact(*, job_id: str, name: str, content: str) -> SimpleNamespace:
+def _write_control_plane_artifact(*, job_id: str, name: str, content: str, role: str | None = None) -> SimpleNamespace:
     role_map = {
         "prompt.txt": ArtifactKind.PROMPT.value,
         "transcript.txt": ArtifactKind.TRANSCRIPT_LOG.value,
@@ -247,12 +247,13 @@ def _write_control_plane_artifact(*, job_id: str, name: str, content: str) -> Si
         "result.txt": ArtifactKind.RESULT.value,
         "failure.txt": ArtifactKind.FAILURE_EVIDENCE.value,
     }
+    resolved_role = role or role_map.get(name, "attachment")
     stored = _artifact_store().write_text(
         namespace="control-plane",
         job_id=job_id,
         name=name,
         content=content,
-        role=role_map[name],
+        role=resolved_role,
     )
     return SimpleNamespace(
         role=stored.role,

@@ -4,6 +4,56 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):
+    def test_send_with_attachments_and_claim_returns_them(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_attach", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_attach", "hostname": "localhost"})
+
+        sent = self.agp.send(
+            target_type="agent",
+            target_id="agt_attach",
+            text="review these files",
+            attachments=[
+                {"name": "diff.patch", "role": "diff", "content": "diff --git a/x b/x\n"},
+                {"name": "spec.md", "role": "spec", "content": "# Spec\n"},
+            ],
+            idempotency_key="attach-send-1",
+        )
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_attach", "agent_id": "agt_attach"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        payload = claim.json()["data"]
+        self.assertEqual(payload["job"]["job_id"], sent["job_id"])
+        self.assertEqual(len(payload["job_attachments"]), 2)
+        self.assertEqual(
+            [(item["name"], item["role"]) for item in payload["job_attachments"]],
+            [("diff.patch", "diff"), ("spec.md", "spec")],
+        )
+        self.assertTrue(all(item["artifact_id"] for item in payload["job_attachments"]))
+        self.assertTrue(all(item["storage_ref"] for item in payload["job_attachments"]))
+
+    def test_send_without_attachments_claim_returns_empty_attachments(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_attach_empty", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_attach_empty", "hostname": "localhost"})
+
+        sent = self.agp.send(
+            target_type="agent",
+            target_id="agt_attach_empty",
+            text="no files",
+            idempotency_key="attach-send-empty-1",
+        )
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_attach_empty", "agent_id": "agt_attach_empty"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        payload = claim.json()["data"]
+        self.assertEqual(payload["job"]["job_id"], sent["job_id"])
+        self.assertEqual(payload["job_attachments"], [])
+
     def test_send_with_conversation_id_persists_to_message_and_job(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_conv", "capabilities": ["python"]})
 

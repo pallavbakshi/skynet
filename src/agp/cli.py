@@ -13,6 +13,7 @@ All server-side imports are deferred to command bodies so that
 
 import json
 import os
+from pathlib import Path
 
 import typer
 
@@ -236,6 +237,16 @@ def _make_client(server_url: str | None = None):
     if server_url:
         profile.server_url = server_url
     return AgpClient(profile=profile)
+
+
+def _parse_attachment_option(value: str) -> tuple[Path, str]:
+    path_text, sep, role = value.rpartition(":")
+    if not sep or not path_text or not role:
+        raise typer.BadParameter("--attach must be <path>:<role>")
+    path = Path(path_text)
+    if not path.is_file():
+        raise typer.BadParameter(f"attachment file not found: {path}")
+    return path, role
 
 
 def _print_banner(label: str, subtitle: str) -> None:
@@ -717,6 +728,7 @@ def send(
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
+    attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
 ) -> None:
     """Send a task to an agent with smart detach.
 
@@ -731,6 +743,7 @@ def send(
         metadata["nudge_target"] = nudge_target
     parsed_output_contract: dict | None = None
     conversation_id: str | None = None
+    attachments: list[dict[str, str]] = []
     if output_contract is not None:
         try:
             parsed_output_contract = json.loads(output_contract)
@@ -738,6 +751,9 @@ def send(
             raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
         if not isinstance(parsed_output_contract, dict):
             raise typer.BadParameter("--output-contract must decode to a JSON object")
+    for item in attach or []:
+        path, role = _parse_attachment_option(item)
+        attachments.append({"name": path.name, "role": role, "content": path.read_text(encoding="utf-8")})
     with _make_client(server_url) as client:
         typer.echo(f"[..] Dispatching to {agent_id}...")
         result = client.send(
@@ -746,6 +762,7 @@ def send(
             output_contract=parsed_output_contract,
             conversation_id=conversation_id,
             reply_to_message_id=reply_to,
+            attachments=attachments,
             idempotency_key=f"cli-{int(time.time())}",
         )
         job_id = result["job_id"]

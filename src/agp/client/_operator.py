@@ -103,6 +103,7 @@ class AgpClient:
         output_contract: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         reply_to_message_id: str | None = None,
+        attachments: list[dict[str, str]] | None = None,
         detach_mode: str = "auto",
         idempotency_key: str | None = None,
     ) -> dict:
@@ -119,6 +120,7 @@ class AgpClient:
                     "output_contract": output_contract,
                     "conversation_id": conversation_id,
                     "reply_to_message_id": reply_to_message_id,
+                    "attachments": attachments or [],
                 },
                 "detach_policy": {"mode": detach_mode},
             },

@@ -216,10 +216,6 @@ class Artifact(Base):
     __table_args__ = (
         Index("ix_artifacts_job_created", "job_id", "created_at"),
         Index("ix_artifacts_run_created", "run_id", "created_at"),
-        CheckConstraint(
-            "kind IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
-            name="chk_artifacts_kind",
-        ),
         CheckConstraint("size_bytes >= 0", name="chk_artifacts_size"),
     )
 
@@ -236,12 +232,7 @@ class Artifact(Base):
 
 class JobArtifact(Base):
     __tablename__ = "job_artifacts"
-    __table_args__ = (
-        CheckConstraint(
-            "role IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
-            name="chk_job_artifacts_role",
-        ),
-    )
+    __table_args__ = ()
 
     job_id: Mapped[str] = mapped_column(ForeignKey("jobs.job_id"), primary_key=True)
     artifact_id: Mapped[str] = mapped_column(ForeignKey("artifacts.artifact_id"), primary_key=True)
