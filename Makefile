@@ -220,44 +220,54 @@ stop-kind: ## Delete kind clusters
 	@echo "Kind clusters stopped."
 
 status: ## Show running services, health, and agents
-	@echo "=== Docker Containers ==="
-	@if docker compose -p agp ps --status running 2>/dev/null | grep -q agp; then \
-		docker compose -p agp ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null; \
-	else \
-		echo "(no docker stack running)"; \
-	fi
-	@echo ""
-	@echo "=== Local Processes ==="
-	@ps -eo pid=,lstart=,args= | grep '[a]gp' | grep -v 'docker' || echo "(none running)"
-	@echo ""
-	@echo "=== Health ==="
 	@_local=http://127.0.0.1:$(AGP_PORT); \
 	_remote=$(AGP_REMOTE_SERVER_URL); \
-	_url=""; \
-	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; \
-	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; fi; \
+	_url=""; _loc=""; \
+	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; _loc="LOCAL"; \
+	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; _loc="REMOTE"; fi; \
+	\
+	echo "=== Control Plane ==="; \
 	if [ -n "$$_url" ]; then \
-		echo "CP reachable at $$_url"; \
+		echo "  location : $$_loc — $$_url"; \
 		curl -s "$$_url/ops/health" | python3 -c \
 			"import sys,json; d=json.load(sys.stdin)['data']; \
-			print('  agents:', d['agents']); print('  jobs:', d['jobs'])"; \
+			a=d['agents']; j=d['jobs']; \
+			print(f'  agents   : idle={a[\"idle\"]}  busy={a[\"busy\"]}  draining={a[\"draining\"]}'); \
+			print(f'  jobs     : running={j[\"running\"]}  queued={j[\"queued\"]}  completed={j[\"completed\"]}  failed={j[\"failed\"]}')"; \
 	else \
-		echo "CP not reachable (tried $$_local and $$_remote)"; \
-	fi
-	@echo ""
-	@echo "=== Agents ==="
-	@_local=http://127.0.0.1:$(AGP_PORT); \
-	_remote=$(AGP_REMOTE_SERVER_URL); \
-	_url=""; \
-	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; \
-	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; fi; \
+		echo "  NOT REACHABLE (tried local $$_local and remote $$_remote)"; \
+	fi; \
+	\
+	echo ""; \
+	echo "=== Docker Containers (this machine) ==="; \
+	if docker compose -p agp ps --status running 2>/dev/null | grep -q agp; then \
+		docker compose -p agp ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}" 2>/dev/null; \
+	else \
+		echo "  (none)"; \
+	fi; \
+	\
+	echo ""; \
+	echo "=== Runtime Processes (this machine) ==="; \
+	ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ { \
+		pid=$$1; rt="?"; ag="?"; url="?"; \
+		for(i=2;i<=NF;i++) { \
+			if($$i=="runtime-work-loop") rt=$$(i+1); \
+			if($$i=="--agent-id") ag=$$(i+1); \
+			if($$i=="--server-url") url=$$(i+1); \
+		} \
+		loc=(url ~ /127\.0\.0\.1/) ? "LOCAL CP" : "REMOTE CP"; \
+		printf "  %-12s  agent=%-15s  → %s (%s)\n", rt, ag, url, loc \
+	}' | sort -u || echo "  (none)"; \
+	\
+	echo ""; \
+	echo "=== Registered Agents ==="; \
 	if [ -n "$$_url" ]; then \
 		curl -s "$$_url/agents" | python3 -c \
 			"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
 			[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
 			or print('  (none registered)')"; \
 	else \
-		echo "  CP not reachable"; \
+		echo "  (CP not reachable)"; \
 	fi
 
 # ── Docker targets ───────────────────────────────────────────────────
