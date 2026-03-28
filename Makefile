@@ -54,9 +54,9 @@ _RUNTIME_API_KEY       := $(or $(OPENAI_API_KEY),$(OPENROUTER_API_KEY))
 _RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),https://openrouter.ai/api/v1))
 
 # Codex profile and launch command.
-#   make runtime                        — uses default profile (openrouter)
-#   make runtime CODEX_PROFILE=openai   — use openai profile
-#   make runtime CODEX_PROFILE=         — no profile (uses codex defaults)
+#   make runtime                        — OpenRouter (default)
+#   make runtime CODEX_PROFILE=openai   — direct OpenAI via OPENAI_API_KEY
+#   make runtime CODEX_PROFILE=         — OAuth / codex default credentials
 CODEX_PROFILE          ?= openrouter
 AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) -a never -s danger-full-access
 
@@ -72,9 +72,7 @@ endef
 
 define require_provider_env
 	@if [ -z "$(OPENAI_API_KEY)" ] && [ -z "$(OPENROUTER_API_KEY)" ]; then \
-		echo "ERROR: set OPENAI_API_KEY or OPENROUTER_API_KEY."; \
-		echo "  See .env.example for reference."; \
-		exit 1; \
+		echo "INFO: no OPENAI_API_KEY or OPENROUTER_API_KEY set — using codex OAuth credentials."; \
 	fi
 endef
 
