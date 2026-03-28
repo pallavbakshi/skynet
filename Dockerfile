@@ -52,12 +52,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # WezTerm nightly — headless mux-server mode for wezterm-based hosts.
-ARG WEZTERM_DEB_URL=https://github.com/wezterm/wezterm/releases/download/nightly/wezterm-nightly.Debian12.arm64.deb
-RUN curl -fsSL "${WEZTERM_DEB_URL}" -o /tmp/wezterm.deb \
+# Auto-selects the right .deb for the build arch (amd64 or arm64).
+# Non-fatal: if WezTerm can't install (e.g. missing dep), the image
+# still works with tmux as the terminal host.
+RUN ARCH="$(dpkg --print-architecture)" \
+    && WEZTERM_DEB_URL="https://github.com/wezterm/wezterm/releases/download/nightly/wezterm-nightly.Debian12.${ARCH}.deb" \
+    && curl -fsSL "${WEZTERM_DEB_URL}" -o /tmp/wezterm.deb \
     && apt-get update \
     && apt-get install -y --no-install-recommends /tmp/wezterm.deb \
     && rm -f /tmp/wezterm.deb \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    || { echo "WezTerm install skipped (unsupported arch or unavailable)"; rm -f /tmp/wezterm.deb; apt-get clean; }
 
 # WezTerm headless config — large terminal (200x50), 10k scrollback,
 # no GUI chrome.  Placed in /etc/wezterm so it applies to all users.
@@ -70,6 +75,7 @@ ENV AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
     AGP_CODEX_CLI_COMMAND="codex -a never -s danger-full-access" \
     AGP_RUNTIME_ARTIFACT_ROOT=/artifacts \
     AGP_LOG_ROOT=/logs \
+    AGP_OUTPUT_CHECKPOINT_DIR=/tmp/agp-checkpoints \
     DISABLE_AUTOUPDATER=1 \
     DISABLE_TELEMETRY=1 \
     NO_UPDATE_NOTIFIER=1

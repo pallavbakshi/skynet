@@ -116,6 +116,15 @@ fi
 # ── App permissions ──────────────────────────────────────────────────
 chmod -R a+rX /app 2>/dev/null || true
 
+# ── Codex profile injection ─────────────────────────────────────────
+# If CODEX_PROFILE is set and AGP_CODEX_CLI_COMMAND doesn't already contain
+# a -p flag, insert it so the correct codex provider profile is used.
+if [[ -n "${CODEX_PROFILE:-}" && "${AGP_CODEX_CLI_COMMAND:-}" != *" -p "* ]]; then
+  _base_cmd="${AGP_CODEX_CLI_COMMAND:-codex -a never -s danger-full-access}"
+  export AGP_CODEX_CLI_COMMAND="${_base_cmd/codex/codex -p ${CODEX_PROFILE}}"
+  unset _base_cmd
+fi
+
 # ── Build work-loop args ─────────────────────────────────────────────
 HOST_KIND="${AGP_RUNTIME_TERMINAL_HOST_KIND:-tmux}"
 ADAPTER_KIND="${AGP_RUNTIME_AGENT_ADAPTER_KIND:-codex}"
