@@ -58,6 +58,10 @@ _RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),htt
 #   make runtime CODEX_PROFILE=apikey   — direct OpenAI via OPENAI_API_KEY
 #   make runtime CODEX_PROFILE=         — OAuth / codex default credentials
 CODEX_PROFILE          ?= openrouter
+
+ifneq ($(CODEX_PROFILE),)
+_PROVIDER_ENV         := OPENAI_API_KEY="$(_RUNTIME_API_KEY)" OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)"
+endif
 AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) -a never -s danger-full-access
 
 # ── Validation helpers ────────────────────────────────────────────────
@@ -293,9 +297,7 @@ ps: ## Show docker compose status
 runtime: ## Start a local runtime (agent self-registers with CP)
 	$(call require_provider_env)
 	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
-	OPENAI_API_KEY="$(_RUNTIME_API_KEY)" \
-	OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" \
-	OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)" \
+	$(_PROVIDER_ENV) \
 	AGP_ARTIFACT_BACKEND=http \
 	AGP_CODEX_TUI_MODE=true \
 	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
