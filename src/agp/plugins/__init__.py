@@ -11,14 +11,14 @@ def build_terminal_host(kind: str, **kwargs: Any):
         return InProcessTerminalHost()
     if kind == "wezterm":
         from agp.plugins.wezterm import WezTermHost
-        kwargs.setdefault("scrollback_lines", settings.wezterm_scrollback_lines)
+        kwargs.setdefault("scrollback_lines", settings.scrollback_lines)
         kwargs.setdefault("checkpoint_dir", settings.output_checkpoint_dir)
         kwargs.setdefault("default_cwd", settings.wezterm_default_cwd)
         return WezTermHost(**kwargs)
     if kind == "tmux":
         from agp.plugins.tmux import TmuxHost
         kwargs.pop("workspace", None)  # WezTerm-specific, not used by tmux
-        kwargs.setdefault("scrollback_lines", settings.wezterm_scrollback_lines)
+        kwargs.setdefault("scrollback_lines", settings.tmux_scrollback_lines)
         kwargs.setdefault("checkpoint_dir", settings.output_checkpoint_dir)
         kwargs.setdefault("default_cwd", getattr(settings, "tmux_default_cwd", "") or "")
         kwargs.setdefault("session_prefix", getattr(settings, "tmux_session_prefix", "agp"))

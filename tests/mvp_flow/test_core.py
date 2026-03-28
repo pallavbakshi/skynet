@@ -319,6 +319,8 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                         ]
                     )
                 )
+            if argv[2] == "send-text":
+                return Result("")
             raise AssertionError(f"unexpected wezterm command: {argv}")
 
         host = WezTermHost(workspace="agp-test", runner=runner)

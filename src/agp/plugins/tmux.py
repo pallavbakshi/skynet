@@ -1,7 +1,6 @@
 """Tmux terminal host plugin."""
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import subprocess
@@ -18,7 +17,6 @@ from agp.runtime import (
     TerminalSession,
     _OutputAccumulator,
     _compute_output_delta,
-    _strip_ansi,
 )
 
 

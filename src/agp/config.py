@@ -1,6 +1,7 @@
 """Configuration for the AGP scaffold."""
 
 from pathlib import Path
+from typing import Any
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -72,10 +73,24 @@ class Settings(BaseSettings):
     claude_code_session_mode: str = "ephemeral"
     claude_code_bootstrap_settle_seconds: float = 0.0
     wezterm_default_cwd: str = ""
-    wezterm_scrollback_lines: int = 5000
+    scrollback_lines: int = 5000
+    wezterm_scrollback_lines: int | None = None
+    tmux_scrollback_lines: int = 5000
     tmux_default_cwd: str = ""
     tmux_session_prefix: str = "agp"
     output_checkpoint_dir: Path = Path(".agp-checkpoints")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_legacy_wezterm_scrollback_lines(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        if "scrollback_lines" in data:
+            return data
+        legacy_value = data.get("wezterm_scrollback_lines")
+        if legacy_value is None:
+            return data
+        return {**data, "scrollback_lines": legacy_value}
 
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> "Settings":

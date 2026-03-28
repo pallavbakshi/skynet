@@ -595,6 +595,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                                  "workspace": "agp-test", "window_title": "AGP:agt_persist",
                                  "tab_title": "AGP:agt_persist", "cwd": "/tmp"}])
                 )
+            if argv[2] in {"send-text", "send_text"}:
+                return Result("")
             raise AssertionError(f"unexpected: {argv}")
 
         tmp = Path(mkdtemp())
@@ -640,6 +642,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                                  "workspace": "agp-test", "window_title": "AGP:agt_restart",
                                  "tab_title": "AGP:agt_restart", "cwd": "/tmp"}])
                 )
+            if argv[2] in {"send-text", "send_text"}:
+                return Result("")
             raise AssertionError(f"unexpected: {argv}")
 
         tmp = Path(mkdtemp())
@@ -1896,6 +1900,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                     }]),
                     "stderr": "", "returncode": 0,
                 })()
+            if argv[2] in {"send-text", "send_text"}:
+                return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
             raise AssertionError(f"unexpected: {argv}")
 
         host = WezTermHost(workspace="agp-test", runner=runner)

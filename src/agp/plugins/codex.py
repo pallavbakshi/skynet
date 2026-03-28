@@ -171,7 +171,12 @@ class CodexAdapter(AgentAdapter):
 
     def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
         cleaned = _clean_codex_tui_output(text)
-        payload = self._extract_terminal_payload(run_id=run_id, output=text) if run_id else None
+        payload = None
+        if run_id:
+            try:
+                payload = self._extract_terminal_payload(run_id=run_id, output=text)
+            except RuntimeError as exc:
+                payload = {"error": str(exc)}
         return {
             "adapter_kind": self.kind,
             "mode": "tui" if self.tui_mode else "marker",

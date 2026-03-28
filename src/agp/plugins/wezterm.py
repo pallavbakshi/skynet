@@ -2,6 +2,8 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from time import monotonic, sleep
@@ -15,6 +17,77 @@ from agp.runtime import (
 
 # Shell prompt characters that indicate the CLI exited and the shell returned.
 _SHELL_PROMPT_CHARS = {"\u276f", "\u2733", "$", "%", "#"}
+_PROVIDER_ENV_KEYS_TO_RESET = (
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    "AGP_SERVER_URL",
+)
+
+
+def _ensure_codex_config(base_url: str) -> None:
+    """Best-effort: set ``openai_base_url`` in ``~/.codex/config.toml``."""
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return
+    config_path = Path.home() / ".codex" / "config.toml"
+    if not config_path.exists():
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(f'openai_base_url = "{base_url}"\n')
+        return
+    try:
+        existing = tomllib.loads(config_path.read_text())
+    except Exception:
+        return
+    if existing.get("openai_base_url") == base_url:
+        return
+
+
+def _provider_env() -> dict[str, str]:
+    """Collect provider API keys and endpoint overrides for WezTerm sessions."""
+    env: dict[str, str] = {}
+
+    openai_key = os.environ.get("OPENAI_API_KEY")
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+    if openai_key:
+        env["OPENAI_API_KEY"] = openai_key
+    if openai_base_url:
+        _ensure_codex_config(openai_base_url)
+        env["OPENAI_BASE_URL"] = openai_base_url
+    if openrouter_key and " -p " in f" {settings.codex_cli_command} ":
+        env["OPENROUTER_API_KEY"] = openrouter_key
+
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    if anthropic_key is not None:
+        env["ANTHROPIC_API_KEY"] = anthropic_key
+
+    for key in (
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    ):
+        val = os.environ.get(key)
+        if val:
+            env[key] = val
+
+    agp_server_url = os.environ.get("AGP_SERVER_URL")
+    if agp_server_url:
+        env["AGP_SERVER_URL"] = agp_server_url
+    return env
 
 
 class WezTermHost(TerminalHost):
@@ -88,9 +161,22 @@ class WezTermHost(TerminalHost):
                         "tab_id": pane.get("tab_id"),
                         "window_id": pane.get("window_id"),
                         "workspace": pane.get("workspace"),
-                    },
-                )
+                },
+            )
         return None
+
+    def _export_provider_env(self, session: TerminalSession) -> None:
+        provider_env = _provider_env()
+        commands: list[str] = []
+        stale_keys = [key for key in _PROVIDER_ENV_KEYS_TO_RESET if key not in provider_env]
+        if stale_keys:
+            commands.append("unset " + " ".join(stale_keys))
+        if provider_env:
+            exports = " ".join(f"{key}={shlex.quote(value)}" for key, value in provider_env.items())
+            commands.append(f"export {exports}")
+        if not commands:
+            return
+        self._run(["send-text", "--pane-id", session.session_id, "--no-paste", "; ".join(commands) + "\r"])
 
     def get_or_create_session(self, *, agent_id: str, workspace_ref: str | None = None) -> TerminalSession:
         existing = self._find_existing(agent_id=agent_id)
@@ -119,6 +205,7 @@ class WezTermHost(TerminalHost):
             )
             self._run(["set-window-title", "--pane-id", pane_id, marker])
             self._run(["set-tab-title", "--pane-id", pane_id, marker])
+            self._export_provider_env(session)
             return session
         cwd = workspace_ref or self.default_cwd
         args = ["spawn", "--new-window", "--workspace", self.workspace]
@@ -137,6 +224,7 @@ class WezTermHost(TerminalHost):
         )
         self._run(["set-window-title", "--pane-id", pane_id, marker])
         self._run(["set-tab-title", "--pane-id", pane_id, marker])
+        self._export_provider_env(session)
         return session
 
     # Maximum bytes per wezterm send-text call.  Larger payloads are
@@ -306,6 +394,7 @@ class WezTermHost(TerminalHost):
         # Claude Code indicators: ⏺ response, ────  separator, ⏵⏵ status bar, ╭/╰ box
         has_claude_tui = any(
             ln.startswith("\u23fa")  # ⏺
+            or ln.startswith("\u25cf")  # ●
             or ln.startswith("\u256d") or ln.startswith("\u2570")  # ╭ ╰
             or "\u23f5\u23f5" in ln  # ⏵⏵ status bar
             or all(ch == "\u2500" for ch in ln if ch != " ")  # ────

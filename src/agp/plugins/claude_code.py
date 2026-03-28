@@ -19,7 +19,6 @@ _RESPONSE_PREFIXES = (
 _TOOL_RESULT_PREFIX = "\u23bf"  # ⎿ = tool result / continuation
 _SEPARATOR_RE = re.compile(r"^\u2500{4,}$")  # ────
 _COMPACTION_RE = re.compile(r"^\u273b\s+(Conversation compacted|Churned)")  # ✻
-_SYSTEM_RE = re.compile(r"^\u273b\s+")
 _FEEDBACK_RE = re.compile(r"how is claude doing", re.IGNORECASE)
 _WELCOME_START = "\u256d"  # ╭
 _WELCOME_END = "\u2570"    # ╰
@@ -258,6 +257,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                     session.metadata.pop("claude_code_bootstrapped", None)
                 else:
                     return
+            elif host.kind == "tmux":
+                session.metadata.pop("claude_code_bootstrapped", None)
             else:
                 return
 
@@ -547,11 +548,19 @@ class ClaudeCodeAdapter(AgentAdapter):
         prompt = claimed["message"]["text"]
         run_id = claimed["run"]["run_id"]
 
-        # Session reset depends on session_mode.  Ephemeral resets the pane
-        # and re-launches Claude Code so every run starts fresh.
-        if self.session_mode == "ephemeral":
+        # Session reset depends on host kind and session_mode:
+        # - tmux always resets (send-keys unreliable with running TUI)
+        # - wezterm resets only in ephemeral mode; sticky keeps the session
+        if host.kind == "tmux":
+            if self.session_mode == "sticky":
+                import logging
+                logging.getLogger(__name__).warning(
+                    "sticky session_mode is not supported on tmux — falling back to ephemeral"
+                )
             session = host.reset_session(session)
-            # Re-bootstrap in the fresh pane.
+            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        elif self.session_mode == "ephemeral":
+            session = host.reset_session(session)
             self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
         baseline_screen = _strip_ansi(host.read_visible(session))
