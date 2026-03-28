@@ -231,13 +231,34 @@ status: ## Show running services, health, and agents
 	@ps -eo pid=,lstart=,args= | grep '[a]gp' | grep -v 'docker' || echo "(none running)"
 	@echo ""
 	@echo "=== Health ==="
-	@curl -s http://127.0.0.1:$(AGP_PORT)/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "CP not reachable at :$(AGP_PORT)"
+	@_local=http://127.0.0.1:$(AGP_PORT); \
+	_remote=$(AGP_REMOTE_SERVER_URL); \
+	_url=""; \
+	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; \
+	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; fi; \
+	if [ -n "$$_url" ]; then \
+		echo "CP reachable at $$_url"; \
+		curl -s "$$_url/ops/health" | python3 -c \
+			"import sys,json; d=json.load(sys.stdin)['data']; \
+			print('  agents:', d['agents']); print('  jobs:', d['jobs'])"; \
+	else \
+		echo "CP not reachable (tried $$_local and $$_remote)"; \
+	fi
 	@echo ""
 	@echo "=== Agents ==="
-	@curl -s http://127.0.0.1:$(AGP_PORT)/agents 2>/dev/null | python3 -c \
-		"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
-		[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
-		or print('  (none registered)')" 2>/dev/null || echo "  CP not reachable"
+	@_local=http://127.0.0.1:$(AGP_PORT); \
+	_remote=$(AGP_REMOTE_SERVER_URL); \
+	_url=""; \
+	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; \
+	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; fi; \
+	if [ -n "$$_url" ]; then \
+		curl -s "$$_url/agents" | python3 -c \
+			"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
+			[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
+			or print('  (none registered)')"; \
+	else \
+		echo "  CP not reachable"; \
+	fi
 
 # ── Docker targets ───────────────────────────────────────────────────
 
