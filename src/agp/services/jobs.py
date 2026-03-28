@@ -107,6 +107,8 @@ def create_and_enqueue_job(
     text: str,
     metadata: dict,
     output_contract: OutputContract | None = None,
+    conversation_id: str | None = None,
+    reply_to_message_id: str | None = None,
 ) -> tuple[Message, Job]:
     """Create a message and queued job — the core dispatch path."""
     if target_type == "agent":
@@ -118,12 +120,28 @@ def create_and_enqueue_job(
     else:
         raise BadRequestError("target.type must be agent or capability")
 
+    # Auto-generate conversation_id for new conversations.
+    if conversation_id is None and reply_to_message_id is None:
+        conversation_id = _new_id("conv")
+
+    # Validate reply_to_message_id: must exist and belong to same conversation.
+    if reply_to_message_id is not None:
+        parent = db.get(Message, reply_to_message_id)
+        if parent is None:
+            raise BadRequestError(f"reply_to_message_id not found: {reply_to_message_id}")
+        if conversation_id is None:
+            conversation_id = parent.conversation_id
+        elif conversation_id != parent.conversation_id:
+            raise BadRequestError("reply_to_message_id does not belong to the same conversation")
+
     message = Message(
         message_id=_new_id("msg"),
         target_type=target_type,
         target_id=target_id,
         text=text,
         metadata_json=metadata,
+        conversation_id=conversation_id,
+        reply_to_message_id=reply_to_message_id,
     )
     db.add(message)
     db.flush()
@@ -140,6 +158,7 @@ def create_and_enqueue_job(
         status=JobStatus.QUEUED.value,
         max_retries=3,
         output_contract_json=output_contract.model_dump() if output_contract else None,
+        conversation_id=conversation_id,
     )
     db.add(job)
     db.flush()
@@ -250,6 +269,8 @@ def execute_handoff(
             target_id=target.id,
             text=message_payload.text,
             metadata_json=message_payload.metadata,
+            conversation_id=message_payload.conversation_id,
+            reply_to_message_id=message_payload.reply_to_message_id,
         )
         db.add(msg)
         db.flush()
@@ -261,6 +282,7 @@ def execute_handoff(
             status=JobStatus.QUEUED.value,
             max_retries=3,
             output_contract_json=message_payload.output_contract.model_dump() if message_payload.output_contract else None,
+            conversation_id=message_payload.conversation_id,
         )
         db.add(child)
         db.flush()

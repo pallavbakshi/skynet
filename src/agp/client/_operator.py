@@ -101,6 +101,8 @@ class AgpClient:
         *,
         metadata: dict[str, Any] | None = None,
         output_contract: dict[str, Any] | None = None,
+        conversation_id: str | None = None,
+        reply_to_message_id: str | None = None,
         detach_mode: str = "auto",
         idempotency_key: str | None = None,
     ) -> dict:
@@ -111,7 +113,13 @@ class AgpClient:
             "/messages/send",
             json={
                 "target": {"type": target_type, "id": target_id},
-                "message": {"text": text, "metadata": metadata or {}, "output_contract": output_contract},
+                "message": {
+                    "text": text,
+                    "metadata": metadata or {},
+                    "output_contract": output_contract,
+                    "conversation_id": conversation_id,
+                    "reply_to_message_id": reply_to_message_id,
+                },
                 "detach_policy": {"mode": detach_mode},
             },
             headers=headers,

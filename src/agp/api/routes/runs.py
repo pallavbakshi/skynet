@@ -5,12 +5,13 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agp.api.helpers import _ok, _serialize
 from agp.db import get_db
 from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
-from agp.models import Agent, Run, utc_now
+from agp.models import Agent, Job, Message, Run, utc_now
 from agp.schemas import (
     CancelRunRequest,
     ClaimRunRequest,
@@ -42,6 +43,29 @@ from agp.services.runs import (
 )
 
 router = APIRouter()
+
+
+def _conversation_context(db: Session, *, message: Message) -> list[dict]:
+    if not message.conversation_id:
+        return []
+    messages = db.scalars(
+        select(Message)
+        .where(
+            Message.conversation_id == message.conversation_id,
+            Message.target_id == message.target_id,
+        )
+        .order_by(Message.created_at.asc())
+        .limit(20)
+    ).all()
+    return [
+        {
+            "message_id": item.message_id,
+            "text": item.text,
+            "created_at": item.created_at,
+            "role": str(item.metadata_json.get("role", "user")),
+        }
+        for item in messages
+    ]
 
 
 @router.post("/runs/claim")
@@ -76,8 +100,9 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
 
     return _ok({
         "claimed": True,
-        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json")),
+        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json", "conversation_id")),
         "message": {"message_id": result.message.message_id, "target_type": result.message.target_type, "target_id": result.message.target_id, "text": result.message.text, "metadata": result.message.metadata_json},
+        "conversation_context": _conversation_context(db, message=result.message),
         "run": _serialize(result.run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status")),
         "lease": _serialize(result.lease, ("lease_id", "run_id", "agent_id", "runtime_id", "fencing_token", "status", "expires_at")),
         "agent_id": agent.agent_id,

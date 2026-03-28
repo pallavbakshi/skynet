@@ -4,6 +4,141 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):
+    def test_send_with_conversation_id_persists_to_message_and_job(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_conv", "capabilities": ["python"]})
+
+        sent = self.agp.send(
+            target_type="agent",
+            target_id="agt_conv",
+            text="first turn",
+            conversation_id="conv_123",
+            idempotency_key="conv-send-1",
+        )
+
+        job = self.agp.get_job(sent["job_id"])
+        self.assertEqual(job["conversation_id"], "conv_123")
+
+        with SessionLocal() as db:
+            message = db.get(Message, job["message_id"])
+            self.assertIsNotNone(message)
+            assert message is not None
+            self.assertEqual(message.conversation_id, "conv_123")
+            self.assertIsNone(message.reply_to_message_id)
+
+    def test_claim_returns_conversation_context_with_prior_messages(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_conv_claim", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_conv_claim", "hostname": "localhost"})
+
+        first = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_conv_claim"},
+                "message": {
+                    "text": "hello",
+                    "metadata": {"role": "user"},
+                    "conversation_id": "conv_claim",
+                },
+            },
+            headers={"Idempotency-Key": "conv-claim-1"},
+        ).json()["data"]
+
+        with SessionLocal() as db:
+            first_job = db.get(Job, first["job_id"])
+            assert first_job is not None
+            first_job.status = "cancelled"
+            first_message = db.get(Message, first_job.message_id)
+            assert first_message is not None
+            second = Message(
+                message_id="msg_prior_agent",
+                target_type="agent",
+                target_id="agt_conv_claim",
+                text="previous assistant reply",
+                metadata_json={"role": "assistant"},
+                conversation_id="conv_claim",
+                reply_to_message_id=first_message.message_id,
+            )
+            db.add(second)
+            db.commit()
+
+        third = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_conv_claim"},
+                "message": {
+                    "text": "follow-up",
+                    "metadata": {},
+                    "conversation_id": "conv_claim",
+                    "reply_to_message_id": first["message_id"],
+                },
+            },
+            headers={"Idempotency-Key": "conv-claim-2"},
+        ).json()["data"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_conv_claim", "agent_id": "agt_conv_claim"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        payload = claim.json()["data"]
+        self.assertEqual(payload["job"]["job_id"], third["job_id"])
+        self.assertEqual(payload["job"]["conversation_id"], "conv_claim")
+        self.assertEqual([item["text"] for item in payload["conversation_context"]], ["hello", "previous assistant reply", "follow-up"])
+        self.assertEqual([item["role"] for item in payload["conversation_context"]], ["user", "assistant", "user"])
+
+    def test_reply_cli_uses_source_job_conversation_and_message(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_reply", "capabilities": ["python"]})
+        first = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_reply"},
+                "message": {"text": "seed", "metadata": {}, "conversation_id": "conv_reply"},
+            },
+            headers={"Idempotency-Key": "cli-reply-seed"},
+        ).json()["data"]
+
+        result = self._cli_invoke(["reply", first["job_id"], "second turn", "--detach"])
+        self.assertEqual(result.exit_code, 0)
+
+        jobs = self.agp.list_jobs(target_agent_id="agt_reply")["items"]
+        reply_job = next(item for item in jobs if item["job_id"] != first["job_id"])
+        self.assertEqual(reply_job["conversation_id"], "conv_reply")
+
+        with SessionLocal() as db:
+            reply_message = db.get(Message, reply_job["message_id"])
+            self.assertIsNotNone(reply_message)
+            assert reply_message is not None
+            self.assertEqual(reply_message.conversation_id, "conv_reply")
+            self.assertEqual(reply_message.reply_to_message_id, first["message_id"])
+
+    def test_send_without_conversation_id_auto_generates_one(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_conv_legacy", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_conv_legacy", "hostname": "localhost"})
+
+        sent = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_conv_legacy"},
+                "message": {"text": "legacy convo", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "conv-legacy-1"},
+        )
+        self.assertEqual(sent.status_code, 200)
+        payload = sent.json()["data"]
+
+        job = self.agp.get_job(payload["job_id"])
+        # Server auto-generates a conversation_id for new conversations
+        self.assertIsNotNone(job["conversation_id"])
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_conv_legacy", "agent_id": "agt_conv_legacy"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+        self.assertIsNotNone(claim_data["job"]["conversation_id"])
+        # Single-message conversation has context with just this one message
+        self.assertEqual(len(claim_data["conversation_context"]), 1)
+
     def test_job_with_output_contract_and_valid_json_result_completes(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_contract", "capabilities": ["python"]})
         self.client.post(

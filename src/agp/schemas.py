@@ -49,6 +49,8 @@ class SendMessagePayload(BaseModel):
     text: str
     metadata: dict = Field(default_factory=dict)
     output_contract: OutputContract | None = None
+    conversation_id: str | None = None
+    reply_to_message_id: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -246,6 +248,7 @@ class JobResponse(BaseModel):
     latest_run_id: str | None = None
     result_artifact_id: str | None = None
     output_contract_json: dict[str, Any] | None = None
+    conversation_id: str | None = None
 
 
 class RunResponse(BaseModel):

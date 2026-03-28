@@ -68,6 +68,8 @@ CREATE TABLE messages (
   target_id TEXT NOT NULL,
   text TEXT NOT NULL,
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  conversation_id TEXT,
+  reply_to_message_id TEXT,
   created_at TIMESTAMPTZ NOT NULL,
   CHECK (target_type IN ('agent', 'capability'))
 );
@@ -83,6 +85,7 @@ CREATE TABLE jobs (
   latest_run_id TEXT,
   result_artifact_id TEXT,
   output_contract_json JSONB,
+  conversation_id TEXT,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   CHECK (status IN ('accepted', 'queued', 'running', 'interrupt_requested', 'completed', 'failed', 'cancelled', 'blocked')),
@@ -252,8 +255,10 @@ CREATE TABLE system_metadata (
 );
 
 CREATE INDEX idx_jobs_status_created_at ON jobs(status, created_at);
+CREATE INDEX idx_jobs_conversation_id ON jobs(conversation_id);
 CREATE INDEX idx_jobs_target_agent_status_created_at ON jobs(target_agent_id, status, created_at);
 CREATE INDEX idx_jobs_target_queue_status_created_at ON jobs(target_queue, status, created_at);
+CREATE INDEX idx_messages_conversation_created_at ON messages(conversation_id, created_at);
 CREATE INDEX idx_queue_deliveries_queue_state_available_at ON queue_deliveries(target_queue, state, available_at);
 CREATE INDEX idx_queue_deliveries_job_id ON queue_deliveries(job_id);
 CREATE INDEX idx_runs_job_attempt ON runs(job_id, attempt);

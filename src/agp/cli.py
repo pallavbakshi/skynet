@@ -716,6 +716,7 @@ def send(
     timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
+    reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
 ) -> None:
     """Send a task to an agent with smart detach.
 
@@ -729,6 +730,7 @@ def send(
     if nudge_target:
         metadata["nudge_target"] = nudge_target
     parsed_output_contract: dict | None = None
+    conversation_id: str | None = None
     if output_contract is not None:
         try:
             parsed_output_contract = json.loads(output_contract)
@@ -742,6 +744,8 @@ def send(
             "agent", agent_id, task,
             metadata=metadata,
             output_contract=parsed_output_contract,
+            conversation_id=conversation_id,
+            reply_to_message_id=reply_to,
             idempotency_key=f"cli-{int(time.time())}",
         )
         job_id = result["job_id"]
@@ -762,6 +766,70 @@ def send(
 
         # Auto-detach — job still running
         _print_detached(job_id, agent_id)
+
+
+@app.command()
+def reply(
+    job_id: str = typer.Argument(..., help="Source job ID to reply to."),
+    task: str = typer.Argument(..., help="Reply text to send."),
+    server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
+    detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
+    timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
+    nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
+    output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
+) -> None:
+    """Reply to an existing job, preserving its conversation context."""
+    import time
+
+    metadata: dict = {"kind": "cli"}
+    if nudge_target:
+        metadata["nudge_target"] = nudge_target
+    parsed_output_contract: dict | None = None
+    if output_contract is not None:
+        try:
+            parsed_output_contract = json.loads(output_contract)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
+        if not isinstance(parsed_output_contract, dict):
+            raise typer.BadParameter("--output-contract must decode to a JSON object")
+
+    with _make_client(server_url) as client:
+        source_job = client.get_job(job_id)
+        message_id = source_job.get("message_id")
+        if not message_id:
+            typer.echo("source job is missing message_id", err=True)
+            raise typer.Exit(1)
+        conversation_id = source_job.get("conversation_id") or job_id
+        agent_id = source_job.get("target_agent_id")
+        if not agent_id:
+            typer.echo("source job is missing target_agent_id", err=True)
+            raise typer.Exit(1)
+
+        typer.echo(f"[..] Replying to {job_id} via {agent_id}...")
+        result = client.send(
+            "agent",
+            agent_id,
+            task,
+            metadata=metadata,
+            output_contract=parsed_output_contract,
+            conversation_id=conversation_id,
+            reply_to_message_id=message_id,
+            idempotency_key=f"cli-reply-{int(time.time())}",
+        )
+        new_job_id = result["job_id"]
+
+        if detach:
+            _print_detached(new_job_id, agent_id)
+            return
+
+        job, timed_out = _poll_until_done(client, new_job_id, timeout)
+        if not timed_out:
+            _print_job_result(job, client)
+            if job["status"] == "failed":
+                raise typer.Exit(1)
+            return
+
+        _print_detached(new_job_id, agent_id)
 
 
 # ── 2. wait ──────────────────────────────────────────────────────────

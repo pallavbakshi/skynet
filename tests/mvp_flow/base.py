@@ -40,7 +40,7 @@ from agp.control_plane import build_app
 
 from agp.db import Base, SessionLocal, engine, init_db
 
-from agp.models import Agent, Capability, Event, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
+from agp.models import Agent, Capability, Event, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
 
 from agp.enums import HealthStatus, RuntimeStatus
 
