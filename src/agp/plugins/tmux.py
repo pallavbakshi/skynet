@@ -57,10 +57,11 @@ def _provider_env() -> dict[str, str]:
         _ensure_codex_config(openai_base_url)
         env["OPENAI_BASE_URL"] = openai_base_url
     if openrouter_key:
-        # Pass the key so profiles with env_key = "OPENROUTER_API_KEY" can
-        # read it.  Do NOT auto-inject OPENAI_BASE_URL — that would silently
-        # override OAuth or direct-OpenAI setups.  Routing is the profile's job.
-        env["OPENROUTER_API_KEY"] = openrouter_key
+        # Only forward if a named codex profile is configured — the profile
+        # reads the key via env_key = "OPENROUTER_API_KEY".  Without a profile
+        # the runtime uses OAuth/default and the key is irrelevant noise.
+        if " -p " in f" {settings.codex_cli_command} ":
+            env["OPENROUTER_API_KEY"] = openrouter_key
 
     # ── Claude Code / Anthropic endpoint ─────────────────────────────
     # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code

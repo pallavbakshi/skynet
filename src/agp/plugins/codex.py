@@ -83,12 +83,12 @@ def _runtime_env_prefix() -> str:
         _ensure_codex_config(openai_base_url)
         env_pairs.append(("OPENAI_BASE_URL", openai_base_url))
     if openrouter_key:
-        env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
-        # Do NOT auto-inject OPENAI_API_KEY / OPENAI_BASE_URL from
-        # OPENROUTER_API_KEY.  Codex profiles that use OpenRouter configure
-        # their own base_url in ~/.codex/config.toml and read the key via
-        # env_key = "OPENROUTER_API_KEY".  Injecting the base URL would
-        # silently override OAuth or any other default provider setup.
+        # Only forward if a named profile is configured — the profile reads
+        # the key via env_key = "OPENROUTER_API_KEY".  Without a profile the
+        # runtime uses OAuth/default and the key is irrelevant noise.
+        from agp.config import settings as _settings
+        if " -p " in f" {_settings.codex_cli_command} ":
+            env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
     if anthropic_key:
         env_pairs.append(("ANTHROPIC_API_KEY", anthropic_key))
