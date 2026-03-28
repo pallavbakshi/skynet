@@ -23,20 +23,20 @@ from agp.runtime import (
 
 
 def _provider_env() -> dict[str, str]:
-    """Collect provider API keys, endpoint overrides, and runtime vars for tmux sessions.
+    """Collect provider API keys and endpoint overrides for tmux sessions.
 
-    Supports on-the-fly provider switching via env vars at ``docker run`` time:
+    Three explicit paths for codex — set exactly one:
 
-    Direct Anthropic (default):
-        ANTHROPIC_API_KEY=sk-ant-...
+    OAuth / default (no env vars needed):
+        Just run codex; it uses ~/.codex credentials.
 
-    Claude Code via OpenRouter:
-        ANTHROPIC_BASE_URL=https://openrouter.ai/api
-        ANTHROPIC_AUTH_TOKEN=sk-or-...
-        ANTHROPIC_API_KEY=""              (must be explicitly empty)
+    Direct OpenAI (API key):
+        OPENAI_API_KEY=sk-...
 
-    Codex via OpenRouter:
-        OPENROUTER_API_KEY=sk-or-...      (auto-sets OPENAI_BASE_URL + OPENAI_API_KEY)
+    OpenRouter (via codex profile):
+        OPENROUTER_API_KEY=sk-or-...
+        Use ``codex -p openrouter`` so the profile owns the base_url.
+        OPENROUTER_API_KEY is forwarded; no OPENAI_BASE_URL injection.
 
     Model overrides (Claude Code):
         ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.6
@@ -57,13 +57,10 @@ def _provider_env() -> dict[str, str]:
         _ensure_codex_config(openai_base_url)
         env["OPENAI_BASE_URL"] = openai_base_url
     if openrouter_key:
+        # Pass the key so profiles with env_key = "OPENROUTER_API_KEY" can
+        # read it.  Do NOT auto-inject OPENAI_BASE_URL — that would silently
+        # override OAuth or direct-OpenAI setups.  Routing is the profile's job.
         env["OPENROUTER_API_KEY"] = openrouter_key
-        if not openai_key:
-            env["OPENAI_API_KEY"] = openrouter_key
-        if not openai_base_url:
-            from agp.plugins.codex import _ensure_codex_config
-            _ensure_codex_config("https://openrouter.ai/api/v1")
-            env["OPENAI_BASE_URL"] = "https://openrouter.ai/api/v1"
 
     # ── Claude Code / Anthropic endpoint ─────────────────────────────
     # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code
