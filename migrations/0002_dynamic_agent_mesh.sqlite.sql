@@ -8,6 +8,10 @@
 DROP TABLE IF EXISTS agent_runtime_bindings;
 DROP TABLE IF EXISTS capability_pools;
 
+-- Add output_contract_json for upgrades from pre-contract 0001 schema.
+-- The migration runner handles "duplicate column" errors idempotently.
+ALTER TABLE jobs ADD COLUMN output_contract_json TEXT;
+
 -- ── Capture old agent-to-runtime linkage before we lose assigned_runtime_id ──
 -- Old agents may have assigned_runtime_id. Grab that mapping now so we
 -- can set agent_id on the new runtimes table later.

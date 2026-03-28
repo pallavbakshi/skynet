@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -20,6 +22,7 @@ from agp.schemas import (
     RecoveryRequest,
 )
 from agp.services._helpers import _require_agent, _require_job, _require_runtime
+from agp.services.exceptions import BadRequestError
 from agp.services.runs import (
     _active_lease_for_run,
     _assert_lease_owner,
@@ -35,6 +38,7 @@ from agp.services.runs import (
     recovering_run_service,
     resolve_claim_agent,
     resumed_run_service,
+    validate_output_contract_completion,
 )
 
 router = APIRouter()
@@ -72,7 +76,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
 
     return _ok({
         "claimed": True,
-        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status")),
+        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json")),
         "message": {"message_id": result.message.message_id, "target_type": result.message.target_type, "target_id": result.message.target_id, "text": result.message.text, "metadata": result.message.metadata_json},
         "run": _serialize(result.run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status")),
         "lease": _serialize(result.lease, ("lease_id", "run_id", "agent_id", "runtime_id", "fencing_token", "status", "expires_at")),
@@ -150,6 +154,31 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     job = _require_job(db, run.job_id)
     agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
+    try:
+        validate_output_contract_completion(job=job, artifacts=request.artifacts)
+    except BadRequestError as exc:
+        failure_artifacts = [
+            *request.artifacts,
+            SimpleNamespace(
+                role=ArtifactKind.FAILURE_EVIDENCE.value,
+                storage_ref=f"inline://validation-error/{run_id}",
+                content_type="text/plain",
+                checksum="",
+                size_bytes=0,
+            ),
+        ]
+        fail_run_service(
+            db,
+            run=run,
+            job=job,
+            agent=agent,
+            runtime=runtime,
+            lease=lease,
+            error=exc.detail,
+            artifacts=failure_artifacts,
+            summary={"validation_error": exc.detail},
+        )
+        raise
     result_artifact_id = complete_run_service(db, run=run, job=job, agent=agent, runtime=runtime, lease=lease, artifacts=request.artifacts, summary=request.summary)
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status, "result_artifact_id": result_artifact_id})
 

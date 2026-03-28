@@ -134,6 +134,7 @@ class Job(Base):
     max_retries: Mapped[int] = mapped_column(Integer, default=3)
     latest_run_id: Mapped[str | None] = mapped_column(String, nullable=True)
     result_artifact_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    output_contract_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

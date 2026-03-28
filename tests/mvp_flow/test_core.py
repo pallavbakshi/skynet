@@ -4,6 +4,227 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):
+    def test_job_with_output_contract_and_valid_json_result_completes(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_contract", "capabilities": ["python"]})
+        self.client.post(
+            "/runtimes/register",
+            json={"runtime_id": "rtm_contract", "hostname": "localhost"},
+        )
+
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_contract"},
+                "message": {
+                    "text": "return structured output",
+                    "metadata": {},
+                    "output_contract": {
+                        "format": "json",
+                        "json_schema": {
+                            "type": "object",
+                            "required": ["status"],
+                            "properties": {"status": {"type": "string"}},
+                        },
+                    },
+                },
+            },
+        )
+        self.assertEqual(send.status_code, 200)
+        job_id = send.json()["data"]["job_id"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_contract", "agent_id": "agt_contract"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+        self.assertEqual(
+            claim_data["job"]["output_contract_json"],
+            {
+                "format": "json",
+                "json_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {"status": {"type": "string"}},
+                },
+            },
+        )
+
+        run_id = claim_data["run"]["run_id"]
+        lease_id = claim_data["lease"]["lease_id"]
+        fencing_token = claim_data["lease"]["fencing_token"]
+        complete = self.client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": "rtm_contract",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.json": "result",
+                    },
+                    contents={"result.json": '{"status":"ok"}\n'},
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+
+        job = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json()["data"]["status"], "completed")
+        self.assertEqual(
+            job.json()["data"]["output_contract_json"],
+            claim_data["job"]["output_contract_json"],
+        )
+
+    def test_job_with_output_contract_and_invalid_json_result_fails_completion(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_contract_bad", "capabilities": ["python"]})
+        self.client.post(
+            "/runtimes/register",
+            json={"runtime_id": "rtm_contract_bad", "hostname": "localhost"},
+        )
+
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_contract_bad"},
+                "message": {
+                    "text": "return structured output",
+                    "metadata": {},
+                    "output_contract": {"format": "json", "json_schema": {"type": "object"}},
+                },
+            },
+        )
+        self.assertEqual(send.status_code, 200)
+        job_id = send.json()["data"]["job_id"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_contract_bad", "agent_id": "agt_contract_bad"},
+        ).json()["data"]
+
+        complete = self.client.post(
+            f"/runs/{claim['run']['run_id']}/complete",
+            json={
+                "runtime_id": "rtm_contract_bad",
+                "lease_id": claim["lease"]["lease_id"],
+                "fencing_token": claim["lease"]["fencing_token"],
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.json": "result",
+                    },
+                    contents={"result.json": '{"status": "ok"\n'},
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 400)
+        self.assertIn("result artifact is not valid JSON", complete.json()["error"]["message"])
+
+        job = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json()["data"]["status"], "failed")
+
+        trace = self.client.get(f"/observability/jobs/{job_id}/trace")
+        self.assertEqual(trace.status_code, 200)
+        self.assertEqual(trace.json()["data"]["runs"][-1]["status"], "failed")
+
+    def test_inline_send_with_output_contract_skips_contract_validation(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_inline_contract", "capabilities": ["python"]})
+
+        response = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_inline_contract"},
+                "message": {
+                    "text": "inline contract please",
+                    "metadata": {},
+                    "output_contract": {
+                        "format": "json",
+                        "json_schema": {
+                            "type": "object",
+                            "required": ["status"],
+                            "properties": {"status": {"type": "string"}},
+                        },
+                    },
+                },
+                "detach_policy": {"mode": "inline"},
+            },
+            headers={"Idempotency-Key": "inline-contract-flow-1"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["data"]
+        self.assertEqual(payload["kind"], "inline_result")
+        self.assertEqual(payload["status"], "completed")
+
+        job = self.client.get(f"/jobs/{payload['job_id']}").json()["data"]
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(
+            job["output_contract_json"],
+            {
+                "format": "json",
+                "json_schema": {
+                    "type": "object",
+                    "required": ["status"],
+                    "properties": {"status": {"type": "string"}},
+                },
+            },
+        )
+
+    def test_job_without_output_contract_remains_backward_compatible(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_no_contract", "capabilities": ["python"]})
+        self.client.post(
+            "/runtimes/register",
+            json={"runtime_id": "rtm_no_contract", "hostname": "localhost"},
+        )
+
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_no_contract"},
+                "message": {"text": "legacy flow", "metadata": {}},
+            },
+        )
+        self.assertEqual(send.status_code, 200)
+        job_id = send.json()["data"]["job_id"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_no_contract", "agent_id": "agt_no_contract"},
+        ).json()["data"]
+        self.assertIsNone(claim["job"]["output_contract_json"])
+
+        complete = self.client.post(
+            f"/runs/{claim['run']['run_id']}/complete",
+            json={
+                "runtime_id": "rtm_no_contract",
+                "lease_id": claim["lease"]["lease_id"],
+                "fencing_token": claim["lease"]["fencing_token"],
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+
+        job = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json()["data"]["status"], "completed")
+        self.assertIsNone(job.json()["data"]["output_contract_json"])
+
     def test_agent_targeted_job_completes(self) -> None:
         agent = self.client.post("/agents/up", json={"agent_id": "agt_one", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)

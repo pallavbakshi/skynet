@@ -86,6 +86,7 @@ CREATE TABLE jobs (
   max_retries INTEGER NOT NULL DEFAULT 3,
   latest_run_id TEXT,
   result_artifact_id TEXT,
+  output_contract_json TEXT,
   created_at TIMESTAMP NOT NULL,
   updated_at TIMESTAMP NOT NULL,
   CHECK (status IN ('accepted', 'queued', 'running', 'interrupt_requested', 'completed', 'failed', 'cancelled', 'blocked')),

@@ -155,7 +155,7 @@ def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     terminal_event = first_by_type.get("job.completed") or first_by_type.get("job.failed") or first_by_type.get("job.cancelled")
     terminal_at = terminal_event.created_at if terminal_event is not None else None
     return _ok({
-        "job": _serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "created_at", "updated_at")),
+        "job": _serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "created_at", "updated_at")),
         "runs": [_serialize(run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status", "started_at", "finished_at")) for run in db.scalars(select(Run).where(Run.job_id == job_id).order_by(Run.attempt.asc())).all()],
         "timeline": [{"event_id": e.event_id, "event_seq": e.event_seq, "event_type": e.event_type, "created_at": e.created_at, "run_id": e.run_id, "agent_id": e.agent_id, "runtime_id": e.runtime_id, "body": e.body_json} for e in events],
         "trace": {
@@ -218,7 +218,7 @@ def observability_triage(db: Session = Depends(get_db)) -> dict:
         entry = {"lease_id": lease.lease_id, "run_id": lease.run_id, "agent_id": lease.agent_id, "job_id": run.job_id if run else None, "job_status": job.status if job else None, "expires_at": lease.expires_at.isoformat() if lease.expires_at else None}
         active_by_runtime.setdefault(lease.runtime_id, []).append(entry)
     recent_failures = db.scalars(select(Job).where(Job.status == JobStatus.FAILED.value).order_by(Job.updated_at.desc()).limit(20)).all()
-    failure_items = [_serialize(job, ("job_id", "target_agent_id", "target_queue", "status", "retry_count", "latest_run_id", "updated_at")) for job in recent_failures]
+    failure_items = [_serialize(job, ("job_id", "target_agent_id", "target_queue", "status", "retry_count", "latest_run_id", "output_contract_json", "updated_at")) for job in recent_failures]
     problem_runtimes = db.scalars(select(Runtime).where(Runtime.status.in_(["offline", "degraded"]))).all()
     stale_items = [_serialize(rt, ("runtime_id", "hostname", "status", "health_status", "last_heartbeat_at")) for rt in problem_runtimes]
     # Agent summary: count by status (agents are ephemeral, capabilities self-declared)

@@ -40,9 +40,15 @@ class SendTarget(BaseModel):
     id: str
 
 
+class OutputContract(BaseModel):
+    format: str = "json"
+    json_schema: dict[str, Any] = Field(default_factory=dict)
+
+
 class SendMessagePayload(BaseModel):
     text: str
     metadata: dict = Field(default_factory=dict)
+    output_contract: OutputContract | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -239,6 +245,7 @@ class JobResponse(BaseModel):
     max_retries: int
     latest_run_id: str | None = None
     result_artifact_id: str | None = None
+    output_contract_json: dict[str, Any] | None = None
 
 
 class RunResponse(BaseModel):

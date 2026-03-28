@@ -51,7 +51,13 @@ def _execute_sql(session: Session, sql: str) -> None:
         stmt = stmt.strip()
         if not stmt or stmt.upper() in ("BEGIN", "COMMIT", "END"):
             continue
-        session.execute(text(stmt))
+        try:
+            session.execute(text(stmt))
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "duplicate column" in msg or "already exists" in msg:
+                continue  # idempotent: column/table already present
+            raise
 
 
 def _is_postgres() -> bool:

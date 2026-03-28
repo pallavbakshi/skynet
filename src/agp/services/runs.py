@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -95,6 +96,41 @@ def _validate_artifact_store_refs(artifacts: list) -> None:
     missing_refs = [item.storage_ref for item in artifacts if not _artifact_store().exists(storage_ref=item.storage_ref)]
     if missing_refs:
         raise BadRequestError(f"missing durable artifacts: {', '.join(missing_refs)}")
+
+
+def validate_output_contract_completion(*, job: Job, artifacts: list) -> None:
+    contract = job.output_contract_json or {}
+    if not contract or contract.get("format", "json") != "json":
+        return
+
+    result_artifact = next((item for item in artifacts if item.role == ArtifactKind.RESULT.value), None)
+    if result_artifact is None:
+        raise BadRequestError("missing result artifact for output contract validation")
+
+    raw_content = _artifact_store().read_text(storage_ref=result_artifact.storage_ref)
+    if raw_content is None:
+        raise BadRequestError(f"unable to read result artifact for output contract validation: {result_artifact.storage_ref}")
+
+    try:
+        payload = json.loads(raw_content)
+    except json.JSONDecodeError as exc:
+        raise BadRequestError(f"result artifact is not valid JSON: {exc.msg}") from exc
+
+    json_schema = contract.get("json_schema") or {}
+    if not json_schema:
+        return
+
+    try:
+        import jsonschema
+    except ImportError:
+        raise BadRequestError("json_schema validation requested but jsonschema library is not installed") from None
+
+    try:
+        jsonschema.validate(instance=payload, schema=json_schema)
+    except jsonschema.ValidationError as exc:
+        path = ".".join(str(part) for part in exc.absolute_path)
+        location = f" at {path}" if path else ""
+        raise BadRequestError(f"result artifact does not match output contract{location}: {exc.message}") from exc
 
 
 def _store_terminal_artifacts(

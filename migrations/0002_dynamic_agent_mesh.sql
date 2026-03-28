@@ -6,6 +6,8 @@
 
 BEGIN;
 
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS output_contract_json JSONB;
+
 -- ── Step 1: Add new columns BEFORE dropping old ones (enables data migration) ──
 
 ALTER TABLE agents ADD COLUMN IF NOT EXISTS capabilities JSONB NOT NULL DEFAULT '[]'::jsonb;

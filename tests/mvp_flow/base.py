@@ -123,12 +123,17 @@ class _FakeWebhookClient:
 
 
 class MvpFlowTestBase(unittest.TestCase):
-    def _materialize_terminal_artifacts(self, names_to_roles: dict[str, str]) -> list[dict]:
+    def _materialize_terminal_artifacts(
+        self,
+        names_to_roles: dict[str, str],
+        *,
+        contents: dict[str, str] | None = None,
+    ) -> list[dict]:
         base = Path(mkdtemp(prefix="agp-test-artifacts-"))
         refs: list[dict] = []
         for name, role in names_to_roles.items():
             path = base / name
-            content = f"{role}:{name}\n"
+            content = (contents or {}).get(name, f"{role}:{name}\n")
             path.write_text(content, encoding="utf-8")
             refs.append(
                 {

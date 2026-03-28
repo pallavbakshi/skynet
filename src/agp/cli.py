@@ -11,6 +11,7 @@ All server-side imports are deferred to command bodies so that
 ``agp.client`` without pulling in uvicorn/sqlalchemy/pydantic-settings.
 """
 
+import json
 import os
 
 import typer
@@ -714,6 +715,7 @@ def send(
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
     timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
+    output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
 ) -> None:
     """Send a task to an agent with smart detach.
 
@@ -726,11 +728,20 @@ def send(
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
+    parsed_output_contract: dict | None = None
+    if output_contract is not None:
+        try:
+            parsed_output_contract = json.loads(output_contract)
+        except json.JSONDecodeError as exc:
+            raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
+        if not isinstance(parsed_output_contract, dict):
+            raise typer.BadParameter("--output-contract must decode to a JSON object")
     with _make_client(server_url) as client:
         typer.echo(f"[..] Dispatching to {agent_id}...")
         result = client.send(
             "agent", agent_id, task,
             metadata=metadata,
+            output_contract=parsed_output_contract,
             idempotency_key=f"cli-{int(time.time())}",
         )
         job_id = result["job_id"]

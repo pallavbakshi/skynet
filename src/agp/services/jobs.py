@@ -22,6 +22,7 @@ from agp.models import (
     Run,
     utc_now,
 )
+from agp.schemas import OutputContract
 from agp.services._helpers import (
     _capability_queue_for,
     _ensure_inline_runtime,
@@ -105,6 +106,7 @@ def create_and_enqueue_job(
     target_id: str,
     text: str,
     metadata: dict,
+    output_contract: OutputContract | None = None,
 ) -> tuple[Message, Job]:
     """Create a message and queued job — the core dispatch path."""
     if target_type == "agent":
@@ -137,6 +139,7 @@ def create_and_enqueue_job(
         ),
         status=JobStatus.QUEUED.value,
         max_retries=3,
+        output_contract_json=output_contract.model_dump() if output_contract else None,
     )
     db.add(job)
     db.flush()
@@ -193,6 +196,8 @@ def execute_inline(db: Session, *, job: Job, agent, message: Message) -> SendRes
         _write_control_plane_artifact(job_id=job.job_id, name="exec.txt", content="inline-exec\n"),
         _write_control_plane_artifact(job_id=job.job_id, name="result.txt", content=f"inline result for {message.text}\n"),
     ]
+    # Inline execution renders control-plane template text rather than agent-produced
+    # structured output, so output contracts do not apply on this path.
     result_artifact_id, _ = _store_terminal_artifacts(db, job_id=job.job_id, run_id=run.run_id, artifacts=artifacts)
     run.status = RunStatus.COMPLETED.value
     run.finished_at = utc_now()
@@ -255,6 +260,7 @@ def execute_handoff(
             target_queue=_queue_for_target(target.type, target.id) if target.type == "agent" else _capability_queue_for(db, target.id),
             status=JobStatus.QUEUED.value,
             max_retries=3,
+            output_contract_json=message_payload.output_contract.model_dump() if message_payload.output_contract else None,
         )
         db.add(child)
         db.flush()

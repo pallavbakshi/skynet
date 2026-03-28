@@ -33,3 +33,8 @@ skyops = "skyops.cli:app"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agp", "src/skyops"]
+
+[dependency-groups]
+dev = [
+    "jsonschema>=4.26.0",
+]
