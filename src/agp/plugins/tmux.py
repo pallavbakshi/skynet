@@ -22,6 +22,31 @@ from agp.runtime import (
 )
 
 
+def _ensure_codex_config(base_url: str) -> None:
+    """Best-effort: set ``openai_base_url`` in ``~/.codex/config.toml``.
+
+    Only used on the direct-OpenAI path (OPENAI_BASE_URL set, no profile).
+    Skipped silently if the config can't be parsed — the env var fallback
+    still works.
+    """
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        return
+    config_path = Path.home() / ".codex" / "config.toml"
+    if not config_path.exists():
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(f'openai_base_url = "{base_url}"\n')
+        return
+    try:
+        existing = tomllib.loads(config_path.read_text())
+    except Exception:
+        return
+    if existing.get("openai_base_url") == base_url:
+        return
+    # Don't rewrite — codex owns its config format; env var is the override.
+
+
 def _provider_env() -> dict[str, str]:
     """Collect provider API keys and endpoint overrides for tmux sessions.
 
@@ -53,7 +78,6 @@ def _provider_env() -> dict[str, str]:
     if openai_key:
         env["OPENAI_API_KEY"] = openai_key
     if openai_base_url:
-        from agp.plugins.codex import _ensure_codex_config
         _ensure_codex_config(openai_base_url)
         env["OPENAI_BASE_URL"] = openai_base_url
     if openrouter_key:
@@ -182,6 +206,20 @@ class TmuxHost(TerminalHost):
                 self._run(["set-environment", "-t", name, key, val], allow_failure=True)
             except Exception:
                 pass  # best-effort; test mocks may not support set-environment
+        # Explicitly unset provider vars that leak from the tmux server env
+        # but were intentionally not forwarded (e.g. OPENROUTER_API_KEY without
+        # a -p profile).  Without this, codex auto-selects providers based on
+        # stale keys inherited from the server process.
+        _PROVIDER_KEYS = (
+            "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+            "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
+        )
+        unsets = [k for k in _PROVIDER_KEYS if k not in provider_env]
+        if unsets:
+            try:
+                self._run(["send-keys", "-t", name, f"unset {' '.join(unsets)}", "Enter"], allow_failure=True)
+            except Exception:
+                pass
         if provider_env:
             exports = " ".join(f'{k}="{v}"' for k, v in provider_env.items())
             try:

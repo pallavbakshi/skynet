@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shlex
-from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
@@ -44,56 +43,6 @@ _NOISE_INFIXES = (
 )
 
 
-def _ensure_codex_config(base_url: str) -> None:
-    """Best-effort: set ``openai_base_url`` in ``~/.codex/config.toml``.
-
-    Codex >= 0.116 reads the base URL from config.toml.  We only touch
-    the file when a non-profile env-var flow needs it.  If the existing
-    config can't be parsed (codex writes non-strict TOML), we skip
-    silently — the env var will still work as a fallback.
-    """
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        return
-    config_dir = Path.home() / ".codex"
-    config_path = config_dir / "config.toml"
-    if not config_path.exists():
-        config_dir.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(f'openai_base_url = "{base_url}"\n')
-        return
-    try:
-        existing = tomllib.loads(config_path.read_text())
-    except Exception:
-        return  # codex writes non-strict TOML; don't corrupt the file
-    if existing.get("openai_base_url") == base_url:
-        return
-    # Don't rewrite the file — codex owns its config format.
-    # The env var OPENAI_BASE_URL serves as the runtime override.
-
-
-def _runtime_env_prefix() -> str:
-    env_pairs: list[tuple[str, str]] = []
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-    openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if openai_key:
-        env_pairs.append(("OPENAI_API_KEY", openai_key))
-    if openai_base_url:
-        _ensure_codex_config(openai_base_url)
-        env_pairs.append(("OPENAI_BASE_URL", openai_base_url))
-    if openrouter_key:
-        # Only forward if a named profile is configured — the profile reads
-        # the key via env_key = "OPENROUTER_API_KEY".  Without a profile the
-        # runtime uses OAuth/default and the key is irrelevant noise.
-        from agp.config import settings as _settings
-        if " -p " in f" {_settings.codex_cli_command} ":
-            env_pairs.append(("OPENROUTER_API_KEY", openrouter_key))
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key:
-        env_pairs.append(("ANTHROPIC_API_KEY", anthropic_key))
-    return "".join(f"{key}={shlex.quote(val)} " for key, val in env_pairs if val)
-
 
 def _is_noise_line(line: str) -> bool:
     s = line.strip()
@@ -110,6 +59,16 @@ def _is_noise_line(line: str) -> bool:
     return False
 
 
+def _collect_bullet_lines(lines: list[str]) -> list[str]:
+    """Return the text content of all •-prefixed lines."""
+    result = []
+    for line in lines:
+        s = line.strip()
+        if s.startswith(_RESPONSE_MARKER):
+            result.append(s.removeprefix(_RESPONSE_MARKER).strip())
+    return result
+
+
 def _clean_codex_tui_output(text: str) -> str:
     """Extract the last Codex response from raw TUI output.
 
@@ -119,42 +78,13 @@ def _clean_codex_tui_output(text: str) -> str:
     """
     stripped = _strip_ansi(text)
     lines = stripped.splitlines()
-
-    # Find turns: each turn starts with a › prompt line.
-    turns: list[dict[str, Any]] = []
-    current_prompt = ""
-    response_lines: list[str] = []
-    in_response = False
-
-    for line in lines:
-        s = line.strip()
-        if s.startswith(_PROMPT_MARKER):
-            if in_response and response_lines:
-                turns.append({"prompt": current_prompt, "response": list(response_lines)})
-            current_prompt = s.removeprefix(_PROMPT_MARKER).strip()
-            response_lines = []
-            in_response = False
-        elif s.startswith(_RESPONSE_MARKER):
-            in_response = True
-            content = s.removeprefix(_RESPONSE_MARKER).strip()
-            if content and not _is_noise_line(content):
-                response_lines.append(content)
-        elif in_response and not _is_noise_line(line):
-            response_lines.append(s)
-
-    # Capture the last open turn.
-    if in_response and response_lines:
-        turns.append({"prompt": current_prompt, "response": list(response_lines)})
+    turns = _parse_codex_turns(text)
 
     if not turns:
         # Fallback: collect all •-prefixed lines as response content.
-        response_lines = []
-        for line in lines:
-            s = line.strip()
-            if s.startswith(_RESPONSE_MARKER):
-                response_lines.append(s.removeprefix(_RESPONSE_MARKER).strip())
-        if response_lines:
-            return "\n".join(response_lines)
+        bullet_lines = _collect_bullet_lines(lines)
+        if bullet_lines:
+            return "\n".join(bullet_lines)
         # Last resort: strip noise and return whatever is left.
         fallback = [ln.rstrip() for ln in lines if not _is_noise_line(ln)]
         while fallback and not fallback[0]:
@@ -167,17 +97,10 @@ def _clean_codex_tui_output(text: str) -> str:
     for turn in reversed(turns):
         content = [ln for ln in turn["response"] if ln.strip()]
         if content:
-            while content and not content[-1]:
-                content.pop()
             return "\n".join(content)
 
     # All turns were noise — fall back to collecting all • lines.
-    response_lines = []
-    for line in lines:
-        s = line.strip()
-        if s.startswith(_RESPONSE_MARKER):
-            response_lines.append(s.removeprefix(_RESPONSE_MARKER).strip())
-    return "\n".join(response_lines)
+    return "\n".join(_collect_bullet_lines(lines))
 
 
 def _parse_codex_turns(text: str) -> list[dict[str, Any]]:
@@ -292,7 +215,7 @@ class CodexAdapter(AgentAdapter):
             host.send_text(session, self.cli_command, enter=True)
             # Poll the visible screen (alternate buffer) to detect gate
             # prompts, CLI exit, and the Codex ready state.
-            deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
+            deadline = monotonic() + (self.idle_timeout_seconds if self.idle_timeout_seconds > 0 else 60.0)
             while monotonic() < deadline:
                 sleep(self.idle_poll_seconds)
                 screen = _strip_ansi(host.read_visible(session))
@@ -335,7 +258,7 @@ class CodexAdapter(AgentAdapter):
         "press enter to continue",
         "yes, continue",
         "approaching rate limits",
-        "introducing gpt-5.4",
+        "introducing gpt-",
         "try new model",
         "use existing model",
         "switch to gpt-",
@@ -344,9 +267,10 @@ class CodexAdapter(AgentAdapter):
 
     # Preferred default choices for numbered dialog menus.
     # Maps a recognisable phrase to the number key to send.
+    # Iteration order matters — first match wins when multiple phrases overlap.
     _GATE_CHOICES = {
         "approaching rate limits": "3",  # "Keep current model (never show again)"
-        "introducing gpt-5.4": "2",  # Use existing model
+        "introducing gpt-": "2",  # Use existing model
         "try new model": "2",
         "switch to gpt-": "3",
     }
@@ -488,11 +412,11 @@ class CodexAdapter(AgentAdapter):
                 continue
             if _is_noise_line(raw):
                 continue
-            meaningful.append(s.lower())
+            meaningful.append(s)
         if not meaningful:
             return False
         last = meaningful[-1]
-        if not last.startswith(_PROMPT_MARKER.lower()):
+        if not last.startswith(_PROMPT_MARKER):
             return False
         answered = [turn for turn in turns if turn["response"]]
         if len(answered) > baseline_answered_turns:
@@ -558,10 +482,10 @@ class CodexAdapter(AgentAdapter):
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
         if host.kind == "tmux":
-            # Inline env vars so the shell in the tmux pane has them
-            # (tmux set-environment only affects new panes, not existing shells).
-            env_prefix = _runtime_env_prefix()
-            host.send_text(session, f"{env_prefix}{self.cli_command} {shlex.quote(prompt)}", enter=True)
+            # Provider env vars are already exported into the shell by
+            # get_or_create_session (called via reset_session above), so
+            # codex inherits them without inline key interpolation.
+            host.send_text(session, f"{self.cli_command} {shlex.quote(prompt)}", enter=True)
         else:
             host.send_text(session, prompt, enter=True)
 
@@ -570,35 +494,39 @@ class CodexAdapter(AgentAdapter):
 
         # Verify Codex produced a response, and auto-dismiss any gate prompts
         # (including first-run onboarding) that appear mid-run.
-        timeout = self.idle_timeout_seconds or 180.0
+        # 0.0 means "use default"; any positive value caps the run.
+        timeout = self.idle_timeout_seconds if self.idle_timeout_seconds > 0 else 180.0
         deadline = monotonic() + timeout
         prev_screen = ""
         unchanged = 0
-        was_busy = False
+        tui_active = False  # True once the TUI has drawn at least one frame
         dispatch_time = monotonic()
         while monotonic() < deadline:
+            sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
             snap = self._normalise_visible_screen(screen)
             # Only check for shell return after the TUI has had time to
             # render.  During the first few seconds the old shell prompt
             # may still be visible in scrollback while the TUI boots.
-            startup_settled = was_busy or (monotonic() - dispatch_time > 5.0)
+            startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
             if startup_settled and self._looks_like_shell_returned(screen):
                 raise RecoverableExecutionError("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
-                host.send_text(session, self._gate_response(screen), enter=True)
+                # Only dismiss if the screen changed since the last dismiss
+                # to avoid spamming Enter on an unrecognised persistent dialog.
+                if snap != prev_screen:
+                    host.send_text(session, self._gate_response(screen), enter=True)
                 prev_screen = snap
                 unchanged = 0
-                was_busy = True
-                sleep(self.idle_poll_seconds)
+                tui_active = True
                 continue
 
             if snap == prev_screen:
                 unchanged += 1
             else:
                 unchanged = 0
-                was_busy = True
+                tui_active = True
             prev_screen = snap
 
             if self._looks_like_completed_turn(
@@ -608,9 +536,11 @@ class CodexAdapter(AgentAdapter):
             ):
                 break
 
-            if _RESPONSE_MARKER in screen and unchanged >= max(1, self.idle_after - 1):
+            # Secondary idle break: response marker visible and screen stable.
+            # Gate on tui_active so a baseline • from a prior turn can't
+            # trigger an early exit before the new response starts.
+            if tui_active and _RESPONSE_MARKER in screen and unchanged >= max(1, self.idle_after - 1):
                 break
-            sleep(self.idle_poll_seconds)
         else:
             if not prev_screen.strip():
                 raise RecoverableExecutionError("codex tui produced no output after dispatch")

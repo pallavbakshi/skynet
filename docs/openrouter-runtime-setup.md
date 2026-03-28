@@ -163,21 +163,15 @@ correctly.
 
 ### Secrets visible in tmux pane transcript
 
-The current codex adapter injects `OPENROUTER_API_KEY=sk-or-...` inline in
-the shell command sent to tmux. This means the key appears in:
+Previously, the codex adapter injected API keys inline in the shell command
+sent to tmux (via `_runtime_env_prefix()`), which caused keys to appear in
+tmux scrollback and uploaded transcript artifacts.
 
-- tmux scrollback (`tmux capture-pane`)
-- The `transcript_log` artifact uploaded to the control plane
-
-**Mitigation**: The tmux host plugin sets env vars via `tmux set-environment`
-on session creation, so Codex can read them from the tmux environment. The
-inline prefix in `codex.py:_runtime_env_prefix()` is a fallback for cases
-where `set-environment` doesn't propagate (e.g. nested shells). If your
-setup works without the inline prefix, you can set
-`AGP_CODEX_CLI_COMMAND="codex -m MODEL"` without the env prefix.
-
-Long-term fix: move all secrets to tmux session environment only and strip
-them from transcript artifacts before upload.
+**This is fixed.** Provider env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENROUTER_API_KEY`) are now exported into the tmux session shell by
+`TmuxHost.get_or_create_session` via `tmux set-environment` + a single
+`export` command, and inherited by the Codex process without appearing in
+the launch command string.
 
 ### WezTerm pane spawns on remote SSH host
 

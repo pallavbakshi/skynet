@@ -489,7 +489,7 @@ All six scenarios confirmed working on 2026-03-28 with `codex -p openrouter` and
 | Variable | Default | Override example |
 |----------|---------|-----------------|
 | `AGP_REMOTE_SERVER_URL` | `http://your-server.example.com:7860` | `make runtime-remote AGP_REMOTE_SERVER_URL=http://other:7860` |
-| `CODEX_PROFILE` | `openrouter` | `make runtime CODEX_PROFILE=openai` |
+| `CODEX_PROFILE` | `openrouter` | `make runtime CODEX_PROFILE=apikey` |
 | `AGP_RUNTIME_AGENT_ID` | `agt_local` | `make runtime AGP_RUNTIME_AGENT_ID=my-agent` |
 | `AGP_RUNTIME_CAPS` | `code,python` | `make runtime AGP_RUNTIME_CAPS=code,rust,python` |
 

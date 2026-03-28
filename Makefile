@@ -55,7 +55,7 @@ _RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),htt
 
 # Codex profile and launch command.
 #   make runtime                        — OpenRouter (default)
-#   make runtime CODEX_PROFILE=openai   — direct OpenAI via OPENAI_API_KEY
+#   make runtime CODEX_PROFILE=apikey   — direct OpenAI via OPENAI_API_KEY
 #   make runtime CODEX_PROFILE=         — OAuth / codex default credentials
 CODEX_PROFILE          ?= openrouter
 AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) -a never -s danger-full-access
@@ -78,13 +78,16 @@ endef
 
 # ── Install targets ──────────────────────────────────────────────────
 
-.PHONY: install-server install-runtime
+.PHONY: install-server install-runtime install-docker
 
 install-server: ## Install CP + infra + runtime deps (any OS)
 	@bash scripts/install-server.sh
 
 install-runtime: ## Install runtime only — no infra (any OS)
 	@bash scripts/install-runtime.sh
+
+install-docker: ## Install Docker Engine + Compose for `make up`
+	@bash scripts/install-docker.sh
 
 # ── Local bare-metal targets (SQLite, no infra) ──────────────────────
 
