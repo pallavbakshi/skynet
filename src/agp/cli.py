@@ -851,6 +851,147 @@ def reply(
         _print_detached(new_job_id, agent_id)
 
 
+# ── 1c. review ──────────────────────────────────────────────────────────
+
+
+@app.command(name="review")
+def review_cmd(
+    job_id: str = typer.Argument(..., help="Source job ID whose result should be reviewed."),
+    reviewer_id: str = typer.Argument(..., help="Agent ID of the reviewer."),
+    max_rounds: int = typer.Option(3, "--max-rounds", help="Maximum review rounds."),
+    dev_id: str = typer.Option(None, "--dev", help="Agent ID of the developer (defaults to the source job's agent)."),
+    prompt: str = typer.Option("Review the following output for correctness, edge cases, and security. Write findings to /tmp/review-findings.md with APPROVED or CHANGES_REQUESTED at the top.", "--prompt", help="Review prompt template."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    timeout_per_round: int = typer.Option(120, "--timeout", help="Seconds to wait per round."),
+) -> None:
+    """Run an automated review loop: reviewer reviews, dev fixes, reviewer re-reviews.
+
+    Uses conversation threading and output contracts to structure the loop.
+    Terminates when the reviewer approves or max_rounds is reached.
+    """
+    import json
+    import time
+
+    with _make_client(server_url) as client:
+        source_job = client.get_job(job_id)
+        source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
+        dev_agent = dev_id or source_agent
+        conversation_id = source_job.get("conversation_id")
+
+        for round_num in range(1, max_rounds + 1):
+            typer.echo(f"[review] Round {round_num}/{max_rounds}")
+
+            if round_num == 1:
+                # First round: send source job result to reviewer
+                result_artifact_id = source_job.get("result_artifact_id")
+                review_text = prompt
+                if result_artifact_id:
+                    artifact = client.fetch_artifact(result_artifact_id, content=True)
+                    review_text = f"{prompt}\n\n---\nSource job {job_id} result:\n```\n{artifact.get('content', '')}\n```"
+            else:
+                # Subsequent rounds: send dev's fixes to reviewer
+                review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
+
+            output_contract = {
+                "format": "json",
+                "json_schema": {
+                    "type": "object",
+                    "required": ["verdict", "summary"],
+                    "properties": {
+                        "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
+                        "summary": {"type": "string"},
+                        "findings": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                                    "description": {"type": "string"},
+                                    "file": {"type": "string"},
+                                    "line": {"type": "integer"},
+                                },
+                            },
+                        },
+                    },
+                },
+            }
+
+            typer.echo(f"[review] Sending to reviewer {reviewer_id}...")
+            review_result = client.send(
+                "agent", reviewer_id, review_text,
+                conversation_id=conversation_id,
+                output_contract=output_contract,
+                idempotency_key=f"review-{job_id}-r{round_num}",
+            )
+            review_job_id = review_result["job_id"]
+            review_job, timed_out = _poll_until_done(client, review_job_id, timeout_per_round)
+
+            if timed_out:
+                typer.echo(f"[review] Round {round_num} timed out waiting for reviewer.")
+                _print_detached(review_job_id, reviewer_id)
+                return
+
+            if review_job["status"] == "failed":
+                typer.echo(f"[review] Round {round_num} reviewer job failed.")
+                _print_job_result(review_job, client)
+                raise typer.Exit(1)
+
+            # Parse reviewer output
+            review_artifact_id = review_job.get("result_artifact_id")
+            if not review_artifact_id:
+                typer.echo("[review] No result artifact from reviewer.")
+                raise typer.Exit(1)
+
+            review_artifact = client.fetch_artifact(review_artifact_id, content=True)
+            content = review_artifact.get("content", "")
+
+            # Try to parse structured output
+            verdict = "changes_requested"
+            try:
+                structured = json.loads(content)
+                verdict = structured.get("verdict", "changes_requested")
+                summary = structured.get("summary", "")
+            except json.JSONDecodeError:
+                summary = content[:500]
+
+            typer.echo(f"[review] Verdict: {verdict}")
+            typer.echo(f"[review] Summary: {summary[:200]}")
+
+            if verdict == "approved":
+                typer.echo(f"[review] ✅ Approved after {round_num} round(s).")
+                return
+
+            if round_num < max_rounds:
+                # Send findings to dev for fixing
+                typer.echo(f"[review] Sending findings to dev {dev_agent}...")
+                fix_text = (
+                    f"The reviewer found issues that need fixing (round {round_num}):\n\n"
+                    f"{content}\n\n"
+                    f"Please address all findings and ensure the code is correct."
+                )
+                fix_result = client.send(
+                    "agent", dev_agent, fix_text,
+                    conversation_id=conversation_id,
+                    idempotency_key=f"fix-{job_id}-r{round_num}",
+                )
+                fix_job_id = fix_result["job_id"]
+                fix_job, fix_timed_out = _poll_until_done(client, fix_job_id, timeout_per_round)
+                if fix_timed_out:
+                    typer.echo("[review] Dev fix timed out.")
+                    _print_detached(fix_job_id, dev_agent)
+                    return
+                if fix_job["status"] == "failed":
+                    typer.echo("[review] Dev fix job failed.")
+                    _print_job_result(fix_job, client)
+                    raise typer.Exit(1)
+
+                # Update source_job reference for next round's context
+                source_job = fix_job
+                job_id = fix_job_id
+
+        typer.echo(f"[review] Max rounds ({max_rounds}) reached without approval.")
+
+
 # ── 2. wait ──────────────────────────────────────────────────────────
 
 
