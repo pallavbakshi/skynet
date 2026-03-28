@@ -21,9 +21,13 @@ from agp.logs import append_jsonl_log
 _logger = logging.getLogger(__name__)
 
 from agp.runtime._types import (
+    AuthFailure,
     ArtifactPayload,
+    BootstrapFailure,
     ExecutionResult,
+    ExecutionTimeout,
     InterruptRequested,
+    PaneDied,
     RecoverableExecutionError,
     SessionHealth,
     TerminalSession,
@@ -448,23 +452,29 @@ class RuntimeSupervisor:
                         fencing_token=lease["fencing_token"],
                         extend_seconds=lease_ttl_seconds,
                     )
-                    if not self.host.session_exists(session):
+                    if isinstance(exc, (AuthFailure, BootstrapFailure)):
+                        # Auth / bootstrap failures won't resolve by retrying
+                        # the same session — re-raise to exhaust the budget
+                        # and report the real cause.
+                        raise
+                    if isinstance(exc, PaneDied) or not self.host.session_exists(session):
                         session = self.host.get_or_create_session(
                             agent_id=claimed["agent_id"],
                             workspace_ref=session.workspace_ref,
                         )
                         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
-                    self.adapter.recover(
-                        host=self.host,
-                        session=session,
-                        claimed=claimed,
-                        attempt=attempts + 1,
-                        error=exc,
-                        supervisor=self,
-                    )
-                    # Re-bootstrap if recover() cleared the bootstrap flag
-                    # (e.g. Codex TUI crashed and needs re-launch).
-                    self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
+                    else:
+                        self.adapter.recover(
+                            host=self.host,
+                            session=session,
+                            claimed=claimed,
+                            attempt=attempts + 1,
+                            error=exc,
+                            supervisor=self,
+                        )
+                        # Re-bootstrap if recover() cleared the bootstrap flag
+                        # (e.g. Codex TUI crashed and needs re-launch).
+                        self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
                     self.client.resumed(
                         run_id=run["run_id"],
                         lease_id=lease["lease_id"],

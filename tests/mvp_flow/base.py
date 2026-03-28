@@ -69,6 +69,7 @@ from agp.runtime import (
     DefaultAgentAdapter,
     InProcessTerminalHost,
     OutputCursor,
+    PaneDied,
     RecoverableExecutionError,
     RuntimeClient,
     RuntimeIdentity,

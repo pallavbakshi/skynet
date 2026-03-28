@@ -167,6 +167,13 @@ class TmuxHost(TerminalHost):
             raise RuntimeError(f"tmux command failed: {' '.join(args)} :: {stderr}")
         return completed.stdout or ""
 
+    def _get_pane_tty(self, session: TerminalSession) -> str | None:
+        tty = self._run(
+            ["display-message", "-t", session.session_id, "-p", "#{pane_tty}"],
+            allow_failure=True,
+        ).strip()
+        return tty or None
+
     def _session_name(self, agent_id: str) -> str:
         return f"{self.session_prefix}-{agent_id}"
 
@@ -429,6 +436,17 @@ class TmuxHost(TerminalHost):
             except RuntimeError:
                 return False
             snap = _normalise(raw)
+            if self.shell_idle(session):
+                sleep(min(poll_seconds, 0.25))
+                try:
+                    confirm_raw = self._run([
+                        "capture-pane", "-t", session.session_id, "-p", "-J",
+                        "-S", str(-check_lines),
+                    ])
+                except RuntimeError:
+                    return False
+                if _normalise(confirm_raw) == snap:
+                    return True
             if snap == prev:
                 unchanged += 1
                 if was_busy and unchanged >= idle_after:

@@ -61,6 +61,22 @@ class RecoverableExecutionError(Exception):
     """Raised when execution should enter bounded local recovery."""
 
 
+class PaneDied(RecoverableExecutionError):
+    """Raised when the terminal pane or foreground CLI died."""
+
+
+class ExecutionTimeout(RecoverableExecutionError):
+    """Raised when execution or readiness polling timed out."""
+
+
+class AuthFailure(RecoverableExecutionError):
+    """Raised when execution is blocked on authentication."""
+
+
+class BootstrapFailure(RecoverableExecutionError):
+    """Raised when adapter bootstrap fails in a known way."""
+
+
 class AdapterExecutionFailed(Exception):
     """Raised when an adapter observed a terminal task-level failure."""
 

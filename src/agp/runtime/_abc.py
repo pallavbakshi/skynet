@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import subprocess
 from abc import ABC, abstractmethod
+from os.path import basename
 from time import sleep
 from typing import Any
 
@@ -77,6 +79,58 @@ class TerminalHost(ABC):
     @abstractmethod
     def health(self, session: TerminalSession) -> SessionHealth:
         raise NotImplementedError
+
+    # ── Process-based idle detection ───────────────────────────────────
+
+    _SHELL_NAMES = frozenset({
+        "sh", "ash", "bash", "dash", "fish", "ksh", "mksh", "pdksh",
+        "tcsh", "zsh", "nu",
+    })
+
+    def _get_pane_tty(self, session: TerminalSession) -> str | None:  # noqa: ARG002
+        """Return the TTY path for the session's pane.
+
+        Subclasses should override this — the default returns None
+        (disabling process-based idle detection).
+        """
+        return None
+
+    def _foreground_command(self, session: TerminalSession) -> str | None:
+        """Return the foreground process command via ps, or None.
+
+        On BSD/macOS ``+`` marks all members of the foreground process
+        group, so both the shell and its child can have ``+``.  We take
+        the *last* matching entry because ``ps`` lists parent before child,
+        and the deepest child is the actual foreground process.
+        """
+        tty = self._get_pane_tty(session)
+        if not tty:
+            return None
+        tty_name = tty.removeprefix("/dev/")
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "state=", "-o", "comm=", "-t", tty_name],
+                capture_output=True, text=True, check=False,
+            )
+        except (FileNotFoundError, OSError):
+            return None
+        if completed.returncode != 0:
+            return None
+        fg_cmd = None
+        for line in completed.stdout.splitlines():
+            parts = line.split(None, 1)
+            if len(parts) == 2 and "+" in parts[0]:
+                fg_cmd = parts[1].strip()
+        return fg_cmd
+
+    def shell_idle(self, session: TerminalSession) -> bool:
+        """Return True when the foreground process is an interactive shell."""
+        cmd = self._foreground_command(session)
+        if not cmd:
+            return False
+        # Normalise: login shells appear as "-zsh", "-bash" etc.
+        name = basename(cmd).lower().lstrip("-")
+        return name in self._SHELL_NAMES
 
     def wait_for_idle(
         self,

@@ -8,7 +8,8 @@ from typing import Any
 
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
-    RecoverableExecutionError, TerminalHost, TerminalSession,
+    BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
+    TerminalHost, TerminalSession,
     _strip_ansi,
 )
 
@@ -203,7 +204,7 @@ class CodexAdapter(AgentAdapter):
                 return
         health = host.health(session)
         if not health.healthy:
-            raise RecoverableExecutionError(f"session unhealthy before bootstrap: {health.reason}")
+            raise BootstrapFailure(f"session unhealthy before bootstrap: {health.reason}")
         if self.tui_mode:
             # On this Linux host, interactive Codex launched inside tmux accepts the
             # prompt visually but does not progress when the prompt is injected later
@@ -230,7 +231,7 @@ class CodexAdapter(AgentAdapter):
                 if self._looks_like_codex_ready(screen):
                     break
             else:
-                raise RecoverableExecutionError("codex cli did not become ready after launch")
+                raise BootstrapFailure("codex cli did not become ready after launch")
         else:
             bootstrap = (
                 "You are running inside AGP. "
@@ -247,7 +248,7 @@ class CodexAdapter(AgentAdapter):
             sleep(self.bootstrap_settle_seconds)
             health = host.health(session)
             if not health.healthy:
-                raise RecoverableExecutionError(f"session unhealthy after bootstrap: {health.reason}")
+                raise BootstrapFailure(f"session unhealthy after bootstrap: {health.reason}")
         session.metadata["codex_bootstrapped"] = True
 
     # Patterns that indicate a TUI gate/confirmation prompt that should
@@ -468,12 +469,6 @@ class CodexAdapter(AgentAdapter):
         prompt = claimed["message"]["text"]
         run_id = claimed["run"]["run_id"]
 
-        baseline_screen = _strip_ansi(host.read_visible(session))
-        baseline_turns = [turn for turn in _parse_codex_turns(baseline_screen) if turn["response"]]
-        baseline_last_response = None
-        if baseline_turns:
-            baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
-
         # Session reset logic depends on host kind and session_mode:
         # - tmux always resets (send-keys unreliable with running TUI)
         # - wezterm resets only in ephemeral mode; sticky keeps the session
@@ -484,12 +479,21 @@ class CodexAdapter(AgentAdapter):
                     "sticky session_mode is not supported on tmux — falling back to ephemeral"
                 )
             session = host.reset_session(session)
+            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
         elif self.session_mode == "ephemeral":
             session = host.reset_session(session)
+            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+
+        # Capture baseline AFTER reset/bootstrap so it reflects the fresh pane.
+        baseline_screen = _strip_ansi(host.read_visible(session))
+        baseline_turns = [turn for turn in _parse_codex_turns(baseline_screen) if turn["response"]]
+        baseline_last_response = None
+        if baseline_turns:
+            baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
 
         health = host.health(session)
         if not health.healthy:
-            raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
+            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         supervisor.emit_progress(
@@ -522,6 +526,8 @@ class CodexAdapter(AgentAdapter):
             sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
+            read = host.read_output(session, cursor)
+            cursor = read.cursor
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
             # Only check for shell return after the TUI has had time to
@@ -529,7 +535,7 @@ class CodexAdapter(AgentAdapter):
             # may still be visible in scrollback while the TUI boots.
             startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
             if startup_settled and self._looks_like_shell_returned(screen):
-                raise RecoverableExecutionError("codex cli exited during execution")
+                raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
                 # Only dismiss if the screen changed since the last dismiss
                 # to avoid spamming Enter on an unrecognised persistent dialog.
@@ -569,8 +575,8 @@ class CodexAdapter(AgentAdapter):
                 break
         else:
             if not prev_screen.strip():
-                raise RecoverableExecutionError("codex tui produced no output after dispatch")
-            raise RecoverableExecutionError("codex tui did not become idle within timeout")
+                raise ExecutionTimeout("codex tui produced no output after dispatch")
+            raise ExecutionTimeout("codex tui did not become idle within timeout")
 
         # Use the visible screen for TUI output — scrollback deltas are
         # unreliable because TUI apps repaint the entire screen.
@@ -583,7 +589,7 @@ class CodexAdapter(AgentAdapter):
         cleaned = _clean_codex_tui_output(raw_output)
 
         if not cleaned.strip():
-            raise RecoverableExecutionError("codex tui produced no output after idle")
+            raise ExecutionTimeout("codex tui produced no output after idle")
 
         return ExecutionResult(
             artifacts=[
@@ -609,7 +615,7 @@ class CodexAdapter(AgentAdapter):
 
         health = host.health(session)
         if not health.healthy:
-            raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
+            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         host.send_text(session, self._task_payload(run_id=run_id, prompt=prompt), enter=True)
@@ -621,7 +627,7 @@ class CodexAdapter(AgentAdapter):
             if self.health_check_interval_polls > 0 and attempt > 0 and attempt % self.health_check_interval_polls == 0:
                 h = host.health(session)
                 if not h.healthy:
-                    raise RecoverableExecutionError(f"session lost during execution at poll {attempt}: {h.reason}")
+                    raise PaneDied(f"session lost during execution at poll {attempt}: {h.reason}")
 
             read = host.read_output(session, cursor)
             cursor = read.cursor
@@ -667,11 +673,11 @@ class CodexAdapter(AgentAdapter):
             else:
                 idle_count += 1
                 if self.idle_timeout_polls > 0 and idle_count >= self.idle_timeout_polls:
-                    raise RecoverableExecutionError(
+                    raise ExecutionTimeout(
                         f"codex adapter idle for {idle_count} consecutive polls — possible CLI wedge"
                     )
             sleep(self.poll_interval_seconds)
-        raise RecoverableExecutionError("codex adapter did not observe completion marker before poll budget exhausted")
+        raise ExecutionTimeout("codex adapter did not observe completion marker before poll budget exhausted")
 
     def recover(
         self,
@@ -688,7 +694,7 @@ class CodexAdapter(AgentAdapter):
             return
         # If Codex exited (crashed), clear the bootstrap flag so the
         # supervisor retry path will re-launch it via ensure_bootstrapped().
-        if self.tui_mode and "exited during execution" in str(error):
+        if isinstance(error, PaneDied):
             session.metadata.pop("codex_bootstrapped", None)
             return
         host.interrupt(session)

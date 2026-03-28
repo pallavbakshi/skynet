@@ -6,6 +6,7 @@ from typing import Any
 
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
+    AuthFailure, BootstrapFailure, ExecutionTimeout, PaneDied,
     RecoverableExecutionError, TerminalHost, TerminalSession,
     _strip_ansi,
 )
@@ -264,7 +265,7 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         health = host.health(session)
         if not health.healthy:
-            raise RecoverableExecutionError(f"session unhealthy before bootstrap: {health.reason}")
+            raise BootstrapFailure(f"session unhealthy before bootstrap: {health.reason}")
 
         # If the TUI is already running in a reused pane, skip launching.
         if hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
@@ -281,7 +282,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             screen = _strip_ansi(host.read_visible(session))
             if self._looks_like_gate_prompt(screen):
                 if self._is_fatal_gate(screen):
-                    raise RecoverableExecutionError(
+                    raise AuthFailure(
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
                     )
@@ -290,13 +291,13 @@ class ClaudeCodeAdapter(AgentAdapter):
             if self._looks_like_ready(screen):
                 break
         else:
-            raise RecoverableExecutionError("claude code did not become ready after launch")
+            raise BootstrapFailure("claude code did not become ready after launch")
 
         if self.bootstrap_settle_seconds > 0:
             sleep(self.bootstrap_settle_seconds)
             health = host.health(session)
             if not health.healthy:
-                raise RecoverableExecutionError(f"session unhealthy after bootstrap: {health.reason}")
+                raise BootstrapFailure(f"session unhealthy after bootstrap: {health.reason}")
 
         session.metadata["claude_code_bootstrapped"] = True
 
@@ -571,7 +572,7 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         health = host.health(session)
         if not health.healthy:
-            raise RecoverableExecutionError(f"session unhealthy at dispatch: {health.reason}")
+            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         supervisor.emit_progress(
@@ -597,16 +598,18 @@ class ClaudeCodeAdapter(AgentAdapter):
             sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
+            read = host.read_output(session, cursor)
+            cursor = read.cursor
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
 
             startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
             if startup_settled and self._looks_like_shell_returned(screen):
-                raise RecoverableExecutionError("claude code cli exited during execution")
+                raise PaneDied("claude code cli exited during execution")
 
             if self._looks_like_gate_prompt(screen):
                 if self._is_fatal_gate(screen):
-                    raise RecoverableExecutionError(
+                    raise AuthFailure(
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
                     )
@@ -641,8 +644,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                 break
         else:
             if not prev_screen.strip():
-                raise RecoverableExecutionError("claude code tui produced no output after dispatch")
-            raise RecoverableExecutionError("claude code tui did not become idle within timeout")
+                raise ExecutionTimeout("claude code tui produced no output after dispatch")
+            raise ExecutionTimeout("claude code tui did not become idle within timeout")
 
         raw_output = _strip_ansi(host.read_visible(session))
         read = host.read_output(session, cursor)
@@ -650,7 +653,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         cleaned = _clean_claude_code_output(raw_output)
 
         if not cleaned.strip():
-            raise RecoverableExecutionError("claude code tui produced no output after idle")
+            raise ExecutionTimeout("claude code tui produced no output after idle")
 
         return ExecutionResult(
             artifacts=[
@@ -675,7 +678,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         health = host.health(session)
         if not health.healthy:
             return
-        if "exited during execution" in str(error):
+        if isinstance(error, PaneDied):
             session.metadata.pop("claude_code_bootstrapped", None)
             return
         host.interrupt(session)

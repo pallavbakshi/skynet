@@ -11,11 +11,15 @@ from __future__ import annotations
 # --- Data classes and exceptions ---
 from agp.runtime._types import (
     AdapterExecutionFailed,
+    AuthFailure,
     ArtifactPayload,
+    BootstrapFailure,
     ExecutionResult,
+    ExecutionTimeout,
     InterruptRequested,
     OutputCursor,
     OutputReadResult,
+    PaneDied,
     RecoverableExecutionError,
     SessionHealth,
     TerminalSession,
@@ -89,6 +93,10 @@ __all__ = [
     "SessionHealth",
     "InterruptRequested",
     "RecoverableExecutionError",
+    "PaneDied",
+    "ExecutionTimeout",
+    "AuthFailure",
+    "BootstrapFailure",
     "AdapterExecutionFailed",
     # _abc
     "TerminalHost",

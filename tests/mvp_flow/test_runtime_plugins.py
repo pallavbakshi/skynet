@@ -780,8 +780,9 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         health = host.health(session)
         self.assertTrue(health.healthy)
 
+        calls_before = len(calls)
         host.send_text(session, "hello", enter=True)
-        send_calls = [c for c in calls if c[1] == "send-keys"]
+        send_calls = [c for c in calls[calls_before:] if c[1] == "send-keys"]
         self.assertEqual(len(send_calls), 2)  # -l text + Enter as separate calls
         self.assertIn("hello", send_calls[0])
         self.assertIn("Enter", send_calls[1])
@@ -1056,7 +1057,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                 if text.startswith("codex"):
                     self.screen = "\u203a ready\n"
                 elif text == "answer the task":
-                    self.screen = "\u203a answer the task\n\u2022 tui success\n"
+                    self.screen = "\u203a answer the task\n\u2022 tui success\n\u203a \n"
 
             def read_visible(self, session) -> str:
                 return self.screen
@@ -1294,7 +1295,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             session=session,
             claimed={"agent_id": "agt_crash", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
             attempt=1,
-            error=RecoverableExecutionError("codex cli exited during execution"),
+            error=PaneDied("codex cli exited during execution"),
             supervisor=SupervisorStub(),
         )
         self.assertNotIn("codex_bootstrapped", session.metadata)
@@ -1806,7 +1807,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             host=host, session=session,
             claimed={"agent_id": "agt_cc_crash", "job": {"job_id": "j"}, "run": {"run_id": "r"}, "message": {"text": "t"}},
             attempt=1,
-            error=RecoverableExecutionError("claude code cli exited during execution"),
+            error=PaneDied("claude code cli exited during execution"),
             supervisor=SupervisorStub(),
         )
         self.assertNotIn("claude_code_bootstrapped", session.metadata)

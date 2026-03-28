@@ -136,6 +136,16 @@ class WezTermHost(TerminalHost):
             raise RuntimeError(f"wezterm command failed: {' '.join(args)} :: {stderr}")
         return completed.stdout or ""
 
+    def _pane_info(self, session: TerminalSession) -> dict[str, Any] | None:
+        return next((item for item in self._list_panes() if str(item.get("pane_id")) == session.session_id), None)
+
+    def _get_pane_tty(self, session: TerminalSession) -> str | None:
+        pane = self._pane_info(session)
+        if pane is None:
+            return None
+        tty = pane.get("tty_name") or pane.get("tty") or pane.get("tty_path")
+        return str(tty) if tty else None
+
     def _marker(self, agent_id: str) -> str:
         return f"AGP:{agent_id}"
 
@@ -428,7 +438,7 @@ class WezTermHost(TerminalHost):
             acc.reset()
 
     def snapshot(self, session: TerminalSession) -> dict[str, Any]:
-        pane = next((item for item in self._list_panes() if str(item.get("pane_id")) == session.session_id), None)
+        pane = self._pane_info(session)
         text = self._run(["get-text", "--pane-id", session.session_id, "--start-line", str(-self.scrollback_lines)])
         acc = self._accumulators.get(session.session_id)
         return {
@@ -443,7 +453,7 @@ class WezTermHost(TerminalHost):
         return any(str(item.get("pane_id")) == session.session_id for item in self._list_panes())
 
     def health(self, session: TerminalSession) -> SessionHealth:
-        pane = next((item for item in self._list_panes() if str(item.get("pane_id")) == session.session_id), None)
+        pane = self._pane_info(session)
         if pane is None:
             return SessionHealth(
                 session_id=session.session_id,
@@ -512,6 +522,16 @@ class WezTermHost(TerminalHost):
             except RuntimeError:
                 return False
             snap = _normalise(raw)
+            if self.shell_idle(session):
+                sleep(min(poll_seconds, 0.25))
+                try:
+                    confirm_raw = self._run(
+                        ["get-text", "--pane-id", session.session_id, "--start-line", str(-check_lines)],
+                    )
+                except RuntimeError:
+                    return False
+                if _normalise(confirm_raw) == snap:
+                    return True
             if snap == prev:
                 unchanged += 1
                 if was_busy and unchanged >= idle_after:
