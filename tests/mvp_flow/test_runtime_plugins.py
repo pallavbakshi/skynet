@@ -184,7 +184,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                     )
                 elif text and not text.startswith("codex"):
                     self._history.setdefault(session.session_id, []).append(
-                        "\u203a explain this code\n\u2022 Here is the result of your task.\n"
+                        "\u203a explain this code\n\u2022 Here is the result of your task.\n\n\u203a \n"
                     )
 
         class SupervisorStub:
@@ -203,8 +203,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             tui_mode=True,
             cli_command="codex",
             idle_poll_seconds=0.0,
-            idle_after=1,
-            idle_timeout_seconds=0.1,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
         )
         host = TuiHost()
         session = host.get_or_create_session(agent_id="agt_tui")
@@ -281,7 +281,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                 super().send_text(session, text, enter=enter)
                 if "codex " in text:
                     self._history.setdefault(session.session_id, []).append(
-                        "\u203a What is 2 + 2? Reply with just the number.\n\u2022 4\n"
+                        "\u203a What is 2 + 2? Reply with just the number.\n\u2022 4\n\n\u203a \n"
                     )
 
         class SupervisorStub:
@@ -300,8 +300,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             tui_mode=True,
             cli_command="codex --full-auto",
             idle_poll_seconds=0.0,
-            idle_after=1,
-            idle_timeout_seconds=0.1,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
         )
         host = TmuxTuiHost()
         session = host.get_or_create_session(agent_id="agt_tmux_tui")
@@ -329,7 +329,6 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def __init__(self) -> None:
                 super().__init__()
-                self.reads = 0
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
@@ -343,10 +342,9 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                     )
 
             def read_visible(self, session):
-                self.reads += 1
                 base = super().read_visible(session)
                 # Simulate a repainting Codex status bar after the response.
-                return base + f"\n  gpt-5.3-codex default · 100% left · /app tick {self.reads}\n"
+                return base + "\n  gpt-5.3-codex default · 100% left · /app\n"
 
         class SupervisorStub:
             def __init__(self) -> None:
@@ -1219,10 +1217,30 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             tui_mode=True,
             session_mode="sticky",
             idle_poll_seconds=0.01,
-            idle_after=1,
+            idle_after=2,
             idle_timeout_seconds=1.0,
         )
-        host = InProcessTerminalHost()
+
+        class SequencedVisibleHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
+        # Sequenced screens: empty baseline, then completed turn after dispatch
+        screen_content = (
+            "\u203a test task\n"
+            "\n"
+            "\u2022 The answer is 42\n"
+            "\n"
+            "\u203a \n"
+        )
+        host = SequencedVisibleHost(["", screen_content, screen_content])
         session = host.get_or_create_session(agent_id="agt_cursor")
 
         class SupervisorStub:
@@ -1236,16 +1254,6 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def emit_progress(self, claimed, *, message, details=None):
                 return {"status": "ok"}
-
-        # Inject a visible screen that looks like a completed codex turn
-        screen_content = (
-            "\u203a test task\n"
-            "\n"
-            "\u2022 The answer is 42\n"
-            "\n"
-            "\u203a \n"
-        )
-        host._history[session.session_id] = [screen_content]
 
         claimed = {
             "agent_id": "agt_cursor",
@@ -1487,7 +1495,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             "\u23fa old answer\n"
             "\u273b Conversation compacted\n"
             "\u276f new question\n"
-            "\u23fa new answer here\n"
+            "\u25cf new answer here\n"
             "\u276f \n"
         )
         cleaned = _clean_claude_code_output(raw)
@@ -1668,13 +1676,31 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                         "should have attempted to re-launch claude code")
 
     def test_claude_code_sticky_cursor_preserved_across_runs(self) -> None:
+        class SequencedVisibleHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
         adapter = ClaudeCodeAdapter(
             session_mode="sticky",
             idle_poll_seconds=0.01,
             idle_after=1,
             idle_timeout_seconds=1.0,
         )
-        host = InProcessTerminalHost()
+        screen_content = (
+            "\u276f test task\n"
+            "\u23fa The answer is 42\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host = SequencedVisibleHost(["", screen_content, screen_content])
         session = host.get_or_create_session(agent_id="agt_cc_cursor")
 
         class SupervisorStub:
@@ -1689,16 +1715,6 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def emit_progress(self, claimed, *, message, details=None):
                 return {"status": "ok"}
 
-        # Inject a visible screen showing a completed Claude Code turn
-        screen_content = (
-            "\u276f test task\n"
-            "\u23fa The answer is 42\n"
-            "\u2500\u2500\u2500\u2500\n"
-            "\u276f \n"
-            "\u2500\u2500\u2500\u2500\n"
-        )
-        host._history[session.session_id] = [screen_content]
-
         claimed = {
             "agent_id": "agt_cc_cursor",
             "job": {"job_id": "j1"},
@@ -1711,6 +1727,64 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertIsNotNone(result)
         self.assertIn("restored_cursor", session.metadata)
+
+    def test_claude_code_tui_waits_for_stable_non_working_screen_before_completion(self) -> None:
+        class SequencedVisibleHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_stable"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.2,
+        )
+        working_screen = (
+            "\u276f test task\n"
+            "\u25cf Let me think this through.\n"
+            "\u2234 Thinking...\n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        completed_screen = (
+            "\u276f test task\n"
+            "\u25cf The answer is 42\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host = SequencedVisibleHost(["", working_screen, working_screen, completed_screen, completed_screen])
+        session = host.get_or_create_session(agent_id="agt_cc_stable")
+
+        claimed = {
+            "agent_id": "agt_cc_stable",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "test task"},
+        }
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed,
+            supervisor=SupervisorStub(),
+        )
+        self.assertEqual(result.artifacts[-1].content, "The answer is 42")
 
     def test_claude_code_recover_clears_bootstrap_on_exit(self) -> None:
         adapter = ClaudeCodeAdapter(session_mode="sticky")
@@ -1756,13 +1830,31 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
     def test_claude_code_tmux_uses_tui_mode(self) -> None:
         """On tmux, Claude Code adapter uses TUI mode (not oneshot)."""
+        class SequencedVisibleHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
         adapter = ClaudeCodeAdapter(
             session_mode="sticky",
             idle_poll_seconds=0.01,
             idle_after=1,
             idle_timeout_seconds=1.0,
         )
-        host = InProcessTerminalHost()
+        screen_content = (
+            "\u276f What is 2+2?\n"
+            "\u23fa 4\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host = SequencedVisibleHost(["", screen_content, screen_content])
         session = host.get_or_create_session(agent_id="agt_cc_tmux")
 
         class SupervisorStub:
@@ -1776,16 +1868,6 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def emit_progress(self, claimed, *, message, details=None):
                 return {"status": "ok"}
-
-        # Inject a visible screen showing a completed Claude Code turn
-        screen_content = (
-            "\u276f What is 2+2?\n"
-            "\u23fa 4\n"
-            "\u2500\u2500\u2500\u2500\n"
-            "\u276f \n"
-            "\u2500\u2500\u2500\u2500\n"
-        )
-        host._history[session.session_id] = [screen_content]
 
         claimed = {
             "agent_id": "agt_cc_tmux",

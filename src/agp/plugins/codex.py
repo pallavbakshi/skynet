@@ -428,6 +428,17 @@ class CodexAdapter(AgentAdapter):
             return True
         return False
 
+    def _looks_like_working(self, text: str) -> bool:
+        """Return True when Codex shows an active Working indicator."""
+        return any(ln.strip().startswith("Working (") for ln in text.splitlines())
+
+    @staticmethod
+    def _screen_tail(text: str, n: int = 10) -> str:
+        """Return the last N non-empty lines of the visible screen."""
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        lines = [ln.rstrip() for ln in lines if ln.strip()]
+        return "\n".join(lines[-n:])
+
     def execute_run(
         self,
         *,
@@ -498,6 +509,7 @@ class CodexAdapter(AgentAdapter):
         timeout = self.idle_timeout_seconds if self.idle_timeout_seconds > 0 else 180.0
         deadline = monotonic() + timeout
         prev_screen = ""
+        prev_tail = ""
         unchanged = 0
         tui_active = False  # True once the TUI has drawn at least one frame
         dispatch_time = monotonic()
@@ -506,6 +518,7 @@ class CodexAdapter(AgentAdapter):
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
             snap = self._normalise_visible_screen(screen)
+            tail = self._screen_tail(screen)
             # Only check for shell return after the TUI has had time to
             # render.  During the first few seconds the old shell prompt
             # may still be visible in scrollback while the TUI boots.
@@ -518,28 +531,36 @@ class CodexAdapter(AgentAdapter):
                 if snap != prev_screen:
                     host.send_text(session, self._gate_response(screen), enter=True)
                 prev_screen = snap
+                prev_tail = tail
                 unchanged = 0
                 tui_active = True
                 continue
 
-            if snap == prev_screen:
+            # Track stability based on the tail of the visible screen.
+            if tail == prev_tail:
                 unchanged += 1
             else:
                 unchanged = 0
                 tui_active = True
             prev_screen = snap
+            prev_tail = tail
 
+            # Stability gate: only evaluate state after the screen is stable.
+            stable_after = max(1, self.idle_after - 1)
+            if unchanged < stable_after:
+                continue
+
+            # Screen is stable.  Check if Codex is still actively working.
+            if self._looks_like_working(screen):
+                unchanged = 0
+                continue
+
+            # Stable and not working.  Check for completion.
             if self._looks_like_completed_turn(
                 screen,
                 baseline_answered_turns=len(baseline_turns),
                 baseline_last_response=baseline_last_response,
             ):
-                break
-
-            # Secondary idle break: response marker visible and screen stable.
-            # Gate on tui_active so a baseline • from a prior turn can't
-            # trigger an early exit before the new response starts.
-            if tui_active and _RESPONSE_MARKER in screen and unchanged >= max(1, self.idle_after - 1):
                 break
         else:
             if not prev_screen.strip():

@@ -12,7 +12,10 @@ from agp.runtime import (
 
 # ── Claude Code TUI markers ─────────────────────────────────────────
 _PROMPT_PREFIX = "\u276f"       # ❯ = user prompt
-_RESPONSE_PREFIX = "\u23fa"     # ⏺ = assistant response start
+_RESPONSE_PREFIXES = (
+    "\u23fa",  # ⏺ older Claude Code response marker
+    "\u25cf",  # ● newer Claude Code response marker
+)
 _TOOL_RESULT_PREFIX = "\u23bf"  # ⎿ = tool result / continuation
 _SEPARATOR_RE = re.compile(r"^\u2500{4,}$")  # ────
 _COMPACTION_RE = re.compile(r"^\u273b\s+(Conversation compacted|Churned)")  # ✻
@@ -57,10 +60,25 @@ def _is_noise_line(line: str) -> bool:
     return False
 
 
+def _is_response_line(line: str) -> bool:
+    """Return True when a line starts with a Claude response marker."""
+    s = line.strip()
+    return any(s.startswith(prefix) for prefix in _RESPONSE_PREFIXES)
+
+
+def _response_content(line: str) -> str:
+    """Return response content with the Claude response marker removed."""
+    s = line.strip()
+    for prefix in _RESPONSE_PREFIXES:
+        if s.startswith(prefix):
+            return s.removeprefix(prefix).strip()
+    return s
+
+
 def _clean_claude_code_output(text: str) -> str:
     """Extract the last Claude Code response from raw TUI output.
 
-    Parses the TUI structure using ❯ (prompt) and ⏺ (response) markers,
+    Parses the TUI structure using ❯ (prompt) and Claude response markers,
     strips all chrome (box borders, status bar, separators, system lines),
     and returns only the response text from the most recent turn.
     """
@@ -75,7 +93,7 @@ def _clean_claude_code_output(text: str) -> str:
             break
     if comp_idx >= 0:
         post = lines[comp_idx + 1:]
-        if any(ln and ln.strip().startswith(_RESPONSE_PREFIX) for ln in post):
+        if any(ln and _is_response_line(ln) for ln in post):
             lines = post
 
     # Find turns: each turn starts with a ❯ prompt line.
@@ -92,9 +110,9 @@ def _clean_claude_code_output(text: str) -> str:
             current_prompt = s.removeprefix(_PROMPT_PREFIX).strip()
             response_lines = []
             in_response = False
-        elif s.startswith(_RESPONSE_PREFIX):
+        elif _is_response_line(line):
             in_response = True
-            content = s.removeprefix(_RESPONSE_PREFIX).strip()
+            content = _response_content(line)
             if content and not _is_noise_line(content):
                 response_lines.append(content)
         elif s.startswith(_TOOL_RESULT_PREFIX):
@@ -114,12 +132,11 @@ def _clean_claude_code_output(text: str) -> str:
         turns.append({"prompt": current_prompt, "response": list(response_lines)})
 
     if not turns:
-        # Fallback: collect all ⏺-prefixed lines as response content.
+        # Fallback: collect all Claude response-prefixed lines as content.
         response_lines = []
         for line in lines:
-            s = line.strip()
-            if s.startswith(_RESPONSE_PREFIX):
-                content = s.removeprefix(_RESPONSE_PREFIX).strip()
+            if _is_response_line(line):
+                content = _response_content(line)
                 if content:
                     response_lines.append(content)
         if response_lines:
@@ -140,12 +157,11 @@ def _clean_claude_code_output(text: str) -> str:
                 content.pop()
             return "\n".join(content)
 
-    # All turns were noise — fall back to collecting all ⏺ lines.
+    # All turns were noise — fall back to collecting all response lines.
     response_lines = []
     for line in lines:
-        s = line.strip()
-        if s.startswith(_RESPONSE_PREFIX):
-            content = s.removeprefix(_RESPONSE_PREFIX).strip()
+        if _is_response_line(line):
+            content = _response_content(line)
             if content:
                 response_lines.append(content)
     return "\n".join(response_lines)
@@ -165,7 +181,7 @@ def _parse_claude_code_turns(text: str) -> list[dict[str, Any]]:
             break
     if comp_idx >= 0:
         post = lines[comp_idx + 1:]
-        if any(ln and ln.strip().startswith(_RESPONSE_PREFIX) for ln in post):
+        if any(ln and _is_response_line(ln) for ln in post):
             lines = post
     turns: list[dict[str, Any]] = []
     current_prompt = ""
@@ -180,9 +196,9 @@ def _parse_claude_code_turns(text: str) -> list[dict[str, Any]]:
             current_prompt = s.removeprefix(_PROMPT_PREFIX).strip()
             response_lines = []
             in_response = False
-        elif s.startswith(_RESPONSE_PREFIX):
+        elif _is_response_line(line):
             in_response = True
-            content = s.removeprefix(_RESPONSE_PREFIX).strip()
+            content = _response_content(line)
             if content and not _is_noise_line(content):
                 response_lines.append(content)
         elif s.startswith(_TOOL_RESULT_PREFIX):
@@ -316,9 +332,31 @@ class ClaudeCodeAdapter(AgentAdapter):
                 return True
             if _STATUS_BAR_RE.match(s):
                 return True
-            if s.startswith(_RESPONSE_PREFIX):
+            if _is_response_line(line):
                 return True
         return False
+
+    @staticmethod
+    def _looks_like_working(text: str) -> bool:
+        """Return True when Claude Code still shows an active working state."""
+        for line in text.splitlines():
+            s = line.strip().lower()
+            if not s:
+                continue
+            if s.startswith("\u2234 ") and any(
+                word in s for word in ("thinking", "working", "analy", "planning")
+            ):
+                return True
+            if s.startswith("thinking...") or s.startswith("thinking…"):
+                return True
+        return False
+
+    @staticmethod
+    def _screen_tail(text: str, n: int = 10) -> str:
+        """Return the last N non-empty lines of the visible screen."""
+        lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
+        lines = [ln.rstrip() for ln in lines if ln.strip()]
+        return "\n".join(lines[-n:])
 
     def _looks_like_shell_returned(self, text: str) -> bool:
         """Return True when the CLI exited and a shell prompt is visible.
@@ -346,7 +384,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 return False
             if _SEPARATOR_RE.match(ln):
                 has_tui_indicator = True
-            if ln.startswith(_RESPONSE_PREFIX):
+            if _is_response_line(ln):
                 return False
             if _STATUS_BAR_RE.match(ln):
                 return False
@@ -541,16 +579,19 @@ class ClaudeCodeAdapter(AgentAdapter):
         timeout = self.idle_timeout_seconds or 180.0
         deadline = monotonic() + timeout
         prev_screen = ""
+        prev_tail = ""
         unchanged = 0
-        was_busy = False
+        tui_active = False
         dispatch_time = monotonic()
 
         while monotonic() < deadline:
+            sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
             snap = self._normalise_visible_screen(screen)
+            tail = self._screen_tail(screen)
 
-            startup_settled = was_busy or (monotonic() - dispatch_time > 5.0)
+            startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
             if startup_settled and self._looks_like_shell_returned(screen):
                 raise RecoverableExecutionError("claude code cli exited during execution")
 
@@ -562,17 +603,26 @@ class ClaudeCodeAdapter(AgentAdapter):
                     )
                 host.send_text(session, self._gate_response(screen), enter=True)
                 prev_screen = snap
+                prev_tail = tail
                 unchanged = 0
-                was_busy = True
-                sleep(self.idle_poll_seconds)
+                tui_active = True
                 continue
 
-            if snap == prev_screen:
+            if tail == prev_tail:
                 unchanged += 1
             else:
                 unchanged = 0
-                was_busy = True
+                tui_active = True
             prev_screen = snap
+            prev_tail = tail
+
+            stable_after = max(1, self.idle_after - 1)
+            if unchanged < stable_after:
+                continue
+
+            if self._looks_like_working(screen):
+                unchanged = 0
+                continue
 
             if self._looks_like_completed_turn(
                 screen,
@@ -580,11 +630,6 @@ class ClaudeCodeAdapter(AgentAdapter):
                 baseline_last_response=baseline_last_response,
             ):
                 break
-
-            if _RESPONSE_PREFIX in screen and unchanged >= max(1, self.idle_after - 1):
-                break
-
-            sleep(self.idle_poll_seconds)
         else:
             if not prev_screen.strip():
                 raise RecoverableExecutionError("claude code tui produced no output after dispatch")
