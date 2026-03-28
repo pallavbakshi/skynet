@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC
 from types import SimpleNamespace
 from urllib.parse import unquote
 
@@ -44,6 +45,36 @@ from agp.services.runs import (
 )
 
 router = APIRouter()
+
+
+def _fail_if_job_timed_out(
+    db: Session,
+    *,
+    job: Job,
+    run: Run,
+    agent: Agent | None,
+    runtime,
+    lease,
+) -> None:
+    deadline_at = job.deadline_at
+    if deadline_at is None:
+        return
+    if deadline_at.tzinfo is None:
+        deadline_at = deadline_at.replace(tzinfo=UTC)
+    if utc_now() <= deadline_at:
+        return
+    fail_run_service(
+        db,
+        run=run,
+        job=job,
+        agent=agent,
+        runtime=runtime,
+        lease=lease,
+        error="job exceeded deadline",
+        artifacts=[],
+        summary={"reason": "timeout", "deadline_at": deadline_at.isoformat()},
+    )
+    raise HTTPException(status_code=409, detail="job deadline exceeded")
 
 
 def _conversation_context(db: Session, *, message: Message) -> list[dict]:
@@ -119,7 +150,7 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
 
     return _ok({
         "claimed": True,
-        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json", "conversation_id")),
+        "job": _serialize(result.job, ("job_id", "message_id", "target_queue", "status", "output_contract_json", "conversation_id", "timeout_seconds", "deadline_at")),
         "message": {"message_id": result.message.message_id, "target_type": result.message.target_type, "target_id": result.message.target_id, "text": result.message.text, "metadata": result.message.metadata_json},
         "job_attachments": _job_attachments(db, job_id=result.job.job_id),
         "conversation_context": _conversation_context(db, message=result.message),
@@ -148,6 +179,10 @@ def progress_run(run_id: str, request: ProgressRequest, db: Session = Depends(ge
     run = db.get(Run, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"run not found: {run_id}")
+    job = _require_job(db, run.job_id)
+    agent = db.get(Agent, run.agent_id) if run.agent_id else None
+    runtime = _require_runtime(db, request.runtime_id)
+    _fail_if_job_timed_out(db, job=job, run=run, agent=agent, runtime=runtime, lease=lease)
     return _ok(progress_run_service(db, run=run, runtime_id=request.runtime_id, message=request.message, details=request.details))
 
 
@@ -199,6 +234,7 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     job = _require_job(db, run.job_id)
     agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
+    _fail_if_job_timed_out(db, job=job, run=run, agent=agent, runtime=runtime, lease=lease)
     try:
         validate_output_contract_completion(job=job, artifacts=request.artifacts)
     except BadRequestError as exc:

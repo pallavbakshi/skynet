@@ -109,6 +109,7 @@ def create_and_enqueue_job(
     output_contract: OutputContract | None = None,
     conversation_id: str | None = None,
     reply_to_message_id: str | None = None,
+    timeout_seconds: int | None = None,
     attachments: list[AttachmentRef] | None = None,
 ) -> tuple[Message, Job]:
     """Create a message and queued job — the core dispatch path."""
@@ -135,6 +136,8 @@ def create_and_enqueue_job(
         elif conversation_id != parent.conversation_id:
             raise BadRequestError("reply_to_message_id does not belong to the same conversation")
 
+    now = utc_now()
+
     message = Message(
         message_id=_new_id("msg"),
         target_type=target_type,
@@ -143,9 +146,12 @@ def create_and_enqueue_job(
         metadata_json=metadata,
         conversation_id=conversation_id,
         reply_to_message_id=reply_to_message_id,
+        created_at=now,
     )
     db.add(message)
     db.flush()
+
+    deadline_at = now + timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
 
     job = Job(
         job_id=_new_id("job"),
@@ -160,6 +166,10 @@ def create_and_enqueue_job(
         max_retries=3,
         output_contract_json=output_contract.model_dump() if output_contract else None,
         conversation_id=conversation_id,
+        timeout_seconds=timeout_seconds,
+        deadline_at=deadline_at,
+        created_at=now,
+        updated_at=now,
     )
     db.add(job)
     db.flush()

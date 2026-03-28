@@ -139,6 +139,8 @@ class Job(Base):
     result_artifact_id: Mapped[str | None] = mapped_column(String, nullable=True)
     output_contract_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     conversation_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    timeout_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from time import sleep
 from typing import Any
 
@@ -10,6 +11,22 @@ import httpx
 from agp.client._profile import AgpProfile
 
 _UNSET = object()
+_DATETIME_KEYS = {"created_at", "updated_at", "started_at", "finished_at", "expires_at", "deadline_at", "last_heartbeat_at", "last_seen_at", "delivered_at"}
+
+
+def _decode_datetimes(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: (
+                parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+            )
+            if key in _DATETIME_KEYS and isinstance(item, str) and (parsed := datetime.fromisoformat(item))
+            else _decode_datetimes(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_decode_datetimes(item) for item in value]
+    return value
 
 
 class AgpClient:
@@ -56,7 +73,7 @@ class AgpClient:
     def health(self) -> dict:
         response = self._client.get("/health")
         response.raise_for_status()
-        return response.json()
+        return _decode_datetimes(response.json())
 
     # ── Capability seeding ──────────────────────────────────────────
 
@@ -89,7 +106,7 @@ class AgpClient:
             },
         )
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     # ── Work dispatch ─────────────────────────────────────────────
 
@@ -103,6 +120,7 @@ class AgpClient:
         output_contract: dict[str, Any] | None = None,
         conversation_id: str | None = None,
         reply_to_message_id: str | None = None,
+        timeout_seconds: int | None = None,
         attachments: list[dict[str, str]] | None = None,
         detach_mode: str = "auto",
         idempotency_key: str | None = None,
@@ -120,6 +138,7 @@ class AgpClient:
                     "output_contract": output_contract,
                     "conversation_id": conversation_id,
                     "reply_to_message_id": reply_to_message_id,
+                    "timeout_seconds": timeout_seconds,
                     "attachments": attachments or [],
                 },
                 "detach_policy": {"mode": detach_mode},
@@ -127,19 +146,19 @@ class AgpClient:
             headers=headers,
         )
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def interrupt(self, job_id: str) -> dict:
         response = self._client.post(f"/jobs/{job_id}/interrupt")
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     # ── Inspection ────────────────────────────────────────────────
 
     def get_job(self, job_id: str) -> dict:
         response = self._client.get(f"/jobs/{job_id}")
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def list_jobs(
         self,
@@ -158,17 +177,17 @@ class AgpClient:
             params["cursor"] = cursor
         response = self._client.get("/jobs", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def get_agent(self, agent_id: str) -> dict:
         response = self._client.get(f"/agents/{agent_id}")
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def get_capability(self, capability_id: str) -> dict:
         response = self._client.get(f"/capabilities/{capability_id}")
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def register_agent(
         self,
@@ -190,7 +209,7 @@ class AgpClient:
             payload["workspace_ref"] = workspace_ref
         response = self._client.post("/agents/up", json=payload)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def patch_agent(
         self,
@@ -204,7 +223,7 @@ class AgpClient:
             payload["workspace_ref"] = workspace_ref
         response = self._client.patch(f"/agents/{agent_id}", json=payload)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def list_agents(
         self,
@@ -223,7 +242,7 @@ class AgpClient:
             params["cursor"] = cursor
         response = self._client.get("/agents", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def list_capabilities(
         self,
@@ -239,7 +258,7 @@ class AgpClient:
             params["cursor"] = cursor
         response = self._client.get("/capabilities", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def resolve_capability_by_name(self, name: str) -> dict | None:
         """Find a capability by display name.

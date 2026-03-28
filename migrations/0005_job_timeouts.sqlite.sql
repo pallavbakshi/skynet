@@ -1,0 +1,6 @@
+BEGIN;
+
+ALTER TABLE jobs ADD COLUMN timeout_seconds INTEGER;
+ALTER TABLE jobs ADD COLUMN deadline_at TIMESTAMP;
+
+COMMIT;

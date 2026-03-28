@@ -57,6 +57,7 @@ class SendMessagePayload(BaseModel):
     output_contract: OutputContract | None = None
     conversation_id: str | None = None
     reply_to_message_id: str | None = None
+    timeout_seconds: int | None = None
     attachments: list[AttachmentRef] = Field(default_factory=list)
 
 
@@ -256,6 +257,8 @@ class JobResponse(BaseModel):
     result_artifact_id: str | None = None
     output_contract_json: dict[str, Any] | None = None
     conversation_id: str | None = None
+    timeout_seconds: int | None = None
+    deadline_at: Any = None
 
 
 class RunResponse(BaseModel):

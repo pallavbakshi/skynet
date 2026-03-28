@@ -189,6 +189,118 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         # Single-message conversation has context with just this one message
         self.assertEqual(len(claim_data["conversation_context"]), 1)
 
+    def test_send_with_timeout_seconds_sets_deadline(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_timeout_hint", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_timeout_hint", "hostname": "localhost"})
+
+        before = utc_now()
+        sent = self.agp.send(
+            target_type="agent",
+            target_id="agt_timeout_hint",
+            text="finish soon",
+            timeout_seconds=30,
+            idempotency_key="timeout-send-1",
+        )
+        after = utc_now()
+
+        job = self.agp.get_job(sent["job_id"])
+        self.assertEqual(job["timeout_seconds"], 30)
+        self.assertIsNotNone(job["deadline_at"])
+        deadline = job["deadline_at"]
+        self.assertGreaterEqual(deadline, before + timedelta(seconds=30))
+        self.assertLessEqual(deadline, after + timedelta(seconds=30))
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_timeout_hint", "agent_id": "agt_timeout_hint"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+        self.assertEqual(claim_data["job"]["timeout_seconds"], 30)
+        self.assertIsNotNone(claim_data["job"]["deadline_at"])
+
+    def test_complete_after_deadline_fails_with_timeout(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_timeout_fail", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_timeout_fail", "hostname": "localhost"})
+
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_timeout_fail"},
+                "message": {"text": "will expire", "metadata": {}, "timeout_seconds": 1},
+            },
+        )
+        self.assertEqual(send.status_code, 200)
+        job_id = send.json()["data"]["job_id"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_timeout_fail", "agent_id": "agt_timeout_fail"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+
+        with SessionLocal() as db:
+            job = db.get(Job, job_id)
+            assert job is not None
+            job.deadline_at = utc_now() - timedelta(seconds=1)
+            db.commit()
+
+        complete = self.client.post(
+            f"/runs/{claim_data['run']['run_id']}/complete",
+            json={
+                "runtime_id": "rtm_timeout_fail",
+                "lease_id": claim_data["lease"]["lease_id"],
+                "fencing_token": claim_data["lease"]["fencing_token"],
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 409)
+        self.assertEqual(complete.json()["error"]["message"], "job deadline exceeded")
+
+        job = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(job.status_code, 200)
+        self.assertEqual(job.json()["data"]["status"], "failed")
+
+    def test_job_without_timeout_remains_backward_compatible(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_no_timeout", "capabilities": ["python"]})
+        self.client.post(
+            "/runtimes/register",
+            json={"runtime_id": "rtm_no_timeout", "hostname": "localhost"},
+        )
+
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_no_timeout"},
+                "message": {"text": "legacy no timeout", "metadata": {}},
+            },
+        )
+        self.assertEqual(send.status_code, 200)
+        job_id = send.json()["data"]["job_id"]
+
+        job = self.client.get(f"/jobs/{job_id}")
+        self.assertEqual(job.status_code, 200)
+        self.assertIsNone(job.json()["data"]["timeout_seconds"])
+        self.assertIsNone(job.json()["data"]["deadline_at"])
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_no_timeout", "agent_id": "agt_no_timeout"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+        self.assertIsNone(claim_data["job"]["timeout_seconds"])
+        self.assertIsNone(claim_data["job"]["deadline_at"])
+
     def test_job_with_output_contract_and_valid_json_result_completes(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_contract", "capabilities": ["python"]})
         self.client.post(

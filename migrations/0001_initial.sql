@@ -86,6 +86,8 @@ CREATE TABLE jobs (
   result_artifact_id TEXT,
   output_contract_json JSONB,
   conversation_id TEXT,
+  timeout_seconds INTEGER,
+  deadline_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL,
   CHECK (status IN ('accepted', 'queued', 'running', 'interrupt_requested', 'completed', 'failed', 'cancelled', 'blocked')),

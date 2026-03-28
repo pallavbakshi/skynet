@@ -725,6 +725,7 @@ def send(
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
     timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
+    timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
@@ -762,6 +763,7 @@ def send(
             output_contract=parsed_output_contract,
             conversation_id=conversation_id,
             reply_to_message_id=reply_to,
+            timeout_seconds=timeout_seconds,
             attachments=attachments,
             idempotency_key=f"cli-{int(time.time())}",
         )
