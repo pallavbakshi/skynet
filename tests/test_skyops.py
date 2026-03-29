@@ -604,7 +604,8 @@ class TestSkyopsClient(unittest.TestCase):
         cfg = SkyopsConfig()
         cfg.server.port = 9999
         cfg.security.operator_token = ""
-        with patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://127.0.0.1:7860", "token": "persisted"})()), \
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://127.0.0.1:7860", "token": "persisted"})()), \
              patch("pathlib.Path.exists", return_value=False):
             profile = build_profile(cfg)
         self.assertEqual(profile.server_url, "http://127.0.0.1:9999")
@@ -621,11 +622,28 @@ class TestSkyopsClient(unittest.TestCase):
         def fake_exists(path_obj: Path) -> bool:
             return str(path_obj) == str(profile_path)
 
-        with patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://cp.example:7860", "token": "persisted"})()), \
+        with patch.dict("os.environ", {}, clear=True), \
+             patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://cp.example:7860", "token": "persisted"})()), \
              patch("skyops._client.Path.home", return_value=fake_home), \
              patch("pathlib.Path.exists", fake_exists):
             profile = build_profile(cfg)
         self.assertEqual(profile.server_url, "http://cp.example:7860")
+
+    def test_build_profile_prefers_host_port_env_over_existing_profile_url(self):
+        cfg = SkyopsConfig()
+
+        fake_home = Path("/tmp/test-home")
+        profile_path = fake_home / ".agp" / "profiles" / "default.toml"
+
+        def fake_exists(path_obj: Path) -> bool:
+            return str(path_obj) == str(profile_path)
+
+        with patch.dict("os.environ", {"AGP_HOST": "0.0.0.0", "AGP_PORT": "9001"}, clear=True), \
+             patch("skyops._client.AgpProfile.load", return_value=type("Profile", (), {"server_url": "http://cp.example:7860", "token": "persisted"})()), \
+             patch("skyops._client.Path.home", return_value=fake_home), \
+             patch("pathlib.Path.exists", fake_exists):
+            profile = build_profile(cfg)
+        self.assertEqual(profile.server_url, "http://127.0.0.1:9001")
 
 
 class TestDbSeed(unittest.TestCase):

@@ -43,9 +43,9 @@ def build_profile(cfg: SkyopsConfig | None = None) -> AgpProfile:
             return base
 
     profile_path = Path.home() / ".agp" / "profiles" / "default.toml"
+    env_server_url = os.environ.get("AGP_SERVER_URL") or _url_from_host_port()
     server_url = (
-        os.environ.get("AGP_SERVER_URL")
-        or _url_from_host_port()
+        env_server_url
         or (base.server_url if profile_path.exists() else None)
         or resolve_server_url(cfg)
     )
