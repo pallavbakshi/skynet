@@ -62,7 +62,7 @@ CODEX_PROFILE          ?= openrouter
 ifneq ($(CODEX_PROFILE),)
 _PROVIDER_ENV         := OPENAI_API_KEY="$(_RUNTIME_API_KEY)" OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)"
 endif
-AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) -a never -s danger-full-access
+AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) --dangerously-bypass-approvals-and-sandbox
 
 # ── Validation helpers ────────────────────────────────────────────────
 define require_env
