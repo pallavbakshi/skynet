@@ -601,6 +601,18 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("CAPABILITY: nonexistent", result.output)
 
+    def test_agp_up_warns_when_no_live_runtime_is_bound(self) -> None:
+        result = self._cli_invoke(["up", "Python Tester"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("WARNING: No runtime bound.", result.output)
+        self.assertIn("make runtime AGP_RUNTIME_AGENT_ID=", result.output)
+
+    def test_agp_up_skips_warning_when_bound_runtime_exists(self) -> None:
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_agt_bound", "hostname": "worker-1"})
+        result = self._cli_invoke(["up", "Python Tester", "--agent-id", "agt_bound"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("WARNING: No runtime bound.", result.output)
+
     def test_agp_up_duplicate_agent_id_is_idempotent(self) -> None:
         self.client.post("/capabilities/seed", json={
             "capability_id": "cap_python", "name": "Python Tester",

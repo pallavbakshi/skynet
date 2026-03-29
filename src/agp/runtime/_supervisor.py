@@ -204,6 +204,7 @@ class RuntimeSupervisor:
     ) -> list[dict[str, Any]]:
         outcomes: list[dict[str, Any]] = []
         iterations = 0
+        restart_attempts = 0
         stop_event = stop_event or Event()
 
         # Register runtime
@@ -241,13 +242,40 @@ class RuntimeSupervisor:
                             _logger.warning("agent heartbeat failed (CP may be temporarily unreachable)", exc_info=True)
                         last_agent_heartbeat = monotonic()
 
-                outcome = self.run_once(
-                    agent_id=agent_id,
-                    capability_id=capability_id,
-                    lease_ttl_seconds=lease_ttl_seconds,
-                    heartbeat_interval_seconds=heartbeat_interval_seconds,
-                    max_local_recoveries=max_local_recoveries,
-                )
+                try:
+                    outcome = self.run_once(
+                        agent_id=agent_id,
+                        capability_id=capability_id,
+                        lease_ttl_seconds=lease_ttl_seconds,
+                        heartbeat_interval_seconds=heartbeat_interval_seconds,
+                        max_local_recoveries=max_local_recoveries,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    restart_attempts += 1
+                    backoff_seconds = min(30.0, max(idle_sleep_seconds, 0.25) * (2 ** (restart_attempts - 1)))
+                    _append_runtime_log(
+                        self.client.identity.runtime_id,
+                        {
+                            "kind": "runtime_worker",
+                            "action": "run_forever_restart_scheduled",
+                            "error": str(exc),
+                            "exception_type": type(exc).__name__,
+                            "attempt": restart_attempts,
+                            "backoff_seconds": backoff_seconds,
+                        },
+                    )
+                    _logger.exception(
+                        "runtime worker run_once failed; restarting after backoff",
+                        extra={
+                            "runtime_id": self.client.identity.runtime_id,
+                            "attempt": restart_attempts,
+                            "backoff_seconds": backoff_seconds,
+                        },
+                    )
+                    if stop_event.wait(backoff_seconds):
+                        break
+                    continue
+                restart_attempts = 0
                 outcomes.append(outcome)
                 iterations += 1
                 if outcome.get("claimed"):

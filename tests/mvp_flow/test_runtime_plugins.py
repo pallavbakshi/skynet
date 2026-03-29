@@ -4,6 +4,135 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
+    def test_codex_timeout_failure_result_salvages_tmux_pane_artifact(self) -> None:
+        from agp.runtime import ExecutionTimeout
+
+        class SnapshotHost(InProcessTerminalHost):
+            kind = "tmux"
+
+            def snapshot(self, session):
+                data = super().snapshot(session)
+                data["text"] = "partial model output\nstill useful\n"
+                return data
+
+            def read_visible(self, session) -> str:
+                return "visible tail only\n"
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_timeout"})()})()
+
+        adapter = CodexAdapter()
+        host = SnapshotHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_timeout")
+        result = adapter.build_failure_result(
+            host=host,
+            session=session,
+            claimed={
+                "agent_id": "agt_tmux_timeout",
+                "job": {"job_id": "job_tmux_timeout"},
+                "run": {"run_id": "run_tmux_timeout"},
+                "message": {"text": "unfinished work"},
+            },
+            error=ExecutionTimeout("codex timed out"),
+            supervisor=SupervisorStub(),
+        )
+        pane_artifact = next(a for a in result.artifacts if a.name == "tmux-pane.txt")
+        self.assertEqual(pane_artifact.role, "failure_evidence")
+        self.assertIn("partial model output", pane_artifact.content)
+
+    def test_codex_adapter_marker_mode_emits_idle_heartbeat_before_timeout(self) -> None:
+        from agp.runtime._types import OutputReadResult
+
+        class QuietHost(InProcessTerminalHost):
+            def read_output(self, session, cursor):
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=cursor,
+                    text="",
+                    full_text="",
+                    changed=False,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_idle_hb"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            poll_interval_seconds=0.01,
+            idle_timeout_seconds=0.02,
+        )
+        host = QuietHost()
+        session = host.get_or_create_session(agent_id="agt_idle_hb")
+        supervisor = SupervisorStub()
+        claimed = {
+            "agent_id": "agt_idle_hb",
+            "job": {"job_id": "job_idle_hb"},
+            "run": {"run_id": "run_idle_hb"},
+            "message": {"text": "wait for marker"},
+        }
+        with self.assertRaises(RecoverableExecutionError):
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=supervisor)
+        self.assertTrue(any(item["details"].get("changed") is False for item in supervisor.progress))
+
+    def test_codex_adapter_marker_mode_extends_idle_timeout_while_output_changes(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class StreamingHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self._reads = 0
+
+            def read_output(self, session, cursor):
+                self._reads += 1
+                updates = {
+                    1: "thinking\n",
+                    2: "still thinking\n",
+                    3: 'AGP_RUN_RESULT run_stream {"status":"success","result":"done"}\n',
+                }
+                text = updates.get(self._reads, "")
+                full_text = "".join(updates[idx] for idx in range(1, self._reads + 1) if idx in updates)
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": self._reads}),
+                    text=text,
+                    full_text=full_text,
+                    changed=bool(text),
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_stream"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            poll_interval_seconds=0.02,
+            idle_timeout_seconds=0.03,
+        )
+        host = StreamingHost()
+        session = host.get_or_create_session(agent_id="agt_stream")
+        claimed = {
+            "agent_id": "agt_stream",
+            "job": {"job_id": "job_stream"},
+            "run": {"run_id": "run_stream"},
+            "message": {"text": "stream until done"},
+        }
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertEqual(result.artifacts[-1].content, "done")
+
     def test_codex_adapter_health_check_detects_lost_session(self) -> None:
         call_count = {"n": 0}
 

@@ -13,6 +13,7 @@ All server-side imports are deferred to command bodies so that
 
 import json
 import os
+import time
 from pathlib import Path
 
 import typer
@@ -138,36 +139,67 @@ def runtime_work_loop(
 
     actual_hostname = hostname or _socket.gethostname()
     runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or None
-    client = RuntimeClient(
-        RuntimeIdentity(
-            runtime_id=runtime_id,
-            hostname=actual_hostname,
-            server_url=actual_server_url,
-            token=runtime_token,
+    resolved_capabilities = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else None
+    payload: list[dict] = []
+    restart_attempt = 0
+
+    while True:
+        stop_event = Event()
+        client = RuntimeClient(
+            RuntimeIdentity(
+                runtime_id=runtime_id,
+                hostname=actual_hostname,
+                server_url=actual_server_url,
+                token=runtime_token,
+            )
         )
-    )
-    worker = RuntimeSupervisor(
-        client,
-        host=build_terminal_host(actual_host_kind, workspace=settings.wezterm_workspace),
-        adapter=build_agent_adapter(actual_adapter_kind),
-        artifact_root=artifact_root,
-    )
-    stop_event = Event()
-    try:
-        resolved_capabilities = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else None
-        payload = worker.run_forever(
-            agent_id=agent_id,
-            capability_id=capability_id,
-            capabilities=resolved_capabilities,
-            idle_sleep_seconds=idle_sleep_seconds,
-            max_iterations=max_iterations,
-            stop_event=stop_event,
-            max_local_recoveries=max_local_recoveries,
+        worker = RuntimeSupervisor(
+            client,
+            host=build_terminal_host(actual_host_kind, workspace=settings.wezterm_workspace),
+            adapter=build_agent_adapter(actual_adapter_kind),
+            artifact_root=artifact_root,
         )
-    finally:
-        stop_event.set()
-        client.close()
+        try:
+            batch = worker.run_forever(
+                agent_id=agent_id,
+                capability_id=capability_id,
+                capabilities=resolved_capabilities,
+                idle_sleep_seconds=idle_sleep_seconds,
+                max_iterations=max_iterations,
+                stop_event=stop_event,
+                max_local_recoveries=max_local_recoveries,
+            )
+            payload.extend(batch)
+            break
+        except Exception as exc:  # noqa: BLE001
+            restart_attempt += 1
+            backoff_seconds = min(30.0, max(idle_sleep_seconds, 0.25) * (2 ** (restart_attempt - 1)))
+            typer.echo(
+                f"[runtime] fatal worker error: {type(exc).__name__}: {exc}; reinitializing in {backoff_seconds:.1f}s",
+                err=True,
+            )
+            time.sleep(backoff_seconds)
+        finally:
+            stop_event.set()
+            client.close()
     typer.echo(payload)
+
+
+def _runtime_binding_warning(client, agent_id: str) -> str | None:
+    runtime_id = f"rtm_{agent_id}"
+    try:
+        getter = getattr(client, "ops_get_runtime", None) or getattr(client, "get_runtime", None)
+        runtime = getter(runtime_id) if getter is not None else None
+    except Exception:  # noqa: BLE001
+        runtime = None
+    if not runtime:
+        return f"WARNING: No runtime bound. Start one with: make runtime AGP_RUNTIME_AGENT_ID={agent_id}"
+    if str(runtime.get("hostname") or "").strip().lower() in {"", "unknown"}:
+        return f"WARNING: No runtime bound. Start one with: make runtime AGP_RUNTIME_AGENT_ID={agent_id}"
+    agents = runtime.get("agents") or []
+    if agents and not any(item.get("agent_id") == agent_id for item in agents):
+        return f"WARNING: No runtime bound. Start one with: make runtime AGP_RUNTIME_AGENT_ID={agent_id}"
+    return None
 
 
 @app.command(hidden=True)
@@ -480,6 +512,9 @@ def up(
         typer.echo(f"AGENT_ID:   {resolved_agent_id}")
         typer.echo(f"STATUS:     {agent.get('status', 'idle').upper()}")
         typer.echo(f"CWD:        {agent.get('workspace_ref') or '-'}")
+        warning = _runtime_binding_warning(client, resolved_agent_id)
+        if warning:
+            typer.echo(warning)
         typer.echo("-----------------------------------------")
         typer.echo("Ready. You may now route tasks using:")
         typer.echo(f"  agp send {resolved_agent_id} \"your prompt here\"")

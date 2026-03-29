@@ -445,6 +445,114 @@ class CodexAdapter(AgentAdapter):
         lines = [ln.rstrip() for ln in lines if ln.strip()]
         return "\n".join(lines[-n:])
 
+    def _idle_timeout_window(self) -> float:
+        if self.idle_timeout_seconds > 0:
+            return self.idle_timeout_seconds
+        # Keep a legacy fallback when the explicit idle timeout is unset so
+        # older configs still terminate, but all execution loops consume the
+        # resolved window as a single timeout budget.
+        if self.max_polls > 0 and self.poll_interval_seconds > 0:
+            return self.max_polls * self.poll_interval_seconds
+        return 180.0
+
+    def _progress_heartbeat_interval(self, *, timeout: float, poll_seconds: float) -> float:
+        baseline = poll_seconds if poll_seconds > 0 else 0.25
+        return max(baseline, min(10.0, max(timeout / 4.0, baseline)))
+
+    def _maybe_emit_progress_heartbeat(
+        self,
+        *,
+        supervisor: "RuntimeSupervisor",
+        claimed: dict[str, Any],
+        session: TerminalSession,
+        stage: str,
+        changed: bool,
+        poll: int,
+        now: float,
+        last_heartbeat_at: float,
+        heartbeat_interval: float,
+        extra: dict[str, Any] | None = None,
+    ) -> float:
+        if changed or now - last_heartbeat_at >= heartbeat_interval:
+            self._emit_progress_heartbeat(
+                supervisor=supervisor,
+                claimed=claimed,
+                session=session,
+                stage=stage,
+                changed=changed,
+                poll=poll,
+                extra=extra,
+            )
+            return now
+        return last_heartbeat_at
+
+    def _emit_progress_heartbeat(
+        self,
+        *,
+        supervisor: "RuntimeSupervisor",
+        claimed: dict[str, Any],
+        session: TerminalSession,
+        stage: str,
+        changed: bool,
+        poll: int,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        details = {
+            "adapter": self.kind,
+            "session_id": session.session_id,
+            "run_id": claimed["run"]["run_id"],
+            "stage": stage,
+            "changed": changed,
+            "poll": poll,
+        }
+        if extra:
+            details.update(extra)
+        supervisor.emit_progress(
+            claimed,
+            message="runtime.progress_heartbeat",
+            details=details,
+        )
+
+    def _salvage_timeout_artifacts(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        error: Exception,
+    ) -> list[ArtifactPayload]:
+        if not isinstance(error, ExecutionTimeout):
+            return []
+        artifacts: list[ArtifactPayload] = []
+        snapshot_text = ""
+        try:
+            snapshot = host.snapshot(session)
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        else:
+            snapshot_text = _strip_ansi(str(snapshot.get("text") or snapshot.get("accumulated_text") or ""))
+        try:
+            visible = _strip_ansi(host.read_visible(session))
+        except Exception:  # noqa: BLE001
+            visible = ""
+        pane_text = snapshot_text if snapshot_text.strip() else visible
+        if pane_text.strip():
+            artifacts.append(
+                ArtifactPayload(
+                    role="failure_evidence",
+                    name=f"{host.kind}-pane.txt",
+                    content=pane_text,
+                )
+            )
+        if visible.strip() and visible.strip() != pane_text.strip():
+            artifacts.append(
+                ArtifactPayload(
+                    role="failure_evidence",
+                    name=f"{host.kind}-visible.txt",
+                    content=visible,
+                )
+            )
+        return artifacts
+
     def execute_run(
         self,
         *,
@@ -514,15 +622,18 @@ class CodexAdapter(AgentAdapter):
 
         # Verify Codex produced a response, and auto-dismiss any gate prompts
         # (including first-run onboarding) that appear mid-run.
-        # 0.0 means "use default"; any positive value caps the run.
-        timeout = self.idle_timeout_seconds if self.idle_timeout_seconds > 0 else 180.0
-        deadline = monotonic() + timeout
+        timeout = self._idle_timeout_window()
+        idle_deadline = monotonic() + timeout
+        heartbeat_interval = self._progress_heartbeat_interval(timeout=timeout, poll_seconds=self.idle_poll_seconds)
         prev_screen = ""
         prev_tail = ""
         unchanged = 0
         tui_active = False  # True once the TUI has drawn at least one frame
         dispatch_time = monotonic()
-        while monotonic() < deadline:
+        last_heartbeat_at = dispatch_time
+        poll_count = 0
+        while monotonic() < idle_deadline:
+            poll_count += 1
             sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
@@ -530,10 +641,29 @@ class CodexAdapter(AgentAdapter):
             cursor = read.cursor
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
+            changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
+            now = monotonic()
+            if changed:
+                idle_deadline = now + timeout
+            last_heartbeat_at = self._maybe_emit_progress_heartbeat(
+                supervisor=supervisor,
+                claimed=claimed,
+                session=session,
+                stage="tui",
+                changed=changed,
+                poll=poll_count,
+                now=now,
+                last_heartbeat_at=last_heartbeat_at,
+                heartbeat_interval=heartbeat_interval,
+                extra={
+                    "tail_lines": len([ln for ln in tail.splitlines() if ln.strip()]),
+                    "idle_seconds_remaining": max(0.0, idle_deadline - now),
+                },
+            )
             # Only check for shell return after the TUI has had time to
             # render.  During the first few seconds the old shell prompt
             # may still be visible in scrollback while the TUI boots.
-            startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
+            startup_settled = tui_active or (now - dispatch_time > 5.0)
             if startup_settled and self._looks_like_shell_returned(screen):
                 raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
@@ -621,7 +751,13 @@ class CodexAdapter(AgentAdapter):
         host.send_text(session, self._task_payload(run_id=run_id, prompt=prompt), enter=True)
         transcript_parts: list[str] = [f"prompt={prompt}\n"]
         idle_count = 0
-        for attempt in range(self.max_polls):
+        timeout = self._idle_timeout_window()
+        idle_deadline = monotonic() + timeout
+        heartbeat_interval = self._progress_heartbeat_interval(timeout=timeout, poll_seconds=self.poll_interval_seconds)
+        last_heartbeat_at = monotonic()
+        attempt = 0
+        while monotonic() < idle_deadline:
+            attempt += 1
             supervisor.check_interrupt(claimed)
 
             if self.health_check_interval_polls > 0 and attempt > 0 and attempt % self.health_check_interval_polls == 0:
@@ -631,18 +767,22 @@ class CodexAdapter(AgentAdapter):
 
             read = host.read_output(session, cursor)
             cursor = read.cursor
+            now = monotonic()
             if read.changed and read.text:
                 idle_count = 0
+                idle_deadline = now + timeout
                 transcript_parts.append(read.text)
-                supervisor.emit_progress(
-                    claimed,
-                    message="runtime.output",
-                    details={
-                        "adapter": self.kind,
-                        "session_id": session.session_id,
-                        "poll": attempt + 1,
-                        "changed": True,
-                    },
+                last_heartbeat_at = self._maybe_emit_progress_heartbeat(
+                    supervisor=supervisor,
+                    claimed=claimed,
+                    session=session,
+                    stage="marker",
+                    changed=True,
+                    poll=attempt,
+                    now=now,
+                    last_heartbeat_at=last_heartbeat_at,
+                    heartbeat_interval=heartbeat_interval,
+                    extra={"idle_seconds_remaining": max(0.0, idle_deadline - now)},
                 )
                 try:
                     payload = self._extract_terminal_payload(run_id=run_id, output=read.full_text)
@@ -672,12 +812,23 @@ class CodexAdapter(AgentAdapter):
                     )
             else:
                 idle_count += 1
-                if self.idle_timeout_polls > 0 and idle_count >= self.idle_timeout_polls:
-                    raise ExecutionTimeout(
-                        f"codex adapter idle for {idle_count} consecutive polls — possible CLI wedge"
-                    )
+                last_heartbeat_at = self._maybe_emit_progress_heartbeat(
+                    supervisor=supervisor,
+                    claimed=claimed,
+                    session=session,
+                    stage="marker",
+                    changed=False,
+                    poll=attempt,
+                    now=now,
+                    last_heartbeat_at=last_heartbeat_at,
+                    heartbeat_interval=heartbeat_interval,
+                    extra={
+                        "idle_polls": idle_count,
+                        "idle_seconds_remaining": max(0.0, idle_deadline - now),
+                    },
+                )
             sleep(self.poll_interval_seconds)
-        raise ExecutionTimeout("codex adapter did not observe completion marker before poll budget exhausted")
+        raise ExecutionTimeout("codex adapter did not observe completion marker before idle timeout")
 
     def recover(
         self,
@@ -719,10 +870,12 @@ class CodexAdapter(AgentAdapter):
                 ],
                 summary={"adapter": self.kind, "host": host.kind, "exception_type": type(error).__name__},
             )
-        return super().build_failure_result(
+        result = super().build_failure_result(
             host=host,
             session=session,
             claimed=claimed,
             error=error,
             supervisor=supervisor,
         )
+        result.artifacts.extend(self._salvage_timeout_artifacts(host=host, session=session, error=error))
+        return result

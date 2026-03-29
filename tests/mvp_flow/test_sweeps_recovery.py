@@ -793,3 +793,53 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         with self.assertRaises(RecoverableExecutionError) as ctx:
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertIn("idle", str(ctx.exception))
+
+    def test_runtime_supervisor_run_forever_restarts_after_unrecoverable_run_once_error(self) -> None:
+        class ClientStub:
+            def __init__(self) -> None:
+                self.identity = type(
+                    "Identity",
+                    (),
+                    {"runtime_id": "rtm_restart", "metadata": {}, "server_url": "http://testserver"},
+                )()
+                self._log_fn = None
+                self.register_calls = 0
+                self.agent_up_calls = 0
+                self.agent_down_calls = 0
+
+            def register(self) -> dict:
+                self.register_calls += 1
+                return {"runtime_id": self.identity.runtime_id}
+
+            def agent_up(self, **kwargs) -> dict:  # noqa: ARG002
+                self.agent_up_calls += 1
+                return {"status": "ok"}
+
+            def agent_down(self, **kwargs) -> dict:  # noqa: ARG002
+                self.agent_down_calls += 1
+                return {"status": "ok"}
+
+        class RestartingSupervisor(RuntimeSupervisor):
+            def __init__(self, client) -> None:
+                super().__init__(
+                    client,
+                    host=InProcessTerminalHost(),
+                    adapter=DefaultAgentAdapter(),
+                    artifact_root=".agp-artifacts-tests",
+                )
+                self.calls = 0
+
+            def run_once(self, **kwargs) -> dict[str, object]:  # noqa: ARG002
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("worker crashed")
+                return {"claimed": False}
+
+        client = ClientStub()
+        worker = RestartingSupervisor(client)
+        outcomes = worker.run_forever(agent_id="agt_restart", max_iterations=1, idle_sleep_seconds=0.0)
+        self.assertEqual(worker.calls, 2)
+        self.assertEqual(outcomes, [{"claimed": False}])
+        self.assertEqual(client.register_calls, 1)
+        self.assertGreaterEqual(client.agent_up_calls, 1)
+        self.assertEqual(client.agent_down_calls, 1)

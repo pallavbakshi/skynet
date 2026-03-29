@@ -1562,6 +1562,54 @@ class TestRuntimeDebug(unittest.TestCase):
         self.assertEqual(observed["token"], "rtok")
         self.assertEqual(observed["server_url"], "http://cp:7860")
 
+    def test_runtime_work_loop_reinitializes_worker_after_fatal_error(self):
+        from agp.cli import runtime_work_loop
+
+        created_workers: list[object] = []
+        state = {"runs": 0}
+
+        class FakeWorker:
+            def __init__(self, *args, **kwargs) -> None:  # noqa: ARG002
+                created_workers.append(self)
+
+            def run_forever(self, **kwargs):
+                state["runs"] += 1
+                if state["runs"] == 1:
+                    raise RuntimeError("boom")
+                return [{"claimed": False}]
+
+        fake_settings = type(
+            "Settings",
+            (),
+            {
+                "runtime_terminal_host_kind": "inprocess",
+                "runtime_agent_adapter_kind": "default",
+                "wezterm_workspace": "agp-test",
+            },
+        )()
+
+        with patch("agp.cli._require_server_extra", return_value=None), \
+             patch("agp.client.RuntimeClient", side_effect=lambda identity: type("Client", (), {"close": lambda self: None})()), \
+             patch("agp.plugins.build_terminal_host", return_value=object()), \
+             patch("agp.plugins.build_agent_adapter", return_value=object()), \
+             patch("agp.runtime.RuntimeSupervisor", side_effect=lambda *args, **kwargs: FakeWorker()), \
+             patch("agp.config.settings", fake_settings), \
+             patch("agp.cli.typer.echo") as mock_echo, \
+             patch("agp.cli.time.sleep", return_value=None):
+            runtime_work_loop(
+                runtime_id="rtm_local",
+                server_url=None,
+                capabilities=None,
+                host_kind=None,
+                adapter_kind=None,
+                max_iterations=1,
+            )
+
+        self.assertEqual(len(created_workers), 2)
+        joined = "\n".join(str(call.args[0]) for call in mock_echo.call_args_list if call.args)
+        self.assertIn("reinitializing", joined)
+        self.assertIn("{'claimed': False}", joined)
+
 
 class TestWorkspaceCommands(unittest.TestCase):
     def test_workspace_resolve_command(self):
