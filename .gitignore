@@ -21,3 +21,7 @@ skyops.local.toml
 .skyops-pids/
 .superset/
 superset/
+.agp-test-verify.db
+.agp-test-verify.db-journal
+.agp-test-verify.db-shm
+.agp-test-verify.db-wal

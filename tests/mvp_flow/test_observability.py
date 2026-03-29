@@ -1,6 +1,13 @@
 """Observability, backup, restore, drills, and upgrade flows."""
 
 from tests.mvp_flow.base import *
+from agp.migrations import _discover_migrations
+
+
+def _current_schema_tag() -> str:
+    """Derive the expected schema version from the latest discovered migration."""
+    migrations = _discover_migrations()
+    return migrations[-1][0] if migrations else "0001_initial"
 
 
 class MvpFlowObservabilityTest(MvpFlowTestBase):
@@ -569,23 +576,25 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         self.assertIn("job.completed", result["event_types"])
 
     def test_upgrade_status_and_mark_persist_previous_versions(self) -> None:
+        expected_version = _current_schema_tag()
         initial = get_upgrade_status()
-        self.assertEqual(initial["schema_version"], "0002_dynamic_agent_mesh")
+        self.assertEqual(initial["schema_version"], expected_version)
         self.assertEqual(initial["release_version"], "0.1.0")
         self.assertIsNone(initial["previous_release_version"])
 
         updated = mark_upgrade(schema_version="0002_queue_backends", release_version="0.2.0")
         self.assertEqual(updated["schema_version"], "0002_queue_backends")
         self.assertEqual(updated["release_version"], "0.2.0")
-        self.assertEqual(updated["previous_schema_version"], "0002_dynamic_agent_mesh")
+        self.assertEqual(updated["previous_schema_version"], expected_version)
         self.assertEqual(updated["previous_release_version"], "0.1.0")
         self.assertEqual(updated["rollback_target_release_version"], "0.1.0")
 
     def test_upgrade_rollback_restores_immediately_previous_versions(self) -> None:
+        expected_version = _current_schema_tag()
         mark_upgrade(schema_version="0002_queue_backends", release_version="0.2.0")
         rolled_back = rollback_to_previous_version()
         self.assertEqual(rolled_back["release_version"], "0.1.0")
-        self.assertEqual(rolled_back["schema_version"], "0002_dynamic_agent_mesh")
+        self.assertEqual(rolled_back["schema_version"], expected_version)
         self.assertEqual(rolled_back["previous_release_version"], "0.2.0")
         self.assertEqual(rolled_back["previous_schema_version"], "0002_queue_backends")
 
@@ -594,10 +603,11 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             rollback_to_previous_version()
 
     def test_upgrade_status_is_exposed_over_operator_api(self) -> None:
+        expected_version = _current_schema_tag()
         response = self.client.get("/system/upgrade-status")
         self.assertEqual(response.status_code, 200)
         data = response.json()["data"]
-        self.assertEqual(data["schema_version"], "0002_dynamic_agent_mesh")
+        self.assertEqual(data["schema_version"], expected_version)
         self.assertEqual(data["release_version"], "0.1.0")
 
     def test_runtime_registration_enforces_supported_version_skew(self) -> None:
