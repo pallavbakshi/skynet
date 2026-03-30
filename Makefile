@@ -54,10 +54,10 @@ _RUNTIME_API_KEY       := $(or $(OPENAI_API_KEY),$(OPENROUTER_API_KEY))
 _RUNTIME_BASE_URL      := $(or $(OPENAI_BASE_URL),$(if $(OPENROUTER_API_KEY),https://openrouter.ai/api/v1))
 
 # Codex profile and launch command.
-#   make runtime                        — OpenRouter (default)
-#   make runtime CODEX_PROFILE=apikey   — direct OpenAI via OPENAI_API_KEY
-#   make runtime CODEX_PROFILE=         — OAuth / codex default credentials
-CODEX_PROFILE          ?= openrouter
+#   make runtime                              — OAuth / codex default credentials
+#   make runtime CODEX_PROFILE=openrouter     — OpenRouter via OPENROUTER_API_KEY
+#   make runtime CODEX_PROFILE=apikey         — direct OpenAI via OPENAI_API_KEY
+CODEX_PROFILE          ?=
 
 ifneq ($(CODEX_PROFILE),)
 _PROVIDER_ENV         := OPENAI_API_KEY="$(_RUNTIME_API_KEY)" OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)"
@@ -361,11 +361,17 @@ runtime-stop-remote: ## Stop local runtime worker process
 	done
 	@echo "Runtime worker stopped."
 
-runtime-clean-tmux: ## Kill tmux session for the runtime agent
+runtime-clean-tmux: ## Kill all agp-* tmux sessions (or one if AGP_RUNTIME_AGENT_ID is set)
 	@if command -v tmux >/dev/null 2>&1; then \
-		tmux kill-session -t "agp-$(AGP_RUNTIME_AGENT_ID)" 2>/dev/null || true; \
+		if [ "$(AGP_RUNTIME_AGENT_ID)" != "agt_local" ]; then \
+			tmux kill-session -t "agp-$(AGP_RUNTIME_AGENT_ID)" 2>/dev/null || true; \
+		else \
+			for sess in $$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^agp-'); do \
+				tmux kill-session -t "$$sess" 2>/dev/null || true; \
+			done; \
+		fi; \
 	fi
-	@echo "tmux session cleaned."
+	@echo "tmux sessions cleaned."
 
 runtime-clean-wezterm: ## Kill WezTerm panes for the runtime agent
 	@if command -v wezterm >/dev/null 2>&1; then \
@@ -373,7 +379,31 @@ runtime-clean-wezterm: ## Kill WezTerm panes for the runtime agent
 	fi
 	@echo "WezTerm panes cleaned."
 
-runtime-clean: runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm ## Full runtime cleanup
+runtime-clean: ## Tear down ALL agents on the CP + kill local processes and sessions
+	@echo "Tearing down all agents registered with CP..."
+	@_url=""; \
+	for u in http://127.0.0.1:$(AGP_PORT) $(AGP_REMOTE_SERVER_URL); do \
+		if curl -sf "$$u/ops/health" >/dev/null 2>&1; then _url="$$u"; break; fi; \
+	done; \
+	if [ -n "$$_url" ]; then \
+		for agent_id in $$(curl -s "$$_url/agents" | python3 -c "import sys,json; [print(a['agent_id']) for a in json.load(sys.stdin).get('data',{}).get('items',[])]" 2>/dev/null); do \
+			echo "  agp down --force $$agent_id"; \
+			$(RUN) agp down "$$agent_id" --force --server-url "$$_url" 2>/dev/null || true; \
+		done; \
+	else \
+		echo "  (CP not reachable — skipping agent teardown)"; \
+	fi
+	@for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \
+		$(SUDO) kill $$pid 2>/dev/null || kill $$pid 2>/dev/null || true; \
+	done
+	@if command -v tmux >/dev/null 2>&1; then \
+		for sess in $$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^agp-'); do \
+			tmux kill-session -t "$$sess" 2>/dev/null || true; \
+		done; \
+	fi
+	@if command -v wezterm >/dev/null 2>&1; then \
+		wezterm cli list --format json 2>/dev/null | python3 -c 'import json, subprocess, sys; raw = sys.stdin.read().strip(); panes = json.loads(raw) if raw else []; [subprocess.run(["wezterm", "cli", "kill-pane", "--pane-id", str(p["pane_id"])], check=False) for p in panes if "AGP:" in (p.get("tab_title") or "")]' || true; \
+	fi
 	@echo "Runtime cleanup complete."
 
 runtime-deploy: ## Generate deploy script for a remote runtime
