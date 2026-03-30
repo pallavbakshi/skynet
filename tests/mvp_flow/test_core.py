@@ -4,6 +4,426 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):
+    def _claim_single_run(self, *, agent_id: str, runtime_id: str, text: str = "work") -> dict:
+        self.client.post("/runtimes/register", json={"runtime_id": runtime_id, "hostname": runtime_id})
+        self.client.post("/agents/up", json={"agent_id": agent_id, "capabilities": ["python"]})
+        send = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": agent_id},
+                "message": {"text": text, "metadata": {}},
+            },
+            headers={"Idempotency-Key": f"{agent_id}-{runtime_id}-{text}"},
+        )
+        self.assertEqual(send.status_code, 200)
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": runtime_id, "agent_id": agent_id},
+        )
+        self.assertEqual(claim.status_code, 200)
+        claim_data = claim.json()["data"]
+        self.assertTrue(claim_data["claimed"])
+        return claim_data
+
+    def _assert_agent_and_runtime_idle(self, *, agent_id: str, runtime_id: str) -> None:
+        agent = self.client.get(f"/agents/{agent_id}")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "idle")
+        runtime = self.client.get(f"/runtimes/{runtime_id}")
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["data"]["status"], "idle")
+        self.assertEqual(runtime.json()["data"]["active_run_count"], 0)
+
+    def _assert_agent_and_runtime_busy(self, *, agent_id: str, runtime_id: str, active_run_count: int) -> None:
+        agent = self.client.get(f"/agents/{agent_id}")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "busy")
+        runtime = self.client.get(f"/runtimes/{runtime_id}")
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["data"]["status"], "busy")
+        self.assertEqual(runtime.json()["data"]["active_run_count"], active_run_count)
+
+    def _seed_active_run_and_lease(self, *, agent_id: str, runtime_id: str, suffix: str) -> None:
+        now = utc_now()
+        session = SessionLocal()
+        try:
+            message = Message(
+                message_id=f"msg_{suffix}",
+                target_type="agent",
+                target_id=agent_id,
+                text=f"extra-{suffix}",
+                metadata_json={},
+                conversation_id=f"conv_{suffix}",
+                created_at=now,
+            )
+            job = Job(
+                job_id=f"job_{suffix}",
+                message_id=message.message_id,
+                target_agent_id=agent_id,
+                target_queue=f"agent:{agent_id}",
+                status="running",
+                retry_count=0,
+                max_retries=3,
+                latest_run_id=f"run_{suffix}",
+                conversation_id=message.conversation_id,
+                created_at=now,
+                updated_at=now,
+            )
+            run = Run(
+                run_id=f"run_{suffix}",
+                job_id=job.job_id,
+                agent_id=agent_id,
+                runtime_id=runtime_id,
+                attempt=1,
+                status="running",
+                started_at=now,
+                created_at=now,
+            )
+            lease = Lease(
+                lease_id=f"lease_{suffix}",
+                run_id=run.run_id,
+                agent_id=agent_id,
+                runtime_id=runtime_id,
+                fencing_token=99,
+                status="active",
+                expires_at=now + timedelta(minutes=5),
+                created_at=now,
+            )
+            session.add_all([message, job, run, lease])
+            session.commit()
+        finally:
+            session.close()
+
+    def _seed_active_run_only(self, *, agent_id: str, runtime_id: str, suffix: str) -> None:
+        now = utc_now()
+        session = SessionLocal()
+        try:
+            message = Message(
+                message_id=f"msg_{suffix}",
+                target_type="agent",
+                target_id=agent_id,
+                text=f"extra-{suffix}",
+                metadata_json={},
+                conversation_id=f"conv_{suffix}",
+                created_at=now,
+            )
+            job = Job(
+                job_id=f"job_{suffix}",
+                message_id=message.message_id,
+                target_agent_id=agent_id,
+                target_queue=f"agent:{agent_id}",
+                status="running",
+                retry_count=0,
+                max_retries=3,
+                latest_run_id=f"run_{suffix}",
+                conversation_id=message.conversation_id,
+                created_at=now,
+                updated_at=now,
+            )
+            run = Run(
+                run_id=f"run_{suffix}",
+                job_id=job.job_id,
+                agent_id=agent_id,
+                runtime_id=runtime_id,
+                attempt=1,
+                status="running",
+                started_at=now,
+                created_at=now,
+            )
+            session.add_all([message, job, run])
+            session.commit()
+        finally:
+            session.close()
+
+    def _seed_active_lease_only(self, *, runtime_id: str, suffix: str) -> None:
+        now = utc_now()
+        session = SessionLocal()
+        try:
+            message = Message(
+                message_id=f"msg_{suffix}",
+                target_type="agent",
+                target_id=f"agt_{suffix}",
+                text=f"extra-{suffix}",
+                metadata_json={},
+                conversation_id=f"conv_{suffix}",
+                created_at=now,
+            )
+            job = Job(
+                job_id=f"job_{suffix}",
+                message_id=message.message_id,
+                target_agent_id=None,
+                target_queue=f"agent:agt_{suffix}",
+                status="completed",
+                retry_count=0,
+                max_retries=3,
+                latest_run_id=f"run_{suffix}",
+                conversation_id=message.conversation_id,
+                created_at=now,
+                updated_at=now,
+            )
+            run = Run(
+                run_id=f"run_{suffix}",
+                job_id=job.job_id,
+                agent_id=f"agt_{suffix}",
+                runtime_id=runtime_id,
+                attempt=1,
+                status="completed",
+                started_at=now,
+                finished_at=now,
+                created_at=now,
+            )
+            lease = Lease(
+                lease_id=f"lease_{suffix}",
+                run_id=run.run_id,
+                agent_id=f"agt_{suffix}",
+                runtime_id=runtime_id,
+                fencing_token=99,
+                status="active",
+                expires_at=now + timedelta(minutes=5),
+                created_at=now,
+            )
+            session.add_all([message, job, run, lease])
+            session.commit()
+        finally:
+            session.close()
+
+    def test_complete_run_returns_agent_and_runtime_to_idle(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_complete_idle", runtime_id="rtm_complete_idle", text="complete")
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        complete = self.client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": "rtm_complete_idle",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+        self._assert_agent_and_runtime_idle(agent_id="agt_complete_idle", runtime_id="rtm_complete_idle")
+
+    def test_fail_run_returns_agent_and_runtime_to_idle(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_fail_idle", runtime_id="rtm_fail_idle", text="fail")
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        fail = self.client.post(
+            f"/runs/{run_id}/fail",
+            json={
+                "runtime_id": "rtm_fail_idle",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "error": "boom",
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                        "failure.txt": "failure_evidence",
+                    }
+                ),
+                "summary": {"ok": False},
+            },
+        )
+        self.assertEqual(fail.status_code, 200)
+        self._assert_agent_and_runtime_idle(agent_id="agt_fail_idle", runtime_id="rtm_fail_idle")
+
+    def test_cancel_run_returns_agent_and_runtime_to_idle(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_cancel_idle", runtime_id="rtm_cancel_idle", text="cancel")
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        cancel = self.client.post(
+            f"/runs/{run_id}/cancel",
+            json={
+                "runtime_id": "rtm_cancel_idle",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "reason": "test",
+            },
+        )
+        self.assertEqual(cancel.status_code, 200)
+        self._assert_agent_and_runtime_idle(agent_id="agt_cancel_idle", runtime_id="rtm_cancel_idle")
+
+    def test_complete_run_stays_busy_when_other_active_work_exists(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_complete_busy", runtime_id="rtm_complete_busy", text="first")
+        self._seed_active_run_and_lease(
+            agent_id="agt_complete_busy",
+            runtime_id="rtm_complete_busy",
+            suffix="complete_busy_extra",
+        )
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        complete = self.client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": "rtm_complete_busy",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+        self._assert_agent_and_runtime_busy(
+            agent_id="agt_complete_busy",
+            runtime_id="rtm_complete_busy",
+            active_run_count=1,
+        )
+
+    def test_complete_run_keeps_agent_busy_when_other_active_run_exists(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_run_only_busy", runtime_id="rtm_run_only_busy", text="first")
+        self._seed_active_run_only(
+            agent_id="agt_run_only_busy",
+            runtime_id="rtm_run_only_busy",
+            suffix="run_only_busy_extra",
+        )
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        complete = self.client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": "rtm_run_only_busy",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+
+        agent = self.client.get("/agents/agt_run_only_busy")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "busy")
+        runtime = self.client.get("/runtimes/rtm_run_only_busy")
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["data"]["status"], "idle")
+        self.assertEqual(runtime.json()["data"]["active_run_count"], 0)
+
+    def test_complete_run_keeps_runtime_busy_when_other_active_lease_exists(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_lease_only_busy", runtime_id="rtm_lease_only_busy", text="first")
+        self._seed_active_lease_only(
+            runtime_id="rtm_lease_only_busy",
+            suffix="lease_only_busy_extra",
+        )
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        complete = self.client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": "rtm_lease_only_busy",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "result.txt": "result",
+                    }
+                ),
+                "summary": {"ok": True},
+            },
+        )
+        self.assertEqual(complete.status_code, 200)
+
+        agent = self.client.get("/agents/agt_lease_only_busy")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "idle")
+        runtime = self.client.get("/runtimes/rtm_lease_only_busy")
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["data"]["status"], "busy")
+        self.assertEqual(runtime.json()["data"]["active_run_count"], 1)
+
+    def test_fail_run_preserves_draining_status(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_fail_drain", runtime_id="rtm_fail_drain", text="fail-drain")
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        drain = self.client.post("/agents/agt_fail_drain/down", json={"mode": "drain"})
+        self.assertEqual(drain.status_code, 200)
+
+        fail = self.client.post(
+            f"/runs/{run_id}/fail",
+            json={
+                "runtime_id": "rtm_fail_drain",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "error": "boom",
+                "artifacts": self._materialize_terminal_artifacts(
+                    {
+                        "prompt.txt": "prompt",
+                        "transcript.txt": "transcript_log",
+                        "exec.txt": "exec_log",
+                        "failure.txt": "failure_evidence",
+                    }
+                ),
+                "summary": {"ok": False},
+            },
+        )
+        self.assertEqual(fail.status_code, 200)
+        agent = self.client.get("/agents/agt_fail_drain")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "draining")
+
+    def test_cancel_run_preserves_draining_status(self) -> None:
+        claim = self._claim_single_run(agent_id="agt_cancel_drain", runtime_id="rtm_cancel_drain", text="cancel-drain")
+        run_id = claim["run"]["run_id"]
+        lease_id = claim["lease"]["lease_id"]
+        fencing_token = claim["lease"]["fencing_token"]
+
+        drain = self.client.post("/agents/agt_cancel_drain/down", json={"mode": "drain"})
+        self.assertEqual(drain.status_code, 200)
+
+        cancel = self.client.post(
+            f"/runs/{run_id}/cancel",
+            json={
+                "runtime_id": "rtm_cancel_drain",
+                "lease_id": lease_id,
+                "fencing_token": fencing_token,
+                "reason": "test",
+            },
+        )
+        self.assertEqual(cancel.status_code, 200)
+        agent = self.client.get("/agents/agt_cancel_drain")
+        self.assertEqual(agent.status_code, 200)
+        self.assertEqual(agent.json()["data"]["status"], "draining")
+
     def test_runtime_worker_stops_heartbeats_when_tui_dies(self) -> None:
         class TuiAwareHost(InProcessTerminalHost):
             def __init__(self) -> None:
