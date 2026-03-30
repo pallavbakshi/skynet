@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -17,7 +18,11 @@ from agp.runtime import (
     TerminalSession,
     _OutputAccumulator,
     _compute_output_delta,
+    _strip_ansi,
 )
+
+_SHELL_PROMPT_CHARS = {"\u276f", "\u2733", "$", "%", "#"}
+_logger = logging.getLogger(__name__)
 
 
 def _ensure_codex_config(base_url: str) -> None:
@@ -392,6 +397,46 @@ class TmuxHost(TerminalHost):
             reason=None,
             metadata={"host_kind": self.kind, "tmux_session": session.session_id},
         )
+
+    def is_foreground_tui(self, session: TerminalSession) -> bool:
+        """Check whether a TUI process is still in the foreground."""
+        completed = self._runner(
+            [self.tmux_bin, "capture-pane", "-t", session.session_id, "-p", "-S", "-50"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode != 0:
+            stderr = (completed.stderr or "").strip()
+            _logger.warning(
+                "tmux capture-pane failed during foreground TUI check for %s: %s",
+                session.session_id,
+                stderr or f"exit {completed.returncode}",
+            )
+            return True
+        screen = _strip_ansi(completed.stdout or "")
+        if not screen.strip():
+            return True
+        lines = screen.strip().splitlines()
+        tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
+        has_codex_tui = any("\u203a" in ln for ln in tail)
+        has_claude_tui = any(
+            ln.startswith("\u23fa")
+            or ln.startswith("\u25cf")
+            or ln.startswith("\u256d") or ln.startswith("\u2570")
+            or "\u23f5\u23f5" in ln
+            or all(ch == "\u2500" for ch in ln if ch != " ")
+            for ln in tail if ln
+        )
+        has_shell = any(
+            ln[0] in _SHELL_PROMPT_CHARS or ln[-1] in ("$", "%", "#")
+            for ln in tail if ln
+        )
+        if has_codex_tui or has_claude_tui:
+            return True
+        if has_shell:
+            return False
+        return True
 
     def read_visible(self, session: TerminalSession) -> str:
         """Read the currently visible screen (no scrollback)."""

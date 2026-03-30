@@ -575,6 +575,10 @@ class ClaudeCodeAdapter(AgentAdapter):
             raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
+        startup_settled_event = session.metadata.get("startup_settled_event") or getattr(
+            supervisor, "_active_startup_settled", None,
+        )
+        setattr(supervisor, "_active_session", session)
         supervisor.emit_progress(
             claimed,
             message="runtime.tui_dispatch",
@@ -604,6 +608,8 @@ class ClaudeCodeAdapter(AgentAdapter):
             tail = self._screen_tail(screen)
 
             startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
+            if startup_settled_event is not None and startup_settled:
+                startup_settled_event.set()
             if startup_settled and self._looks_like_shell_returned(screen):
                 raise PaneDied("claude code cli exited during execution")
 

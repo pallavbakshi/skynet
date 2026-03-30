@@ -35,7 +35,7 @@ import json
 from typing import Deque, Protocol
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
@@ -44,6 +44,11 @@ from agp.models import Job, QueueDeliveryRecord, utc_now
 
 def _new_delivery_id() -> str:
     return f"qdl_{uuid4().hex[:12]}"
+
+
+def db_dialect_name(db: Session) -> str:
+    bind = db.get_bind()
+    return bind.dialect.name if bind is not None else ""
 
 
 @dataclass(slots=True)
@@ -105,39 +110,78 @@ class DbQueueBackend:
     def enqueue_job(self, db: Session, *, job: Job) -> None:  # noqa: ARG002
         return None
 
-    def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
-        job = db.scalar(
-            select(Job)
+    def _candidate_query(self, db: Session, *, target_queues: list[str]):
+        query = (
+            select(Job.job_id)
             .where(
                 Job.status == JobStatus.QUEUED.value,
                 Job.retry_count < Job.max_retries,
                 Job.target_queue.in_(target_queues),
             )
             .order_by(Job.created_at.asc())
+            .limit(1)
         )
-        if job is None:
+        if db_dialect_name(db) == "postgresql":
+            query = query.with_for_update(skip_locked=True)
+        return query
+
+    def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
+        now = utc_now()
+        candidate = self._candidate_query(db, target_queues=target_queues)
+        row = db.execute(
+            update(Job)
+            .where(
+                Job.job_id == candidate.scalar_subquery(),
+                Job.status == JobStatus.QUEUED.value,
+            )
+            .values(status=JobStatus.ACCEPTED.value, updated_at=now)
+            .returning(Job.job_id, Job.target_queue)
+        ).mappings().first()
+        if row is None:
             return None
         return QueueDelivery(
-            delivery_id=f"legacy_{job.job_id}",
-            job_id=job.job_id,
-            target_queue=job.target_queue,
+            delivery_id=f"legacy_{row['job_id']}",
+            job_id=row["job_id"],
+            target_queue=row["target_queue"],
             delivery_attempt=0,
         )
 
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
         return None
 
-    def release_unclaimed(self, db: Session, *, delivery: QueueDelivery | None) -> None:  # noqa: ARG002
-        return None
+    def release_unclaimed(self, db: Session, *, delivery: QueueDelivery | None) -> None:
+        if delivery is None:
+            return
+        db.execute(
+            update(Job)
+            .where(
+                Job.job_id == delivery.job_id,
+                Job.status == JobStatus.ACCEPTED.value,
+            )
+            .values(status=JobStatus.QUEUED.value, updated_at=utc_now())
+        )
 
     def redrive_stale_deliveries(
         self,
         db: Session,
         *,
-        visibility_timeout_seconds: int,  # noqa: ARG002
+        visibility_timeout_seconds: int,
         max_delivery_attempts: int,  # noqa: ARG002
     ) -> dict[str, int]:
-        return {"redriven_deliveries": 0, "dead_lettered_deliveries": 0}
+        from datetime import timedelta
+
+        now = utc_now()
+        cutoff = now - timedelta(seconds=visibility_timeout_seconds)
+        result = db.execute(
+            update(Job)
+            .where(
+                Job.status == JobStatus.ACCEPTED.value,
+                Job.updated_at < cutoff,
+            )
+            .values(status=JobStatus.QUEUED.value, updated_at=now)
+        )
+        redriven = result.rowcount
+        return {"redriven_deliveries": redriven, "dead_lettered_deliveries": 0}
 
     def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
         return None
@@ -177,8 +221,8 @@ class DeliveryTableQueueBackend:
 
     def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
         now = utc_now()
-        delivery = db.scalar(
-            select(QueueDeliveryRecord)
+        candidate = (
+            select(QueueDeliveryRecord.delivery_id)
             .join(Job, Job.job_id == QueueDeliveryRecord.job_id)
             .where(
                 QueueDeliveryRecord.state == "pending",
@@ -188,18 +232,36 @@ class DeliveryTableQueueBackend:
                 Job.retry_count < Job.max_retries,
             )
             .order_by(QueueDeliveryRecord.available_at.asc(), QueueDeliveryRecord.created_at.asc())
+            .limit(1)
         )
-        if delivery is None:
+        if db_dialect_name(db) == "postgresql":
+            candidate = candidate.with_for_update(skip_locked=True)
+        row = db.execute(
+            update(QueueDeliveryRecord)
+            .where(
+                QueueDeliveryRecord.delivery_id == candidate.scalar_subquery(),
+                QueueDeliveryRecord.state == "pending",
+            )
+            .values(
+                state="delivered",
+                delivery_attempt=QueueDeliveryRecord.delivery_attempt + 1,
+                last_delivered_at=now,
+                updated_at=now,
+            )
+            .returning(
+                QueueDeliveryRecord.delivery_id,
+                QueueDeliveryRecord.job_id,
+                QueueDeliveryRecord.target_queue,
+                QueueDeliveryRecord.delivery_attempt,
+            )
+        ).mappings().first()
+        if row is None:
             return None
-        delivery.state = "delivered"
-        delivery.delivery_attempt += 1
-        delivery.last_delivered_at = now
-        delivery.updated_at = now
         return QueueDelivery(
-            delivery_id=delivery.delivery_id,
-            job_id=delivery.job_id,
-            target_queue=delivery.target_queue,
-            delivery_attempt=delivery.delivery_attempt,
+            delivery_id=row["delivery_id"],
+            job_id=row["job_id"],
+            target_queue=row["target_queue"],
+            delivery_attempt=row["delivery_attempt"],
         )
 
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002

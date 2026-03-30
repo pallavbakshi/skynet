@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agp.enums import HealthStatus
-from agp.models import Runtime, utc_now
+from agp.enums import HealthStatus, LeaseStatus
+from agp.models import Lease, Runtime, utc_now
 from agp.services._helpers import _assert_supported_runtime_skew, _new_id, _record_health_transition
 from agp.services.events import _create_event
 
@@ -49,7 +50,18 @@ def register_runtime_service(
         runtime.hostname = hostname
         runtime.release_version = release_version
         runtime.metadata_json = metadata
-        runtime.status = "idle"
+        # Only reset to idle if no active leases exist for this runtime.
+        # If leases are active, the runtime is still doing work — preserve busy.
+        active_leases = db.scalar(
+            select(func.count()).select_from(Lease).where(
+                Lease.runtime_id == resolved_id,
+                Lease.status == LeaseStatus.ACTIVE.value,
+            )
+        )
+        if active_leases:
+            runtime.status = "busy"
+        else:
+            runtime.status = "idle"
         runtime.health_status = HealthStatus.HEALTHY.value
         runtime.last_seen_at = utc_now()
         runtime.last_heartbeat_at = utc_now()

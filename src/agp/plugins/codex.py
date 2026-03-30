@@ -604,6 +604,10 @@ class CodexAdapter(AgentAdapter):
             raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
+        startup_settled_event = session.metadata.get("startup_settled_event") or getattr(
+            supervisor, "_active_startup_settled", None,
+        )
+        setattr(supervisor, "_active_session", session)
         supervisor.emit_progress(
             claimed,
             message="runtime.tui_dispatch",
@@ -664,6 +668,8 @@ class CodexAdapter(AgentAdapter):
             # render.  During the first few seconds the old shell prompt
             # may still be visible in scrollback while the TUI boots.
             startup_settled = tui_active or (now - dispatch_time > 5.0)
+            if startup_settled_event is not None and startup_settled:
+                startup_settled_event.set()
             if startup_settled and self._looks_like_shell_returned(screen):
                 raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):

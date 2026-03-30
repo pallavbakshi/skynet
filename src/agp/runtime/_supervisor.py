@@ -153,6 +153,10 @@ class RuntimeSupervisor:
         return _failure_snapshot_payloads(host=self.host, session=session, error=error)
 
     def check_interrupt(self, claimed: dict[str, Any]) -> None:
+        tui_died = getattr(self, "_active_tui_died", None)
+        if tui_died is not None and tui_died.is_set():
+            reason = getattr(self, "_active_tui_died_reason", "tui exited during execution")
+            raise PaneDied(reason)
         job = self.client.get_job(claimed["job"]["job_id"])
         if job["status"] == "interrupt_requested":
             raise InterruptRequested("interrupt requested by control plane")
@@ -336,6 +340,7 @@ class RuntimeSupervisor:
         run = claimed["run"]
         lease = claimed["lease"]
         session = self.host.get_or_create_session(agent_id=claimed["agent_id"])
+        self._active_session = session
         # Attempt to restore a cursor checkpoint from a previous runtime
         # process.  The adapter can use this via session.metadata["restored_cursor"].
         restored = self.host.load_cursor(session)
@@ -343,6 +348,10 @@ class RuntimeSupervisor:
             session.metadata["restored_cursor"] = restored
         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
         stop = Event()
+        startup_settled = Event()
+        tui_died = Event()
+        session.metadata["startup_settled_event"] = startup_settled
+        self._active_startup_settled = startup_settled
 
         max_missed_heartbeats = 6
         lease_lost = Event()  # signals that we lost the lease / fencing
@@ -361,8 +370,37 @@ class RuntimeSupervisor:
 
         def heartbeat_loop() -> None:
             consecutive_misses = 0
+            heartbeat_count = 0
             try:
                 while not stop.wait(heartbeat_interval_seconds):
+                    if (
+                        startup_settled.is_set()
+                        and hasattr(self.host, "is_foreground_tui")
+                        and heartbeat_count % 3 == 2
+                    ):
+                        active_session = getattr(self, "_active_session", session)
+                        try:
+                            if not self.host.is_foreground_tui(active_session):
+                                _append_runtime_log(
+                                    self.client.identity.runtime_id,
+                                    {
+                                        "kind": "runtime_worker",
+                                        "action": "tui_died_detected",
+                                        "run_id": run["run_id"],
+                                        "session_id": active_session.session_id,
+                                        "host_kind": self.host.kind,
+                                    },
+                                )
+                                self._active_tui_died_reason = "tui exited during execution"
+                                tui_died.set()
+                                try:
+                                    self.host.interrupt(active_session)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                                stop.set()
+                                break
+                        except Exception:  # noqa: BLE001
+                            _logger.warning("foreground TUI check failed", exc_info=True)
                     try:
                         resp = _hb_client.post(
                             f"/runs/{run['run_id']}/heartbeat",
@@ -376,6 +414,7 @@ class RuntimeSupervisor:
                         resp.raise_for_status()
                         hb_response = resp.json()["data"]
                         consecutive_misses = 0
+                        heartbeat_count += 1
                         if isinstance(hb_response, dict) and hb_response.get("interrupt_requested"):
                             _append_runtime_log(
                                 self.client.identity.runtime_id,
@@ -383,7 +422,7 @@ class RuntimeSupervisor:
                             )
                             claimed["job"]["status"] = "interrupt_requested"
                             try:
-                                self.host.interrupt(session)
+                                self.host.interrupt(getattr(self, "_active_session", session))
                             except Exception:  # noqa: BLE001
                                 pass
                             stop.set()
@@ -411,7 +450,7 @@ class RuntimeSupervisor:
                             )
                             lease_lost.set()
                             try:
-                                self.host.interrupt(session)
+                                self.host.interrupt(getattr(self, "_active_session", session))
                             except Exception:  # noqa: BLE001
                                 pass
                             stop.set()
@@ -427,6 +466,8 @@ class RuntimeSupervisor:
         )
         thread = Thread(target=heartbeat_loop, daemon=True)
         thread.start()
+        self._active_tui_died = tui_died
+        self._active_tui_died_reason = "tui exited during execution"
         try:
             _append_runtime_log(
                 self.client.identity.runtime_id,
@@ -460,6 +501,8 @@ class RuntimeSupervisor:
                         claimed=claimed,
                         supervisor=self,
                     )
+                    if tui_died.is_set():
+                        raise PaneDied(self._active_tui_died_reason)
                     break
                 except RecoverableExecutionError as exc:
                     if attempts >= max_local_recoveries:
@@ -503,13 +546,22 @@ class RuntimeSupervisor:
                         # the same session — re-raise to exhaust the budget
                         # and report the real cause.
                         raise
+                    prior_session = session
+                    startup_settled.clear()
+                    prior_session.metadata.pop("startup_settled_event", None)
                     if isinstance(exc, PaneDied) or not self.host.session_exists(session):
                         session = self.host.get_or_create_session(
                             agent_id=claimed["agent_id"],
                             workspace_ref=session.workspace_ref,
                         )
+                        session.metadata["startup_settled_event"] = startup_settled
+                        self._active_startup_settled = startup_settled
+                        self._active_session = session
                         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
                     else:
+                        session.metadata["startup_settled_event"] = startup_settled
+                        self._active_startup_settled = startup_settled
+                        self._active_session = session
                         self.adapter.recover(
                             host=self.host,
                             session=session,
@@ -652,6 +704,11 @@ class RuntimeSupervisor:
                 return {"claimed": True, "claim": claimed, "error": str(exc)}
             return {"claimed": True, "claim": claimed, "error": str(exc), "result": failed}
         finally:
+            self._active_session = None
+            self._active_startup_settled = None
+            self._active_tui_died = None
+            self._active_tui_died_reason = None
+            session.metadata.pop("startup_settled_event", None)
             stop.set()
             thread.join(timeout=heartbeat_interval_seconds + 1.0)
             _hb_client.close()  # idempotent if thread already closed it

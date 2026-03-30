@@ -188,8 +188,8 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             "/runs/claim",
             json={"runtime_id": "rtm_memq", "agent_id": "agt_memq"},
         )
-        self.assertEqual(second.status_code, 200)
-        self.assertFalse(second.json()["data"]["claimed"])
+        self.assertEqual(second.status_code, 409)
+        self.assertIn("busy", str(second.json()))
 
     def test_redis_backend_claims_and_redrives_with_shadow_delivery_records(self) -> None:
         settings.queue_backend = "redis"

@@ -6,9 +6,13 @@ the full control-plane route layer.
 
 from __future__ import annotations
 
+import threading
+
+from sqlalchemy import select
+
 from agp.db import SessionLocal
 from agp.enums import JobStatus
-from agp.models import Agent, Job, Message, utc_now
+from agp.models import Agent, Job, Message, QueueDeliveryRecord, utc_now
 from agp.queue_backend import (
     DbQueueBackend,
     DeliveryTableQueueBackend,
@@ -62,6 +66,32 @@ def _seed_job(session, agent_id: str = "agt_q", job_id: str = "job_q") -> Job:
     return job
 
 
+def _concurrent_dequeue_attempts(backend, *, target_queue: str) -> list[QueueDelivery | None]:
+    barrier = threading.Barrier(2)
+    results: list[QueueDelivery | None] = [None, None]
+    errors: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        session = SessionLocal()
+        try:
+            barrier.wait()
+            results[index] = backend.dequeue_candidate(session, target_queues=[target_queue])
+            session.commit()
+        except BaseException as exc:  # pragma: no cover - surfaced by assertion below
+            errors.append(exc)
+        finally:
+            session.close()
+
+    threads = [threading.Thread(target=worker, args=(idx,)) for idx in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    if errors:
+        raise errors[0]
+    return results
+
+
 class DbBackendContractTest(AgpTestCase):
     """DbQueueBackend: polls jobs table directly, no delivery records."""
 
@@ -100,6 +130,31 @@ class DbBackendContractTest(AgpTestCase):
             backend.release_unclaimed(session, delivery=delivery)
         finally:
             session.close()
+
+    def test_dequeue_is_atomic_under_concurrent_claims(self) -> None:
+        backend = DbQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job_id = job.job_id
+            session.commit()
+        finally:
+            session.close()
+
+        results = _concurrent_dequeue_attempts(backend, target_queue="agent:agt_q")
+        claimed = [delivery for delivery in results if delivery is not None]
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0].job_id, job_id)
+
+        verify = SessionLocal()
+        try:
+            refreshed = verify.get(Job, job_id)
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertEqual(refreshed.status, JobStatus.ACCEPTED.value)
+        finally:
+            verify.close()
 
 
 class DeliveryTableBackendContractTest(AgpTestCase):
@@ -171,6 +226,36 @@ class DeliveryTableBackendContractTest(AgpTestCase):
             self.assertIsNotNone(dead)
         finally:
             session.close()
+
+    def test_dequeue_is_atomic_under_concurrent_claims(self) -> None:
+        backend = DeliveryTableQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job_id = job.job_id
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+        finally:
+            session.close()
+
+        results = _concurrent_dequeue_attempts(backend, target_queue="agent:agt_q")
+        claimed = [delivery for delivery in results if delivery is not None]
+        self.assertEqual(len(claimed), 1)
+        self.assertEqual(claimed[0].job_id, job_id)
+
+        verify = SessionLocal()
+        try:
+            record = verify.scalars(
+                select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job_id)
+            ).first()
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record.state, "delivered")
+            self.assertEqual(record.delivery_attempt, 1)
+        finally:
+            verify.close()
 
 
 class InMemoryBrokerContractTest(AgpTestCase):

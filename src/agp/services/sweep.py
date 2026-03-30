@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from agp.config import settings
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import Agent, Job, Lease, Run, Runtime, utc_now
+from agp.queue_backend import get_queue_backend
 from agp.services._helpers import (
     _record_health_transition,
     _require_job,
@@ -31,6 +32,7 @@ def _nullify_agent_references(db: Session, agent_id: str) -> None:
 def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """Expire leases whose TTL has passed, abandon runs, requeue or fail jobs."""
     now = now or utc_now()
+    queue_backend = get_queue_backend(settings.queue_backend)
     expired = db.scalars(
         select(Lease).where(
             Lease.status == LeaseStatus.ACTIVE.value,
@@ -58,6 +60,7 @@ def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[st
         else:
             job.retry_count += 1
             job.status = JobStatus.QUEUED.value
+            queue_backend.enqueue_job(db, job=job)
             requeued += 1
         job.updated_at = now
 

@@ -11,6 +11,7 @@ from datetime import timedelta
 from agp.db import SessionLocal
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import Agent, Job, Lease, Message, Run, Runtime, utc_now
+from agp.queue_backend import reset_queue_backend_state
 from agp.services.sweep import (
     sweep_draining_runtimes,
     sweep_expired_leases,
@@ -47,6 +48,31 @@ class SweepExpiredLeasesTest(AgpTestCase):
             self.assertEqual(result["requeued_jobs"], 1)
             session.refresh(entities["job"])
             self.assertEqual(entities["job"].status, JobStatus.QUEUED.value)
+        finally:
+            session.close()
+
+    def test_expired_lease_republishes_job_to_active_backend(self) -> None:
+        from agp.config import settings
+        from agp.queue_backend import get_queue_backend
+
+        settings.queue_backend = "inmemory_broker"
+        reset_queue_backend_state("inmemory_broker")
+        session = SessionLocal()
+        try:
+            entities = _seed_full_claim(session, lease_ttl=-1)
+            job_id = entities["job"].job_id
+            target_queue = entities["job"].target_queue
+            session.commit()
+            result = sweep_expired_leases(session)
+            self.assertEqual(result["requeued_jobs"], 1)
+
+            session.close()
+            session = SessionLocal()
+            backend = get_queue_backend("inmemory_broker")
+            delivery = backend.dequeue_candidate(session, target_queues=[target_queue])
+            self.assertIsNotNone(delivery)
+            assert delivery is not None
+            self.assertEqual(delivery.job_id, job_id)
         finally:
             session.close()
 

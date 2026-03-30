@@ -4,6 +4,255 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowCoreTest(MvpFlowTestBase):
+    def test_runtime_worker_stops_heartbeats_when_tui_dies(self) -> None:
+        class TuiAwareHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self._foreground_checks = 0
+
+            def is_foreground_tui(self, session) -> bool:  # noqa: ARG002
+                self._foreground_checks += 1
+                return False
+
+        class WaitingAdapter(DefaultAgentAdapter):
+            @property
+            def kind(self) -> str:
+                return "waiting"
+
+            def execute_run(self, *, host, session, claimed, supervisor):  # noqa: ARG002
+                startup_settled = session.metadata.get("startup_settled_event")
+                assert startup_settled is not None
+                startup_settled.set()
+                while True:
+                    sleep(0.005)
+                    supervisor.check_interrupt(claimed)
+
+        class FakeRuntimeClient:
+            def __init__(self) -> None:
+                self._log_fn = None
+                self.identity = type(
+                    "Identity",
+                    (),
+                    {"runtime_id": "rtm_tui_dead", "server_url": "http://example.invalid", "token": None, "metadata": {}},
+                )()
+                self.heartbeat_calls: list[dict[str, object]] = []
+                self.progress_calls: list[dict[str, object]] = []
+                self.fail_calls: list[dict[str, object]] = []
+
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+                return {
+                    "claimed": True,
+                    "agent_id": agent_id,
+                    "job": {"job_id": "job_tui_dead", "status": "running"},
+                    "run": {"run_id": "run_tui_dead"},
+                    "lease": {"lease_id": "lease_tui_dead", "fencing_token": 7},
+                    "message": {"text": "wait forever", "metadata": {}},
+                }
+
+            def register(self):
+                return {"status": "ok"}
+
+            def heartbeat(self, **kwargs):
+                self.heartbeat_calls.append(kwargs)
+                return {"interrupt_requested": False}
+
+            def progress(self, **kwargs):
+                self.progress_calls.append(kwargs)
+                return {"status": "ok"}
+
+            def get_job(self, job_id):  # noqa: ARG002
+                return {"status": "running"}
+
+            def fail(self, **kwargs):
+                self.fail_calls.append(kwargs)
+                return {"job_status": "failed"}
+
+        class FakeHeartbeatResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"data": {"interrupt_requested": False}}
+
+        heartbeat_posts: list[dict[str, object]] = []
+
+        class FakeHeartbeatHttpClient:
+            def __init__(self, *args, **kwargs):  # noqa: ARG002
+                return None
+
+            def post(self, url: str, json: dict[str, object]):
+                heartbeat_posts.append({"url": url, "json": json})
+                return FakeHeartbeatResponse()
+
+            def close(self) -> None:
+                return None
+
+        host = TuiAwareHost()
+        client = FakeRuntimeClient()
+        worker = RuntimeSupervisor(
+            client,
+            host=host,
+            adapter=WaitingAdapter(),
+            artifact_root=".agp-artifacts-tests",
+        )
+
+        with patch("httpx.Client", FakeHeartbeatHttpClient):
+            payload = worker.run_once(
+                agent_id="agt_tui_dead",
+                heartbeat_interval_seconds=0.01,
+                lease_ttl_seconds=30,
+            )
+
+        self.assertTrue(payload["claimed"])
+        self.assertEqual(payload["result"]["job_status"], "failed")
+        self.assertEqual(host._foreground_checks, 1)
+        self.assertEqual(len(client.heartbeat_calls), 1)
+        self.assertEqual(len(heartbeat_posts), 2)
+        self.assertEqual(len(client.fail_calls), 1)
+
+    def test_runtime_worker_clears_startup_settled_before_recovery_retry(self) -> None:
+        from agp.runtime import ArtifactPayload, ExecutionResult, PaneDied
+
+        class RecoveringHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self._session_serial = 0
+
+            def get_or_create_session(self, *, agent_id: str, workspace_ref: str | None = None):
+                self._session_serial += 1
+                session = super().get_or_create_session(agent_id=agent_id, workspace_ref=workspace_ref)
+                session = type(session)(
+                    session_id=f"inproc-{agent_id}-{self._session_serial}",
+                    agent_id=session.agent_id,
+                    workspace_ref=session.workspace_ref,
+                    metadata=dict(session.metadata),
+                )
+                self._sessions[agent_id] = session
+                self._history[session.session_id] = []
+                return session
+
+        class RecoveryAdapter(DefaultAgentAdapter):
+            def __init__(self) -> None:
+                super().__init__()
+                self.execute_calls = 0
+                self.ensure_bootstrapped_calls: list[tuple[str, bool]] = []
+
+            @property
+            def kind(self) -> str:
+                return "recovery"
+
+            def ensure_bootstrapped(self, *, host, session, claimed):  # noqa: ARG002
+                event = session.metadata.get("startup_settled_event")
+                self.ensure_bootstrapped_calls.append((session.session_id, bool(event and event.is_set())))
+
+            def execute_run(self, *, host, session, claimed, supervisor):  # noqa: ARG002
+                self.execute_calls += 1
+                event = session.metadata.get("startup_settled_event")
+                assert event is not None
+                if self.execute_calls == 1:
+                    assert not event.is_set()
+                    event.set()
+                    raise PaneDied("codex cli exited during execution")
+                assert not event.is_set()
+                event.set()
+                return ExecutionResult(
+                    artifacts=[ArtifactPayload(role="result", name="result.txt", content="ok")],
+                    summary={"status": "completed"},
+                )
+
+        class FakeRuntimeClient:
+            def __init__(self) -> None:
+                self._log_fn = None
+                self.identity = type(
+                    "Identity",
+                    (),
+                    {"runtime_id": "rtm_recovery", "server_url": "http://example.invalid", "token": None, "metadata": {}},
+                )()
+                self.heartbeat_calls: list[dict[str, object]] = []
+                self.recovering_calls: list[dict[str, object]] = []
+                self.resumed_calls: list[dict[str, object]] = []
+                self.complete_calls: list[dict[str, object]] = []
+
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+                return {
+                    "claimed": True,
+                    "agent_id": agent_id,
+                    "job": {"job_id": "job_recovery", "status": "running"},
+                    "run": {"run_id": "run_recovery"},
+                    "lease": {"lease_id": "lease_recovery", "fencing_token": 9},
+                    "message": {"text": "recover me", "metadata": {}},
+                }
+
+            def register(self):
+                return {"status": "ok"}
+
+            def heartbeat(self, **kwargs):
+                self.heartbeat_calls.append(kwargs)
+                return {"interrupt_requested": False}
+
+            def progress(self, **kwargs):  # noqa: ARG002
+                return {"status": "ok"}
+
+            def recovering(self, **kwargs):
+                self.recovering_calls.append(kwargs)
+                return {"status": "ok"}
+
+            def resumed(self, **kwargs):
+                self.resumed_calls.append(kwargs)
+                return {"status": "ok"}
+
+            def complete(self, **kwargs):
+                self.complete_calls.append(kwargs)
+                return {"job_status": "completed"}
+
+        class FakeHeartbeatResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, object]:
+                return {"data": {"interrupt_requested": False}}
+
+        class FakeHeartbeatHttpClient:
+            def __init__(self, *args, **kwargs):  # noqa: ARG002
+                return None
+
+            def post(self, url: str, json: dict[str, object]):  # noqa: ARG002
+                return FakeHeartbeatResponse()
+
+            def close(self) -> None:
+                return None
+
+        host = RecoveringHost()
+        adapter = RecoveryAdapter()
+        client = FakeRuntimeClient()
+        worker = RuntimeSupervisor(
+            client,
+            host=host,
+            adapter=adapter,
+            artifact_root=".agp-artifacts-tests",
+        )
+
+        with patch("httpx.Client", FakeHeartbeatHttpClient):
+            payload = worker.run_once(
+                agent_id="agt_recovery",
+                heartbeat_interval_seconds=10.0,
+                lease_ttl_seconds=30,
+            )
+
+        self.assertTrue(payload["claimed"])
+        self.assertEqual(payload["result"]["job_status"], "completed")
+        self.assertEqual(adapter.execute_calls, 2)
+        self.assertEqual(len(client.recovering_calls), 1)
+        self.assertEqual(len(client.resumed_calls), 1)
+        self.assertEqual(len(client.complete_calls), 1)
+        self.assertEqual(
+            adapter.ensure_bootstrapped_calls,
+            [
+                ("inproc-agt_recovery-1", False),
+                ("inproc-agt_recovery-2", False),
+            ],
+        )
+
     def test_send_with_attachments_and_claim_returns_them(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_attach", "capabilities": ["python"]})
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_attach", "hostname": "localhost"})

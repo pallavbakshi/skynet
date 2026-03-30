@@ -2038,6 +2038,81 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         session = host.get_or_create_session(agent_id="agt_shell")
         self.assertFalse(host.is_foreground_tui(session))
 
+    def test_tmux_is_foreground_tui_detects_shell_prompt(self) -> None:
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-shell", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": "agpuser@agp-runtime:~$ \n", "stderr": "", "returncode": 0})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = TmuxHost(runner=runner)
+        session = TerminalSession(session_id="agp-shell", agent_id="agt_shell")
+        self.assertFalse(host.is_foreground_tui(session))
+
+    def test_tmux_is_foreground_tui_detects_tui_markers(self) -> None:
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        screen = (
+            "\u276f What is 2+2?\n"
+            "\u23fa 4\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-tui", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": screen, "stderr": "", "returncode": 0})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = TmuxHost(runner=runner)
+        session = TerminalSession(session_id="agp-tui", agent_id="agt_tui")
+        self.assertTrue(host.is_foreground_tui(session))
+
+    def test_tmux_is_foreground_tui_defaults_true_when_ambiguous(self) -> None:
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-ambiguous", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": "running command\ncollecting output\n", "stderr": "", "returncode": 0})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = TmuxHost(runner=runner)
+        session = TerminalSession(session_id="agp-ambiguous", agent_id="agt_ambiguous")
+        self.assertTrue(host.is_foreground_tui(session))
+
+    def test_tmux_is_foreground_tui_defaults_true_when_capture_pane_fails(self) -> None:
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-fail", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": "", "stderr": "server exited unexpectedly", "returncode": 1})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = TmuxHost(runner=runner)
+        session = TerminalSession(session_id="agp-fail", agent_id="agt_fail")
+        with self.assertLogs("agp.plugins.tmux", level="WARNING") as logs:
+            self.assertTrue(host.is_foreground_tui(session))
+        self.assertTrue(any("capture-pane failed" in line for line in logs.output))
+
+    def test_tmux_is_foreground_tui_defaults_true_when_capture_pane_is_empty(self) -> None:
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-empty", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        host = TmuxHost(runner=runner)
+        session = TerminalSession(session_id="agp-empty", agent_id="agt_empty")
+        self.assertTrue(host.is_foreground_tui(session))
+
     def test_build_agent_adapter_claude_code(self) -> None:
         """build_agent_adapter should return ClaudeCodeAdapter for kind='claude_code'."""
         adapter = build_agent_adapter("claude_code")

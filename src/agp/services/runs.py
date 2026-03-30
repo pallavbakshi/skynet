@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, cast, func, literal, or_, select, text
+from sqlalchemy import case, cast, func, literal, or_, select, text, update
 from sqlalchemy.orm import Session
 
 from agp.enums import (
@@ -59,10 +59,37 @@ _TERMINAL_RUN_STATES = frozenset({
     RunStatus.ABANDONED.value,
 })
 
+_ACTIVE_RUN_STATES = frozenset({
+    RunStatus.CREATED.value,
+    RunStatus.LEASED.value,
+    RunStatus.RUNNING.value,
+    RunStatus.RECOVERING.value,
+})
+
 
 def _reject_if_terminal(run: Run) -> None:
     if run.status in _TERMINAL_RUN_STATES:
         raise ConflictError(f"run {run.run_id} is already terminal (status={run.status})")
+
+
+def _has_active_leases(db: Session, runtime_id: str) -> bool:
+    """Check if a runtime has any remaining active leases."""
+    return bool(db.scalar(
+        select(func.count()).select_from(Lease).where(
+            Lease.runtime_id == runtime_id,
+            Lease.status == LeaseStatus.ACTIVE.value,
+        )
+    ))
+
+
+def _has_active_runs(db: Session, agent_id: str) -> bool:
+    """Check if an agent has any remaining active (non-terminal) runs."""
+    return bool(db.scalar(
+        select(func.count()).select_from(Run).where(
+            Run.agent_id == agent_id,
+            Run.status.in_(_ACTIVE_RUN_STATES),
+        )
+    ))
 
 
 def _active_lease_for_run(db: Session, run_id: str, lease_id: str) -> Lease:
@@ -186,6 +213,19 @@ class ClaimResult:
     routing_decision: dict | None = None
 
 
+def _atomic_reserve_agent(db: Session, agent_id: str) -> bool:
+    """Atomically reserve an agent by setting status=busy WHERE status=idle.
+
+    Returns True if the row was updated (reservation succeeded).
+    """
+    result = db.execute(
+        update(Agent)
+        .where(Agent.agent_id == agent_id, Agent.status == AgentStatus.IDLE.value)
+        .values(status=AgentStatus.BUSY.value)
+    )
+    return result.rowcount > 0
+
+
 def resolve_claim_agent(
     db: Session,
     *,
@@ -196,10 +236,11 @@ def resolve_claim_agent(
     """Resolve the target agent for a claim — by direct ID or capability-based best-effort routing.
 
     Returns (agent, routing_decision) or (None, None) if no eligible agent.
+    Uses atomic reservation to prevent TOCTOU races.
     """
     if agent_id is not None:
         agent = _require_agent(db, agent_id)
-        if agent.status != AgentStatus.IDLE.value:
+        if not _atomic_reserve_agent(db, agent.agent_id):
             return None, None
         return agent, None
 
@@ -234,14 +275,17 @@ def resolve_claim_agent(
         candidates = db.scalars(candidate_query).all()
         if not candidates:
             return None, None
-        agent = candidates[0]
-        routing_decision = {
-            "policy": "least_recent",
-            "capability": capability,
-            "candidate_count": len(candidates),
-            "selected_agent_id": agent.agent_id,
-        }
-        return agent, routing_decision
+        # Try atomic reservation for each candidate in order
+        for candidate in candidates:
+            if _atomic_reserve_agent(db, candidate.agent_id):
+                routing_decision = {
+                    "policy": "least_recent",
+                    "capability": capability,
+                    "candidate_count": len(candidates),
+                    "selected_agent_id": candidate.agent_id,
+                }
+                return candidate, routing_decision
+        return None, None
 
     raise BadRequestError("claim requires agent_id or capability")
 
@@ -266,21 +310,25 @@ def execute_claim(
 
     delivery = _queue_backend().dequeue_candidate(db, target_queues=target_queues)
     if delivery is None:
+        agent.status = AgentStatus.IDLE.value
         if exhausted_count:
             db.commit()
         return ClaimResult(claimed=False, agent=agent)
     job = db.get(Job, delivery.job_id)
     if job is None:
         _queue_backend().release_unclaimed(db, delivery=delivery)
+        agent.status = AgentStatus.IDLE.value
         raise InternalError(f"job missing for delivery {delivery.job_id}")
-    if job.status != JobStatus.QUEUED.value or job.retry_count >= job.max_retries:
+    if job.status not in {JobStatus.QUEUED.value, JobStatus.ACCEPTED.value} or job.retry_count >= job.max_retries:
         _queue_backend().release_unclaimed(db, delivery=delivery)
+        agent.status = AgentStatus.IDLE.value
         if exhausted_count:
             db.commit()
         return ClaimResult(claimed=False, agent=agent)
     message = db.get(Message, job.message_id)
     if message is None:
         _queue_backend().release_unclaimed(db, delivery=delivery)
+        agent.status = AgentStatus.IDLE.value
         raise InternalError(f"message missing for job {job.job_id}")
 
     attempt = (db.scalar(select(func.max(Run.attempt)).where(Run.job_id == job.job_id)) or 0) + 1
@@ -344,9 +392,10 @@ def complete_run_service(
     job.status = JobStatus.COMPLETED.value
     job.result_artifact_id = result_artifact_id
     job.updated_at = utc_now()
-    if agent is not None:
-        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
-    runtime.status = RuntimeStatus.IDLE.value
+    if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
+        agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
+    if not _has_active_leases(db, runtime.runtime_id):
+        runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
         db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id,
@@ -386,9 +435,10 @@ def fail_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.FAILED.value
     job.updated_at = utc_now()
-    if agent is not None:
-        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
-    runtime.status = RuntimeStatus.IDLE.value
+    if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
+        agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
+    if not _has_active_leases(db, runtime.runtime_id):
+        runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(
         db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id,
@@ -474,9 +524,10 @@ def cancel_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.CANCELLED.value
     job.updated_at = utc_now()
-    if agent is not None:
-        agent.status = agent.status if agent.status in _PRESERVE_AGENT_STATUSES else AgentStatus.IDLE.value
-    runtime.status = RuntimeStatus.IDLE.value
+    if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
+        agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
+    if not _has_active_leases(db, runtime.runtime_id):
+        runtime.status = RuntimeStatus.IDLE.value
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="lease.released", body={"lease_id": lease.lease_id})
     _create_event(db, job_id=job.job_id, run_id=run.run_id, agent_id=run.agent_id, runtime_id=run.runtime_id, event_type="run.cancelled", body={"reason": reason})
     _create_event(db, job_id=job.job_id, event_type="job.cancelled", body={"status": job.status})
