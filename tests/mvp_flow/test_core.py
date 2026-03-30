@@ -682,6 +682,18 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(trace.status_code, 200)
         self.assertEqual(trace.json()["data"]["runs"][-1]["status"], "failed")
 
+        failure_artifacts = self.client.get(f"/jobs/{job_id}/artifacts?role=failure_evidence")
+        self.assertEqual(failure_artifacts.status_code, 200)
+        items = failure_artifacts.json()["data"]["items"]
+        self.assertTrue(items)
+
+        failure_content = self.client.get(f"/artifacts/{items[0]['artifact_id']}/content")
+        self.assertEqual(failure_content.status_code, 200)
+        self.assertIn(
+            "result artifact is not valid JSON",
+            failure_content.json()["data"]["content"],
+        )
+
     def test_inline_send_with_output_contract_skips_contract_validation(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_inline_contract", "capabilities": ["python"]})
 

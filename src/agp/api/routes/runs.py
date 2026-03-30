@@ -24,7 +24,7 @@ from agp.schemas import (
     ProgressRequest,
     RecoveryRequest,
 )
-from agp.services._helpers import _require_agent, _require_job, _require_runtime
+from agp.services._helpers import _require_agent, _require_job, _require_runtime, _write_control_plane_artifact
 from agp.services.exceptions import BadRequestError
 from agp.services.runs import (
     _active_lease_for_run,
@@ -240,15 +240,15 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     try:
         validate_output_contract_completion(job=job, artifacts=request.artifacts)
     except BadRequestError as exc:
+        failure_evidence = _write_control_plane_artifact(
+            job_id=job.job_id,
+            name="failure.txt",
+            content=exc.detail,
+            role=ArtifactKind.FAILURE_EVIDENCE.value,
+        )
         failure_artifacts = [
             *request.artifacts,
-            SimpleNamespace(
-                role=ArtifactKind.FAILURE_EVIDENCE.value,
-                storage_ref=f"inline://validation-error/{run_id}",
-                content_type="text/plain",
-                checksum="",
-                size_bytes=0,
-            ),
+            SimpleNamespace(**failure_evidence.__dict__),
         ]
         fail_run_service(
             db,

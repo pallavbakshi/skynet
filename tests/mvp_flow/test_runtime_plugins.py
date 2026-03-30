@@ -4,6 +4,125 @@ from tests.mvp_flow.base import *
 
 
 class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
+    def test_codex_adapter_appends_output_contract_instruction(self) -> None:
+        class ContractHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+                super().send_text(session, text, enter=enter)
+                if text.startswith("AGP_RUN_BEGIN run_contract"):
+                    self._history.setdefault(session.session_id, []).append(
+                        'AGP_RUN_RESULT run_contract {"status":"success","result":"{\\"status\\":\\"ok\\"}"}\n'
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_codex_contract"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
+        host = ContractHost()
+        session = host.get_or_create_session(agent_id="agt_codex_contract")
+        claimed = {
+            "agent_id": "agt_codex_contract",
+            "job": {
+                "job_id": "job_codex_contract",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["status"],
+                        "properties": {"status": {"type": "string"}},
+                    },
+                },
+            },
+            "run": {"run_id": "run_contract"},
+            "message": {"text": "return structured output"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        sent = host.sent[-1]
+        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", sent)
+        self.assertIn('"required": ["status"]', sent)
+        self.assertIn("Do not include markdown fences, prose, or any text outside the JSON object.", sent)
+        self.assertEqual(result.artifacts[-1].content, '{"status":"ok"}')
+
+    def test_claude_code_adapter_appends_output_contract_instruction(self) -> None:
+        class ContractHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+                super().send_text(session, text, enter=enter)
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_contract"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_after=1,
+            idle_timeout_seconds=0.2,
+        )
+        screen_content = (
+            "\u276f return structured output\n"
+            "\u23fa {\"status\":\"ok\"}\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+        )
+        host = ContractHost(["", screen_content, screen_content])
+        session = host.get_or_create_session(agent_id="agt_cc_contract")
+        claimed = {
+            "agent_id": "agt_cc_contract",
+            "job": {
+                "job_id": "job_cc_contract",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["status"],
+                        "properties": {"status": {"type": "string"}},
+                    },
+                },
+            },
+            "run": {"run_id": "run_cc_contract"},
+            "message": {"text": "return structured output"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        sent = host.sent[-1]
+        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", sent)
+        self.assertIn('"required": ["status"]', sent)
+        self.assertIn("Do not include markdown fences, prose, or any text outside the JSON object.", sent)
+        self.assertEqual(result.artifacts[-1].content, '{"status":"ok"}')
+
     def test_codex_timeout_failure_result_salvages_tmux_pane_artifact(self) -> None:
         from agp.runtime import ExecutionTimeout
 
@@ -30,7 +149,16 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             session=session,
             claimed={
                 "agent_id": "agt_tmux_timeout",
-                "job": {"job_id": "job_tmux_timeout"},
+                "job": {
+                    "job_id": "job_tmux_timeout",
+                    "output_contract_json": {
+                        "format": "json",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"status": {"type": "string"}},
+                        },
+                    },
+                },
                 "run": {"run_id": "run_tmux_timeout"},
                 "message": {"text": "unfinished work"},
             },
@@ -40,6 +168,43 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         pane_artifact = next(a for a in result.artifacts if a.name == "tmux-pane.txt")
         self.assertEqual(pane_artifact.role, "failure_evidence")
         self.assertIn("partial model output", pane_artifact.content)
+        prompt_artifact = next(a for a in result.artifacts if a.name == "prompt.txt")
+        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", prompt_artifact.content)
+
+    def test_claude_code_failure_result_uses_augmented_prompt_for_output_contract(self) -> None:
+        from agp.runtime import AdapterExecutionFailed
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_failure"})()})()
+
+        adapter = ClaudeCodeAdapter()
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_failure")
+        result = adapter.build_failure_result(
+            host=host,
+            session=session,
+            claimed={
+                "agent_id": "agt_cc_failure",
+                "job": {
+                    "job_id": "job_cc_failure",
+                    "output_contract_json": {
+                        "format": "json",
+                        "json_schema": {
+                            "type": "object",
+                            "properties": {"status": {"type": "string"}},
+                        },
+                    },
+                },
+                "run": {"run_id": "run_cc_failure"},
+                "message": {"text": "return structured output"},
+            },
+            error=AdapterExecutionFailed("adapter failed", transcript="transcript", output="exec log"),
+            supervisor=SupervisorStub(),
+        )
+        prompt_artifact = next(a for a in result.artifacts if a.name == "prompt.txt")
+        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", prompt_artifact.content)
+        self.assertIn('"status"', prompt_artifact.content)
 
     def test_codex_adapter_marker_mode_emits_idle_heartbeat_before_timeout(self) -> None:
         from agp.runtime._types import OutputReadResult

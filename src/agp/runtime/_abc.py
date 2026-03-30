@@ -8,6 +8,7 @@ from os.path import basename
 from time import sleep
 from typing import Any
 
+from agp.plugins._output_contracts import prompt_for_claim
 from agp.runtime._types import (
     ArtifactPayload,
     ExecutionResult,
@@ -202,7 +203,7 @@ class AgentAdapter(ABC):
     ) -> ExecutionResult:
         return ExecutionResult(
             artifacts=[
-                ArtifactPayload(role="prompt", name="prompt.txt", content=claimed["message"]["text"]),
+                ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
                 ArtifactPayload(
                     role="transcript_log",
                     name="transcript.txt",

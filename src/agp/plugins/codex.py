@@ -6,6 +6,7 @@ import shlex
 from time import monotonic, sleep
 from typing import Any
 
+from agp.plugins._output_contracts import apply_output_contract_instruction, prompt_for_claim
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
@@ -574,7 +575,7 @@ class CodexAdapter(AgentAdapter):
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
         """TUI mode: send prompt -> wait for idle -> read delta -> clean output."""
-        prompt = claimed["message"]["text"]
+        prompt = apply_output_contract_instruction(prompt=claimed["message"]["text"], claimed=claimed)
         run_id = claimed["run"]["run_id"]
 
         # Session reset logic depends on host kind and session_mode:
@@ -746,7 +747,7 @@ class CodexAdapter(AgentAdapter):
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
         """Marker mode: send AGP envelope -> poll for result marker -> parse JSON payload."""
-        prompt = claimed["message"]["text"]
+        prompt = apply_output_contract_instruction(prompt=claimed["message"]["text"], claimed=claimed)
         run_id = claimed["run"]["run_id"]
 
         health = host.health(session)
@@ -869,7 +870,7 @@ class CodexAdapter(AgentAdapter):
         if isinstance(error, AdapterExecutionFailed):
             return ExecutionResult(
                 artifacts=[
-                    ArtifactPayload(role="prompt", name="prompt.txt", content=claimed["message"]["text"]),
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
                     ArtifactPayload(role="transcript_log", name="transcript.txt", content=error.transcript),
                     ArtifactPayload(role="exec_log", name="exec.txt", content=error.output),
                     ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
