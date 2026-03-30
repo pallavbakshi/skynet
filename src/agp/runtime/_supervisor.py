@@ -328,11 +328,20 @@ class RuntimeSupervisor:
                 "adapter_kind": self.adapter.kind,
             },
         )
-        claimed = self.client.claim(
-            agent_id=agent_id,
-            capability=capability_id,
-            lease_ttl_seconds=lease_ttl_seconds,
-        )
+        import httpx as _httpx
+
+        try:
+            claimed = self.client.claim(
+                agent_id=agent_id,
+                capability=capability_id,
+                lease_ttl_seconds=lease_ttl_seconds,
+            )
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 409:
+                # 409 Conflict: runtime/agent is busy or no claim available.
+                # Normal idle behavior — not a failure.
+                return {"claimed": False}
+            raise
         if not claimed.get("claimed"):
             _append_runtime_log(self.client.identity.runtime_id, {"kind": "runtime_worker", "action": "idle_no_claim"})
             return {"claimed": False}
