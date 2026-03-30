@@ -2029,8 +2029,258 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             },
             headers={"Idempotency-Key": "metrics-export-1"},
         )
-        metrics = self.agp.observability_metrics()
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "capability", "id": "python"},
+                "message": {"text": "capability backlog", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "metrics-export-2"},
+        )
+        session = SessionLocal()
+        try:
+            direct_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "agent:agt_metrics",
+                    Job.status == "queued",
+                )
+            )
+            capability_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "capability:python",
+                    Job.status == "queued",
+                )
+            )
+            assert direct_job is not None
+            assert capability_job is not None
+            direct_job.updated_at = utc_now() - timedelta(seconds=185)
+            capability_job.updated_at = utc_now() - timedelta(seconds=245)
+            session.commit()
+        finally:
+            session.close()
+        metrics = self.agp.ops_metrics()
         self.assertIn("# HELP agp_jobs_total", metrics)
         self.assertIn('agp_jobs_total{status="queued"}', metrics)
         self.assertIn("# HELP agp_queue_deliveries_total", metrics)
+        self.assertIn('agp_queue_depth{agent_id="agt_metrics"} 1', metrics)
+        self.assertIn("# HELP agp_queue_oldest_age_seconds", metrics)
+        self.assertRegex(metrics, r'agp_queue_oldest_age_seconds\{agent_id="agt_metrics"\} 1[0-9]{2}(\.[0-9]+)?')
+        self.assertRegex(metrics, r"(?m)^agp_queue_oldest_age_seconds 2[0-9]{2}(\.[0-9]+)?$")
+        lines = metrics.splitlines()
+        help_idx = lines.index("# HELP agp_queue_oldest_age_seconds Age in seconds of the oldest queued job.")
+        type_idx = lines.index("# TYPE agp_queue_oldest_age_seconds gauge")
+        sample_idx = next(idx for idx, line in enumerate(lines) if line.startswith('agp_queue_oldest_age_seconds{agent_id="agt_metrics"}'))
+        self.assertLess(help_idx, sample_idx)
+        self.assertLess(type_idx, sample_idx)
         self.assertIn("agp_events_latest_seq ", metrics)
+
+    def test_agp_status_falls_back_to_public_health_when_ops_health_is_unavailable(self) -> None:
+        import httpx
+        from unittest.mock import patch
+
+        request = httpx.Request("GET", "http://testserver/ops/health")
+        response = httpx.Response(403, request=request)
+        with patch.object(self.agp, "ops_health", side_effect=httpx.HTTPStatusError("forbidden", request=request, response=response)):
+            result = self._cli_invoke(["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("status: ok", result.output)
+        self.assertNotIn("queue_depth_total:", result.output)
+
+    def test_agents_api_counts_only_direct_queue_depth(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_depth", "capabilities": ["python"]})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_depth"},
+                "message": {"text": "direct backlog", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "agent-depth-direct"},
+        )
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "capability", "id": "python"},
+                "message": {"text": "cap backlog", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "agent-depth-capability"},
+        )
+        session = SessionLocal()
+        try:
+            direct_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "agent:agt_depth",
+                    Job.status == "queued",
+                )
+            )
+            capability_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "capability:python",
+                    Job.status == "queued",
+                )
+            )
+            assert direct_job is not None
+            assert capability_job is not None
+            direct_job.updated_at = utc_now() - timedelta(seconds=125)
+            session.commit()
+        finally:
+            session.close()
+
+        agents = self.agp.list_agents()
+        target = next(item for item in agents["items"] if item["agent_id"] == "agt_depth")
+        self.assertEqual(target["queue_depth"], 1)
+        self.assertIsNotNone(target["oldest_queued_at"])
+        self.assertGreaterEqual(target["oldest_queue_age_seconds"], 120)
+
+        agent = self.agp.get_agent("agt_depth")
+        self.assertEqual(agent["queue_depth"], 1)
+        self.assertIsNotNone(agent["oldest_queued_at"])
+        self.assertGreaterEqual(agent["oldest_queue_age_seconds"], 120)
+
+    def test_agp_ls_shows_pending_queue_depth_column(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_pending", "capabilities": ["python"]})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_pending"},
+                "message": {"text": "pending one", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "ls-pending-1"},
+        )
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "capability", "id": "python"},
+                "message": {"text": "pending two", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "ls-pending-2"},
+        )
+        session = SessionLocal()
+        try:
+            direct_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "agent:agt_pending",
+                    Job.status == "queued",
+                )
+            )
+            capability_job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "capability:python",
+                    Job.status == "queued",
+                )
+            )
+            assert direct_job is not None
+            assert capability_job is not None
+            direct_job.updated_at = utc_now() - timedelta(seconds=125)
+            session.commit()
+        finally:
+            session.close()
+
+        result = self._cli_invoke(["ls"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("PENDING", result.output)
+        self.assertIn("QUEUE_AGE", result.output)
+        self.assertRegex(result.output, r"agt_pending.*\b1\b.*02m:[0-5][0-9]s")
+
+    def test_agp_status_shows_queue_summary(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_status_queue", "capabilities": ["python"]})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_status_queue"},
+                "message": {"text": "status queue", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "status-queue-1"},
+        )
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "capability", "id": "python"},
+                "message": {"text": "status capability queue", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "status-queue-2"},
+        )
+        session = SessionLocal()
+        try:
+            job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "agent:agt_status_queue",
+                    Job.status == "queued",
+                )
+            )
+            assert job is not None
+            job.updated_at = utc_now() - timedelta(seconds=185)
+            session.commit()
+        finally:
+            session.close()
+
+        result = self._cli_invoke(["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("queue_depth_total: 2", result.output)
+        self.assertIn("direct_queue_busiest: agt_status_queue=1", result.output)
+        self.assertRegex(result.output, r"direct_queue_oldest_age: agt_status_queue=03m:[0-5][0-9]s")
+
+    def test_agp_status_shows_global_queue_total_without_any_agents(self) -> None:
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "capability", "id": "python"},
+                "message": {"text": "capability backlog only", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "status-capability-only"},
+        )
+
+        result = self._cli_invoke(["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("queue_depth_total: 1", result.output)
+        self.assertNotIn("direct_queue_busiest:", result.output)
+        self.assertNotIn("direct_queue_oldest_age:", result.output)
+
+    def test_agp_status_pages_all_agents_for_direct_queue_summary(self) -> None:
+        from unittest.mock import patch
+
+        filler_agents = [
+            {"agent_id": f"agt_status_fill_{idx:03d}", "queue_depth": 0, "oldest_queue_age_seconds": None}
+            for idx in range(200)
+        ]
+        with patch.object(self.agp, "health", return_value={"status": "ok", "components": {}}), patch.object(
+            self.agp,
+            "ops_health",
+            return_value={"queue": {"depth": 1}},
+        ), patch.object(
+            self.agp,
+            "list_agents",
+            side_effect=[
+                {"items": filler_agents, "page": {"next_cursor": "page-2"}},
+                {
+                    "items": [
+                        {
+                            "agent_id": "agt_status_paged",
+                            "queue_depth": 1,
+                            "oldest_queue_age_seconds": 185.0,
+                        }
+                    ],
+                    "page": {"next_cursor": None},
+                },
+            ],
+        ):
+            result = self._cli_invoke(["status"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("queue_depth_total: 1", result.output)
+        self.assertIn("direct_queue_busiest: agt_status_paged=1", result.output)
+        self.assertRegex(result.output, r"direct_queue_oldest_age: agt_status_paged=03m:[0-5][0-9]s")
+
+    def test_agents_api_real_cursor_flow_reaches_second_page(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_cursor_target", "capabilities": ["python"]})
+        for idx in range(200):
+            self.client.post(
+                "/agents/up",
+                json={"agent_id": f"agt_cursor_fill_{idx:03d}", "capabilities": ["python"]},
+            )
+
+        page1 = self.agp.list_agents(limit=200)
+        self.assertEqual(len(page1["items"]), 200)
+        self.assertIsNotNone(page1["page"]["next_cursor"])
+        self.assertFalse(any(item["agent_id"] == "agt_cursor_target" for item in page1["items"]))
+
+        page2 = self.agp.list_agents(limit=200, cursor=page1["page"]["next_cursor"])
+        self.assertTrue(any(item["agent_id"] == "agt_cursor_target" for item in page2["items"]))

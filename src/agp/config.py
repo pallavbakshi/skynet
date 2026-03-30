@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     observability_dead_letter_alert_threshold: int = 1
     observability_terminal_failure_sample_size: int = 3
     observability_terminal_failure_rate_threshold: float = 0.5
+    observability_queue_depth_alert_threshold: int = 5
+    observability_stale_queue_age_seconds: int = 900
     observability_alert_webhook_url: str | None = None
     observability_alert_webhook_timeout_seconds: float = 5.0
     operator_bearer_token: str | None = None

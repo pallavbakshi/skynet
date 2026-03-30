@@ -1269,12 +1269,48 @@ def status(
 
 
 def _status_health(server_url: str | None) -> None:
+    import httpx as _httpx
+
+    def _list_all_agents(client) -> list[dict]:
+        agents: list[dict] = []
+        cursor: str | None = None
+        while True:
+            page = client.list_agents(limit=200, cursor=cursor)
+            items = page.get("items", [])
+            agents.extend(items)
+            cursor = (page.get("page") or {}).get("next_cursor")
+            if not cursor:
+                return agents
+
     try:
         with _make_client(server_url) as client:
             data = client.health()
+            summary = None
+            agents: list[dict] = []
+            try:
+                summary = client.ops_health()
+                agents = _list_all_agents(client)
+            except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
+                pass
         typer.echo(f"status: {data.get('status', 'ok')}")
         for k, v in data.get("components", {}).items():
             typer.echo(f"  {k}: {v}")
+        if summary is not None:
+            total_pending = int(((summary.get("queue") or {}).get("depth")) or 0)
+            typer.echo(f"queue_depth_total: {total_pending}")
+            if agents:
+                busiest = max(agents, key=lambda agent: int(agent.get("queue_depth", 0) or 0))
+                oldest = max(
+                    (agent for agent in agents if agent.get("oldest_queue_age_seconds") is not None),
+                    key=lambda agent: float(agent.get("oldest_queue_age_seconds") or 0.0),
+                    default=None,
+                )
+                if int(busiest.get("queue_depth", 0) or 0) > 0:
+                    typer.echo(f"direct_queue_busiest: {busiest['agent_id']}={int(busiest.get('queue_depth', 0) or 0)}")
+                if oldest is not None:
+                    typer.echo(
+                        f"direct_queue_oldest_age: {oldest['agent_id']}={_format_duration(float(oldest.get('oldest_queue_age_seconds') or 0.0))}"
+                    )
     except Exception as e:
         typer.echo(f"unreachable: {e}", err=True)
         raise typer.Exit(1)
@@ -1440,9 +1476,9 @@ def ls(
             # Column headers
             typer.echo(
                 f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'RUNTIME':<16s} "
-                f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'WORKSPACE'}"
+                f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'PENDING':<7s} {'QUEUE_AGE':<10s} {'WORKSPACE'}"
             )
-            typer.echo("-" * 120)
+            typer.echo("-" * 142)
 
             now = datetime.now(timezone.utc)
             for a in active:
@@ -1451,6 +1487,9 @@ def ls(
                 agent_status = a.get("status", "?").upper()
                 runtime_id = agent_runtime.get(agent_id, "-")
                 workspace = a.get("workspace_ref") or "-"
+                pending = str(a.get("queue_depth", 0))
+                queue_age_seconds = a.get("oldest_queue_age_seconds")
+                queue_age = _format_duration(queue_age_seconds) if isinstance(queue_age_seconds, (int, float)) else "-"
 
                 job = agent_jobs.get(agent_id)
                 if job:
@@ -1468,7 +1507,7 @@ def ls(
 
                 typer.echo(
                     f"{agent_id:<20s} {role:<18s} {agent_status:<8s} {runtime_id:<16s} "
-                    f"{job_id:<14s} {time_on_job:<12s} {workspace}"
+                    f"{job_id:<14s} {time_on_job:<12s} {pending:<7s} {queue_age:<10s} {workspace}"
                 )
 
         typer.echo("")

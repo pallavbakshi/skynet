@@ -32,10 +32,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from collections import deque
 import json
+from datetime import UTC, datetime
 from typing import Deque, Protocol
 from uuid import uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
@@ -44,6 +45,88 @@ from agp.models import Job, QueueDeliveryRecord, utc_now
 
 def _new_delivery_id() -> str:
     return f"qdl_{uuid4().hex[:12]}"
+
+
+def agent_queue_targets(*, agent_id: str) -> list[str]:
+    return [f"agent:{agent_id}"]
+
+
+def _normalize_timestamp(value: datetime | None) -> datetime | None:
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _peek_queued_jobs(db: Session, *, target_queues: list[str]) -> int:
+    if not target_queues:
+        return 0
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Job)
+            .where(
+                Job.status == JobStatus.QUEUED.value,
+                Job.target_queue.in_(target_queues),
+            )
+        )
+        or 0
+    )
+
+
+def queue_depth(db: Session, *, target_queues: list[str]) -> int:
+    return _peek_queued_jobs(db, target_queues=target_queues)
+
+
+def queue_oldest_queued_at(db: Session, *, target_queues: list[str] | None = None) -> datetime | None:
+    query = select(Job.updated_at).where(Job.status == JobStatus.QUEUED.value)
+    if target_queues is not None:
+        if not target_queues:
+            return None
+        query = query.where(Job.target_queue.in_(target_queues))
+    return _normalize_timestamp(db.scalar(query.order_by(Job.updated_at.asc()).limit(1)))
+
+
+def queue_backlogs_by_target_queue(db: Session, *, target_queues: list[str]) -> dict[str, dict[str, object]]:
+    if not target_queues:
+        return {}
+    ordered_targets = list(dict.fromkeys(target_queues))
+    items = {
+        target_queue: {"queue_depth": 0, "oldest_queued_at": None}
+        for target_queue in ordered_targets
+    }
+    rows = db.execute(
+        select(
+            Job.target_queue,
+            func.count().label("queue_depth"),
+            func.min(Job.updated_at).label("oldest_queued_at"),
+        )
+        .where(
+            Job.status == JobStatus.QUEUED.value,
+            Job.target_queue.in_(ordered_targets),
+        )
+        .group_by(Job.target_queue)
+    ).all()
+    for target_queue, queued_count, oldest_queued_at in rows:
+        items[str(target_queue)] = {
+            "queue_depth": int(queued_count),
+            "oldest_queued_at": _normalize_timestamp(oldest_queued_at),
+        }
+    return items
+
+
+def queue_backlog_info(db: Session, *, target_queues: list[str]) -> dict[str, object]:
+    if not target_queues:
+        return {"queue_depth": 0, "oldest_queued_at": None}
+    backlog_by_queue = queue_backlogs_by_target_queue(db, target_queues=target_queues)
+    queue_depth_total = 0
+    oldest_queued_at: datetime | None = None
+    for target_queue in list(dict.fromkeys(target_queues)):
+        backlog = backlog_by_queue.get(target_queue, {"queue_depth": 0, "oldest_queued_at": None})
+        queue_depth_total += int(backlog["queue_depth"])
+        candidate = backlog["oldest_queued_at"]
+        if candidate is not None and (oldest_queued_at is None or candidate < oldest_queued_at):
+            oldest_queued_at = candidate
+    return {"queue_depth": queue_depth_total, "oldest_queued_at": oldest_queued_at}
 
 
 def db_dialect_name(db: Session) -> str:
@@ -82,6 +165,9 @@ class QueueBackend(Protocol):
 
     def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
         """Return the next candidate delivery for the given eligible queues."""
+
+    def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
+        """Return the count of queued jobs for the given eligible queues."""
 
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:
         """Acknowledge durable claim after control-plane run/lease creation."""
@@ -145,6 +231,9 @@ class DbQueueBackend:
             target_queue=row["target_queue"],
             delivery_attempt=0,
         )
+
+    def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
+        return _peek_queued_jobs(db, target_queues=target_queues)
 
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
         return None
@@ -264,6 +353,9 @@ class DeliveryTableQueueBackend:
             delivery_attempt=row["delivery_attempt"],
         )
 
+    def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
+        return _peek_queued_jobs(db, target_queues=target_queues)
+
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is None:
@@ -278,9 +370,13 @@ class DeliveryTableQueueBackend:
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is None:
             return
+        job = db.get(Job, delivery.job_id)
+        now = utc_now()
+        if job is not None and job.status == JobStatus.QUEUED.value:
+            job.updated_at = now
         record.state = "pending"
-        record.available_at = utc_now()
-        record.updated_at = utc_now()
+        record.available_at = now
+        record.updated_at = now
 
     def redrive_stale_deliveries(
         self,
@@ -310,6 +406,9 @@ class DeliveryTableQueueBackend:
                 record.updated_at = now
                 dead_lettered += 1
                 continue
+            job = db.get(Job, record.job_id)
+            if job is not None and job.status == JobStatus.QUEUED.value:
+                job.updated_at = now
             record.state = "pending"
             record.available_at = now
             record.updated_at = now
@@ -397,6 +496,9 @@ class InMemoryBrokerQueueBackend:
                 )
         return None
 
+    def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
+        return _peek_queued_jobs(db, target_queues=target_queues)
+
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
         self._inflight.pop(delivery.delivery_id, None)
 
@@ -409,6 +511,9 @@ class InMemoryBrokerQueueBackend:
         queue = self._queued(inflight.target_queue)
         if inflight.job_id not in queue:
             queue.appendleft(inflight.job_id)
+        job = db.get(Job, inflight.job_id)
+        if job is not None and job.status == JobStatus.QUEUED.value:
+            job.updated_at = utc_now()
 
     def redrive_stale_deliveries(
         self,
@@ -432,6 +537,9 @@ class InMemoryBrokerQueueBackend:
             queue = self._queued(inflight.target_queue)
             if inflight.job_id not in queue:
                 queue.appendleft(inflight.job_id)
+            job = db.get(Job, inflight.job_id)
+            if job is not None and job.status == JobStatus.QUEUED.value:
+                job.updated_at = utc_now()
             redriven += 1
         return {
             "redriven_deliveries": redriven,
@@ -605,6 +713,9 @@ class RedisQueueBackend:
                 )
         return None
 
+    def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
+        return _peek_queued_jobs(db, target_queues=target_queues)
+
     def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is not None:
@@ -632,11 +743,15 @@ class RedisQueueBackend:
         if not self.client.sismember(pending_set, item["job_id"]):
             self.client.rpush(self._queue_key(item["target_queue"]), item["job_id"])
             self.client.sadd(pending_set, item["job_id"])
+        now = utc_now()
+        job = db.get(Job, item["job_id"])
+        if job is not None and job.status == JobStatus.QUEUED.value:
+            job.updated_at = now
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is not None:
             record.state = "pending"
-            record.available_at = utc_now()
-            record.updated_at = utc_now()
+            record.available_at = now
+            record.updated_at = now
 
     def redrive_stale_deliveries(
         self,
@@ -673,6 +788,9 @@ class RedisQueueBackend:
                 dead_lettered += 1
                 continue
             if record is not None:
+                job = db.get(Job, item["job_id"])
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.updated_at = now
                 record.state = "pending"
                 record.available_at = now
                 record.updated_at = now
@@ -709,6 +827,9 @@ class RedisQueueBackend:
                 self.client.sadd(self._dead_lettered_jobs_key(), record.job_id)
                 dead_lettered += 1
             else:
+                job = db.get(Job, record.job_id)
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.updated_at = now
                 record.state = "pending"
                 record.available_at = now
                 record.updated_at = now
@@ -728,8 +849,13 @@ class RedisQueueBackend:
             if self.client.sismember(pending_set, record.job_id):
                 continue  # already in Redis
             # Job was removed from Redis but SQL still says pending — re-enqueue
+            job = db.get(Job, record.job_id)
+            now = utc_now()
+            if job is not None and job.status == JobStatus.QUEUED.value:
+                job.updated_at = now
             self.client.rpush(self._queue_key(record.target_queue), record.job_id)
             self.client.sadd(pending_set, record.job_id)
+            record.updated_at = now
             redriven += 1
 
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}

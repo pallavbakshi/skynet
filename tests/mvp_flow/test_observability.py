@@ -232,11 +232,207 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         finally:
             session.close()
 
-        alerts = self.agp.observability_alerts()
+        alerts = self.agp.ops_alerts()
         codes = {item["code"] for item in alerts["items"]}
         self.assertIn("queue_dead_lettering", codes)
         self.assertIn("rising_terminal_failure_rate", codes)
         self.assertGreaterEqual(alerts["counts"]["dead_lettered_deliveries"], 1)
+
+    def test_observability_alerts_report_high_per_agent_queue_depth(self) -> None:
+        settings.observability_queue_depth_alert_threshold = 2
+        try:
+            self.client.post("/agents/up", json={"agent_id": "agt_queue_alert", "capabilities": ["python"]})
+            for idx in range(2):
+                self.client.post(
+                    "/messages/send",
+                    json={
+                        "target": {"type": "agent", "id": "agt_queue_alert"},
+                        "message": {"text": f"queued {idx}", "metadata": {}},
+                    },
+                    headers={"Idempotency-Key": f"queue-alert-{idx}"},
+                )
+
+            alerts = self.agp.ops_alerts()
+            queue_alert = next(item for item in alerts["items"] if item["code"] == "queue_depth_high")
+            self.assertEqual(queue_alert["evidence"]["threshold"], 2)
+            self.assertEqual(queue_alert["evidence"]["max_queue_depth"], 2)
+            self.assertEqual(queue_alert["evidence"]["affected_agents"][0]["agent_id"], "agt_queue_alert")
+            self.assertEqual(queue_alert["evidence"]["affected_agents"][0]["queue_depth"], 2)
+            self.assertEqual(alerts["counts"]["queue_depth_breaches"], 1)
+        finally:
+            settings.observability_queue_depth_alert_threshold = 5
+
+    def test_ops_alerts_report_global_capability_queue_depth_high(self) -> None:
+        settings.observability_queue_depth_alert_threshold = 2
+        try:
+            for idx in range(2):
+                self.client.post(
+                    "/messages/send",
+                    json={
+                        "target": {"type": "capability", "id": "python"},
+                        "message": {"text": f"shared backlog {idx}", "metadata": {}},
+                    },
+                    headers={"Idempotency-Key": f"shared-queue-alert-{idx}"},
+                )
+
+            alerts = self.agp.ops_alerts()
+            queue_alert = next(item for item in alerts["items"] if item["code"] == "queue_depth_global_high")
+            self.assertEqual(queue_alert["evidence"]["threshold"], 2)
+            self.assertEqual(queue_alert["evidence"]["queue_depth_total"], 2)
+            self.assertEqual(queue_alert["evidence"]["direct_queue_depth_total"], 0)
+            self.assertEqual(queue_alert["evidence"]["shared_queue_depth"], 2)
+            self.assertEqual(alerts["counts"]["global_queue_depth_breaches"], 1)
+        finally:
+            settings.observability_queue_depth_alert_threshold = 5
+
+    def test_ops_alerts_do_not_raise_global_queue_alert_for_tiny_shared_backlog(self) -> None:
+        settings.observability_queue_depth_alert_threshold = 2
+        try:
+            self.client.post("/agents/up", json={"agent_id": "agt_mixed_queue_alert", "capabilities": ["python"]})
+            for idx in range(2):
+                self.client.post(
+                    "/messages/send",
+                    json={
+                        "target": {"type": "agent", "id": "agt_mixed_queue_alert"},
+                        "message": {"text": f"direct backlog {idx}", "metadata": {}},
+                    },
+                    headers={"Idempotency-Key": f"direct-queue-alert-{idx}"},
+                )
+            self.client.post(
+                "/messages/send",
+                json={
+                    "target": {"type": "capability", "id": "python"},
+                    "message": {"text": "shared backlog", "metadata": {}},
+                },
+                headers={"Idempotency-Key": "shared-queue-alert-small"},
+            )
+
+            alerts = self.agp.ops_alerts()
+            codes = {item["code"] for item in alerts["items"]}
+            self.assertIn("queue_depth_high", codes)
+            self.assertNotIn("queue_depth_global_high", codes)
+            self.assertEqual(alerts["counts"]["queue_depth_breaches"], 1)
+            self.assertEqual(alerts["counts"]["global_queue_depth_breaches"], 0)
+        finally:
+            settings.observability_queue_depth_alert_threshold = 5
+
+    def test_observability_alerts_report_stale_queued_jobs(self) -> None:
+        settings.observability_stale_queue_age_seconds = 120
+        try:
+            self.client.post(
+                "/messages/send",
+                json={
+                    "target": {"type": "capability", "id": "python"},
+                    "message": {"text": "stale queue", "metadata": {}},
+                },
+                headers={"Idempotency-Key": "stale-queue-1"},
+            )
+            session = SessionLocal()
+            try:
+                job = session.scalar(
+                    select(Job).where(
+                        Job.target_queue == "capability:python",
+                        Job.status == "queued",
+                    )
+                )
+                assert job is not None
+                job.updated_at = utc_now() - timedelta(seconds=185)
+                session.commit()
+            finally:
+                session.close()
+
+            alerts = self.agp.ops_alerts()
+            stale_alert = next(item for item in alerts["items"] if item["code"] == "stale_queued_jobs")
+            self.assertEqual(stale_alert["evidence"]["threshold_seconds"], 120)
+            self.assertEqual(stale_alert["evidence"]["affected_agents"], [])
+            self.assertGreaterEqual(stale_alert["evidence"]["max_oldest_queue_age_seconds"], 180)
+            self.assertIsNotNone(stale_alert["evidence"]["global_oldest_queued_at"])
+            self.assertEqual(alerts["counts"]["stale_queue_agents"], 0)
+            self.assertEqual(alerts["counts"]["stale_queued_work"], 1)
+        finally:
+            settings.observability_stale_queue_age_seconds = 900
+
+    def test_observability_stale_queue_alert_clears_after_stale_delivery_redrive(self) -> None:
+        settings.observability_stale_queue_age_seconds = 120
+        try:
+            self.client.post("/agents/up", json={"agent_id": "agt_redrive_alert", "capabilities": ["python"]})
+            self.client.post(
+                "/messages/send",
+                json={
+                    "target": {"type": "agent", "id": "agt_redrive_alert"},
+                    "message": {"text": "stale then redrive", "metadata": {}},
+                },
+                headers={"Idempotency-Key": "stale-redrive-alert-1"},
+            )
+            session = SessionLocal()
+            try:
+                backend = get_queue_backend(settings.queue_backend)
+                job = session.scalar(
+                    select(Job).where(
+                        Job.target_queue == "agent:agt_redrive_alert",
+                        Job.status == "queued",
+                    )
+                )
+                assert job is not None
+                job.updated_at = utc_now() - timedelta(seconds=185)
+                session.commit()
+                initial_alerts = self.agp.ops_alerts()
+                stale_alert = next(item for item in initial_alerts["items"] if item["code"] == "stale_queued_jobs")
+                self.assertGreaterEqual(stale_alert["evidence"]["max_oldest_queue_age_seconds"], 180)
+
+                delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_redrive_alert"])
+                self.assertIsNotNone(delivery)
+                session.commit()
+                record = session.get(QueueDeliveryRecord, delivery.delivery_id)
+                assert record is not None
+                record.last_delivered_at = utc_now() - timedelta(seconds=185)
+                session.commit()
+                result = backend.redrive_stale_deliveries(
+                    session,
+                    visibility_timeout_seconds=120,
+                    max_delivery_attempts=3,
+                )
+                session.commit()
+                self.assertEqual(result["redriven_deliveries"], 1)
+            finally:
+                session.close()
+
+            alerts = self.agp.ops_alerts()
+            self.assertFalse(any(item["code"] == "stale_queued_jobs" for item in alerts["items"]))
+            self.assertEqual(alerts["counts"]["stale_queued_work"], 0)
+            self.assertEqual(alerts["counts"]["stale_queue_agents"], 0)
+        finally:
+            settings.observability_stale_queue_age_seconds = 900
+
+    def test_observability_triage_includes_queue_backlog_age_by_agent(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_triage_queue", "capabilities": ["python"]})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_triage_queue"},
+                "message": {"text": "queued for triage", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "triage-queue-age-1"},
+        )
+        session = SessionLocal()
+        try:
+            job = session.scalar(
+                select(Job).where(
+                    Job.target_queue == "agent:agt_triage_queue",
+                    Job.status == "queued",
+                )
+            )
+            assert job is not None
+            job.updated_at = utc_now() - timedelta(seconds=185)
+            session.commit()
+        finally:
+            session.close()
+
+        triage = self.agp.ops_triage()
+        backlog = triage["queue_backlog_by_agent"]["agt_triage_queue"]
+        self.assertEqual(backlog["depth"], 1)
+        self.assertIsNotNone(backlog["oldest_queued_at"])
+        self.assertGreaterEqual(backlog["oldest_queue_age_seconds"], 180)
 
     def test_observability_alert_thresholds_are_configurable(self) -> None:
         settings.observability_unreachable_runtime_threshold = 2
@@ -244,54 +440,61 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         settings.observability_dead_letter_alert_threshold = 2
         settings.observability_terminal_failure_sample_size = 5
         settings.observability_terminal_failure_rate_threshold = 0.9
+        settings.observability_queue_depth_alert_threshold = 2
+        settings.observability_stale_queue_age_seconds = 9999
 
-        self.client.post("/runtimes/register", json={"runtime_id": "rtm_alert_cfg", "hostname": "localhost"})
-        session = SessionLocal()
         try:
-            runtime = session.get(Runtime, "rtm_alert_cfg")
-            assert runtime is not None
-            runtime.health_status = HealthStatus.UNREACHABLE.value
-            session.commit()
-        finally:
-            session.close()
+            self.client.post("/runtimes/register", json={"runtime_id": "rtm_alert_cfg", "hostname": "localhost"})
+            session = SessionLocal()
+            try:
+                runtime = session.get(Runtime, "rtm_alert_cfg")
+                assert runtime is not None
+                runtime.health_status = HealthStatus.UNREACHABLE.value
+                session.commit()
+            finally:
+                session.close()
 
-        self.client.post("/agents/up", json={"agent_id": "agt_alert_cfg", "capabilities": ["python"]})
-        self.client.post(
-            "/messages/send",
-            json={
-                "target": {"type": "agent", "id": "agt_alert_cfg"},
-                "message": {"text": "dead letter this once", "metadata": {}},
-            },
-            headers={"Idempotency-Key": "alert-config-dead-letter-1"},
-        )
-
-        session = SessionLocal()
-        try:
-            backend = get_queue_backend(settings.queue_backend)
-            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_alert_cfg"])
-            self.assertIsNotNone(delivery)
-            assert delivery is not None
-            record = session.get(QueueDeliveryRecord, delivery.delivery_id)
-            assert record is not None
-            record.delivery_attempt = 3
-            record.last_delivered_at = utc_now() - timedelta(seconds=60)
-            session.commit()
-            backend.redrive_stale_deliveries(
-                session,
-                visibility_timeout_seconds=30,
-                max_delivery_attempts=3,
+            self.client.post("/agents/up", json={"agent_id": "agt_alert_cfg", "capabilities": ["python"]})
+            self.client.post(
+                "/messages/send",
+                json={
+                    "target": {"type": "agent", "id": "agt_alert_cfg"},
+                    "message": {"text": "dead letter this once", "metadata": {}},
+                },
+                headers={"Idempotency-Key": "alert-config-dead-letter-1"},
             )
-            session.commit()
-        finally:
-            session.close()
 
-        alerts = self.agp.observability_alerts()
-        codes = {item["code"] for item in alerts["items"]}
-        self.assertNotIn("runtime_unreachable", codes)
-        self.assertNotIn("heartbeat_loss_spike", codes)
-        self.assertNotIn("repeated_fencing_events", codes)
-        self.assertNotIn("queue_dead_lettering", codes)
-        self.assertNotIn("rising_terminal_failure_rate", codes)
+            session = SessionLocal()
+            try:
+                backend = get_queue_backend(settings.queue_backend)
+                delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_alert_cfg"])
+                self.assertIsNotNone(delivery)
+                assert delivery is not None
+                record = session.get(QueueDeliveryRecord, delivery.delivery_id)
+                assert record is not None
+                record.delivery_attempt = 3
+                record.last_delivered_at = utc_now() - timedelta(seconds=60)
+                session.commit()
+                backend.redrive_stale_deliveries(
+                    session,
+                    visibility_timeout_seconds=30,
+                    max_delivery_attempts=3,
+                )
+                session.commit()
+            finally:
+                session.close()
+
+            alerts = self.agp.ops_alerts()
+            codes = {item["code"] for item in alerts["items"]}
+            self.assertNotIn("runtime_unreachable", codes)
+            self.assertNotIn("heartbeat_loss_spike", codes)
+            self.assertNotIn("repeated_fencing_events", codes)
+            self.assertNotIn("queue_dead_lettering", codes)
+            self.assertNotIn("rising_terminal_failure_rate", codes)
+            self.assertNotIn("queue_depth_high", codes)
+        finally:
+            settings.observability_queue_depth_alert_threshold = 5
+            settings.observability_stale_queue_age_seconds = 900
 
     def test_observability_dispatch_alerts_posts_to_configured_webhook(self) -> None:
         settings.observability_alert_webhook_url = "https://alerts.example.invalid/agp"

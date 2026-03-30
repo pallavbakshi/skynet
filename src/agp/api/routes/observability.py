@@ -36,11 +36,11 @@ from agp.models import (
     SystemMetadata,
     utc_now,
 )
+from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue, queue_oldest_queued_at
 from agp.services._helpers import _control_plane_log_path, _require_job
 from agp.services.observability import _current_alerts_payload
 
 router = APIRouter()
-
 
 @router.get("/observability/summary", deprecated=True)
 def observability_summary(db: Session = Depends(get_db)) -> dict:
@@ -121,6 +121,26 @@ def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
     lines.extend(["# HELP agp_interrupts_total Total job interrupt requests.", "# TYPE agp_interrupts_total counter", _prom_metric("agp_interrupts_total", interrupt_count)])
     queue_depth = int(db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.QUEUED.value)) or 0)
     lines.extend(["# HELP agp_queue_depth Current number of queued jobs.", "# TYPE agp_queue_depth gauge", _prom_metric("agp_queue_depth", queue_depth)])
+    lines.extend([
+        "# HELP agp_queue_oldest_age_seconds Age in seconds of the oldest queued job.",
+        "# TYPE agp_queue_oldest_age_seconds gauge",
+    ])
+    global_oldest_queued_at = queue_oldest_queued_at(db)
+    queue_oldest_age_seconds = (
+        max(0.0, (utc_now() - global_oldest_queued_at).total_seconds()) if global_oldest_queued_at is not None else 0.0
+    )
+    agents = db.scalars(select(Agent).order_by(Agent.agent_id.asc())).all()
+    target_queues = [agent_queue_targets(agent_id=agent.agent_id)[0] for agent in agents]
+    backlog_by_queue = queue_backlogs_by_target_queue(db, target_queues=target_queues)
+    for agent in agents:
+        backlog = backlog_by_queue.get(agent_queue_targets(agent_id=agent.agent_id)[0], {"queue_depth": 0, "oldest_queued_at": None})
+        agent_queue_depth = backlog["queue_depth"]
+        oldest_queued_at = backlog["oldest_queued_at"]
+        lines.append(_prom_metric("agp_queue_depth", agent_queue_depth, {"agent_id": agent.agent_id}))
+        if oldest_queued_at is not None:
+            agent_oldest_age = max(0.0, (utc_now() - oldest_queued_at).total_seconds())
+            lines.append(_prom_metric("agp_queue_oldest_age_seconds", agent_oldest_age, {"agent_id": agent.agent_id}))
+    lines.append(_prom_metric("agp_queue_oldest_age_seconds", queue_oldest_age_seconds))
     active_leases = int(db.scalar(select(func.count()).select_from(Lease).where(Lease.status == LeaseStatus.ACTIVE.value)) or 0)
     lines.extend(["# HELP agp_leases_active Current active leases.", "# TYPE agp_leases_active gauge", _prom_metric("agp_leases_active", active_leases)])
     last_backup_at = db.scalar(select(SystemMetadata.value).where(SystemMetadata.key == "last_backup_at"))
@@ -225,7 +245,27 @@ def observability_triage(db: Session = Depends(get_db)) -> dict:
     idle_agents = int(db.scalar(select(func.count()).select_from(Agent).where(Agent.status == AgentStatus.IDLE.value)) or 0)
     busy_agents = int(db.scalar(select(func.count()).select_from(Agent).where(Agent.status == AgentStatus.BUSY.value)) or 0)
     agent_summary = {"idle": idle_agents, "busy": busy_agents, "total": idle_agents + busy_agents}
-    return _ok({"active_jobs_by_runtime": active_by_runtime, "recent_failures": failure_items, "stale_runtimes": stale_items, "agents": agent_summary})
+    queue_backlog_by_agent = {}
+    agents = db.scalars(select(Agent).order_by(Agent.agent_id.asc())).all()
+    target_queues = [agent_queue_targets(agent_id=agent.agent_id)[0] for agent in agents]
+    backlog_by_queue = queue_backlogs_by_target_queue(db, target_queues=target_queues)
+    for agent in agents:
+        backlog = backlog_by_queue.get(agent_queue_targets(agent_id=agent.agent_id)[0], {"queue_depth": 0, "oldest_queued_at": None})
+        oldest_queued_at = backlog["oldest_queued_at"]
+        queue_backlog_by_agent[agent.agent_id] = {
+            "depth": backlog["queue_depth"],
+            "oldest_queued_at": oldest_queued_at.isoformat() if oldest_queued_at is not None else None,
+            "oldest_queue_age_seconds": (
+                max(0.0, (utc_now() - oldest_queued_at).total_seconds()) if oldest_queued_at is not None else None
+            ),
+        }
+    return _ok({
+        "active_jobs_by_runtime": active_by_runtime,
+        "recent_failures": failure_items,
+        "stale_runtimes": stale_items,
+        "agents": agent_summary,
+        "queue_backlog_by_agent": queue_backlog_by_agent,
+    })
 
 
 @router.get("/observability/health-records", deprecated=True)

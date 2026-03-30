@@ -10,13 +10,37 @@ from sqlalchemy.orm import Session
 
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
-from agp.models import Agent
+from agp.models import Agent, utc_now
+from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue
 from agp.schemas import AgentDownRequest, AgentInterruptRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
 from agp.services.agents import agent_down_service, agent_interrupt_service, agent_patch_service, agent_undrain_service, agent_up_service
 
 router = APIRouter()
 
 _AGENT_FIELDS = ("agent_id", "capabilities", "metadata_json", "queue_id", "status", "workspace_ref", "last_heartbeat_at", "created_at")
+
+def _serialize_agent_with_queue_depth(agent: Agent, backlog: dict[str, object], *, include_updated_at: bool = False) -> dict:
+    fields = (*_AGENT_FIELDS, "created_at", "updated_at") if include_updated_at else _AGENT_FIELDS
+    data = _serialize(agent, fields)
+    oldest_queued_at = backlog["oldest_queued_at"]
+    data["queue_depth"] = backlog["queue_depth"]
+    data["oldest_queued_at"] = oldest_queued_at
+    data["oldest_queue_age_seconds"] = (
+        max(0.0, (utc_now() - oldest_queued_at).total_seconds()) if oldest_queued_at is not None else None
+    )
+    return data
+
+
+def _agent_backlogs(db: Session, agents: list[Agent]) -> dict[str, dict[str, object]]:
+    target_queues = [agent_queue_targets(agent_id=agent.agent_id)[0] for agent in agents]
+    backlog_by_queue = queue_backlogs_by_target_queue(db, target_queues=target_queues)
+    return {
+        agent.agent_id: backlog_by_queue.get(
+            agent_queue_targets(agent_id=agent.agent_id)[0],
+            {"queue_depth": 0, "oldest_queued_at": None},
+        )
+        for agent in agents
+    }
 
 
 @router.get("/agents", response_model=OkResponse[PagedData[AgentResponse]])
@@ -57,9 +81,10 @@ def list_agents(
     if len(agents) > limit:
         last = page_items[-1]
         next_cursor = _encode_cursor({"created_at": last.created_at.isoformat(), "agent_id": last.agent_id})
+    backlogs_by_agent = _agent_backlogs(db, page_items)
     return _ok(
         _page(
-            [_serialize(agent, _AGENT_FIELDS) for agent in page_items],
+            [_serialize_agent_with_queue_depth(agent, backlogs_by_agent[agent.agent_id]) for agent in page_items],
             limit=limit,
             next_cursor=next_cursor,
         )
@@ -70,7 +95,8 @@ def list_agents(
 def get_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     from agp.services._helpers import _require_agent
     agent = _require_agent(db, agent_id)
-    return _ok(_serialize(agent, (*_AGENT_FIELDS, "created_at", "updated_at")))
+    backlog = _agent_backlogs(db, [agent])[agent.agent_id]
+    return _ok(_serialize_agent_with_queue_depth(agent, backlog, include_updated_at=True))
 
 
 @router.post("/agents/up", response_model=OkResponse[AgentResponse])

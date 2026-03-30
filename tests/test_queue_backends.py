@@ -19,6 +19,9 @@ from agp.queue_backend import (
     InMemoryBrokerQueueBackend,
     RedisQueueBackend,
     QueueDelivery,
+    queue_backlog_info,
+    queue_backlogs_by_target_queue,
+    queue_oldest_queued_at,
 )
 import agp.queue_backend as queue_backend_module
 from agp.services.jobs import _block_job, _unblock_job
@@ -62,6 +65,19 @@ def _seed_job(session, agent_id: str = "agt_q", job_id: str = "job_q") -> Job:
         updated_at=utc_now(),
     )
     session.add(job)
+    session.flush()
+    return job
+
+
+def _seed_job_with_status(
+    session,
+    *,
+    agent_id: str = "agt_q",
+    job_id: str,
+    status: str,
+) -> Job:
+    job = _seed_job(session, agent_id=agent_id, job_id=job_id)
+    job.status = status
     session.flush()
     return job
 
@@ -155,6 +171,85 @@ class DbBackendContractTest(AgpTestCase):
             self.assertEqual(refreshed.status, JobStatus.ACCEPTED.value)
         finally:
             verify.close()
+
+    def test_peek_queue_counts_only_queued_jobs(self) -> None:
+        backend = DbQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job_with_status(session, job_id="job_q1", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_q2", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_a1", status=JobStatus.ACCEPTED.value)
+            session.commit()
+            self.assertEqual(backend.peek_queue(session, target_queues=["agent:agt_q"]), 2)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_returns_oldest_matching_timestamp(self) -> None:
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            older = _seed_job_with_status(session, job_id="job_old", status=JobStatus.QUEUED.value)
+            newer = _seed_job_with_status(session, job_id="job_new", status=JobStatus.QUEUED.value)
+            older.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=older.updated_at.tzinfo)
+            newer.updated_at = utc_now().__class__(2001, 1, 1, tzinfo=newer.updated_at.tzinfo)
+            session.commit()
+            oldest = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(oldest)
+            assert oldest is not None
+            self.assertEqual(oldest.isoformat(), "2000-01-01T00:00:00+00:00")
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_returns_none_for_empty_or_nonmatching_queues(self) -> None:
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job(session)
+            session.commit()
+            self.assertIsNone(queue_oldest_queued_at(session, target_queues=[]))
+            self.assertIsNone(queue_oldest_queued_at(session, target_queues=["agent:missing"]))
+        finally:
+            session.close()
+
+    def test_queue_backlog_info_returns_zero_for_empty_or_nonmatching_queues(self) -> None:
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job(session)
+            session.commit()
+            self.assertEqual(queue_backlog_info(session, target_queues=[]), {"queue_depth": 0, "oldest_queued_at": None})
+            self.assertEqual(
+                queue_backlog_info(session, target_queues=["agent:missing"]),
+                {"queue_depth": 0, "oldest_queued_at": None},
+            )
+            self.assertEqual(queue_backlogs_by_target_queue(session, target_queues=[]), {})
+            self.assertEqual(
+                queue_backlogs_by_target_queue(session, target_queues=["agent:missing"]),
+                {"agent:missing": {"queue_depth": 0, "oldest_queued_at": None}},
+            )
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_work_requeues(self) -> None:
+        backend = DbQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            backend.release_unclaimed(session, delivery=delivery)
+            session.commit()
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
 
 
 class DeliveryTableBackendContractTest(AgpTestCase):
@@ -257,6 +352,69 @@ class DeliveryTableBackendContractTest(AgpTestCase):
         finally:
             verify.close()
 
+    def test_peek_queue_counts_only_queued_jobs(self) -> None:
+        backend = DeliveryTableQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job_with_status(session, job_id="job_q1", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_q2", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_a1", status=JobStatus.ACCEPTED.value)
+            session.commit()
+            self.assertEqual(backend.peek_queue(session, target_queues=["agent:agt_q"]), 2)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_work_requeues(self) -> None:
+        backend = DeliveryTableQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            backend.release_unclaimed(session, delivery=delivery)
+            session.commit()
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_stale_delivery_redrives(self) -> None:
+        backend = DeliveryTableQueueBackend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            from agp.models import QueueDeliveryRecord
+            record = session.get(QueueDeliveryRecord, delivery.delivery_id)
+            assert record is not None
+            record.last_delivered_at = utc_now().__class__(2000, 1, 1, tzinfo=record.last_delivered_at.tzinfo)
+            session.commit()
+            result = backend.redrive_stale_deliveries(session, visibility_timeout_seconds=0, max_delivery_attempts=3)
+            session.commit()
+            self.assertEqual(result["redriven_deliveries"], 1)
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
+
 
 class InMemoryBrokerContractTest(AgpTestCase):
     """InMemoryBrokerQueueBackend: process-local, no SQL delivery records."""
@@ -332,6 +490,65 @@ class InMemoryBrokerContractTest(AgpTestCase):
             session.commit()
             delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
             self.assertIsNone(delivery)
+        finally:
+            session.close()
+
+    def test_peek_queue_counts_only_queued_jobs(self) -> None:
+        backend = InMemoryBrokerQueueBackend()
+        backend.reset()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job_with_status(session, job_id="job_q1", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_q2", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_a1", status=JobStatus.ACCEPTED.value)
+            session.commit()
+            self.assertEqual(backend.peek_queue(session, target_queues=["agent:agt_q"]), 2)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_work_requeues(self) -> None:
+        backend = InMemoryBrokerQueueBackend()
+        backend.reset()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            backend.release_unclaimed(session, delivery=delivery)
+            session.commit()
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_stale_delivery_redrives(self) -> None:
+        backend = InMemoryBrokerQueueBackend()
+        backend.reset()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            result = backend.redrive_stale_deliveries(session, visibility_timeout_seconds=0, max_delivery_attempts=3)
+            session.commit()
+            self.assertEqual(result["redriven_deliveries"], 1)
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
         finally:
             session.close()
 
@@ -443,6 +660,71 @@ class RedisBackendContractTest(AgpTestCase):
         finally:
             session.close()
 
+    def test_peek_queue_counts_only_queued_jobs(self) -> None:
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            _seed_job_with_status(session, job_id="job_q1", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_q2", status=JobStatus.QUEUED.value)
+            _seed_job_with_status(session, job_id="job_a1", status=JobStatus.ACCEPTED.value)
+            session.commit()
+            self.assertEqual(backend.peek_queue(session, target_queues=["agent:agt_q"]), 2)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_work_requeues(self) -> None:
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            backend.release_unclaimed(session, delivery=delivery)
+            session.commit()
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
+
+    def test_queue_oldest_queued_at_refreshes_when_stale_delivery_redrives(self) -> None:
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            delivery = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(delivery)
+            from agp.models import QueueDeliveryRecord
+            record = session.get(QueueDeliveryRecord, delivery.delivery_id)
+            assert record is not None
+            record.last_delivered_at = utc_now().__class__(2000, 1, 1, tzinfo=record.last_delivered_at.tzinfo)
+            session.commit()
+            result = backend.redrive_stale_deliveries(
+                session, visibility_timeout_seconds=0, max_delivery_attempts=3
+            )
+            session.commit()
+            self.assertEqual(result["redriven_deliveries"], 1)
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
+        finally:
+            session.close()
+
     def test_phase3_recovery_sql_pending_missing_redis_pending(self) -> None:
         """Crash after Redis LPOP but before SQL update to 'delivered'."""
         backend = self._make_backend()
@@ -471,6 +753,31 @@ class RedisBackendContractTest(AgpTestCase):
             d2 = backend.dequeue_candidate(session, target_queues=["agent:agt_q"])
             self.assertIsNotNone(d2)
             self.assertEqual(d2.job_id, job.job_id)
+        finally:
+            session.close()
+
+    def test_phase3_recovery_refreshes_queue_oldest_age(self) -> None:
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            job.updated_at = utc_now().__class__(2000, 1, 1, tzinfo=job.updated_at.tzinfo)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+            backend.client.lpop(backend._queue_key("agent:agt_q"))
+            backend.client.srem(backend._pending_set_key("agent:agt_q"), job.job_id)
+            result = backend.redrive_stale_deliveries(
+                session, visibility_timeout_seconds=0, max_delivery_attempts=3
+            )
+            session.commit()
+            self.assertGreaterEqual(result["redriven_deliveries"], 1)
+            refreshed = queue_oldest_queued_at(session, target_queues=["agent:agt_q"])
+            self.assertIsNotNone(refreshed)
+            assert refreshed is not None
+            self.assertGreaterEqual((utc_now() - refreshed).total_seconds(), 0)
+            self.assertLess((utc_now() - refreshed).total_seconds(), 30)
         finally:
             session.close()
 
