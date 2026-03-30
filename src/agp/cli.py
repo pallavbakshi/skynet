@@ -351,6 +351,61 @@ def _print_job_result(job: dict, client) -> None:
         )
 
 
+def _peek_tip(agent_id: str) -> str | None:
+    """Return a terminal-specific tip for peeking at an agent's live output.
+
+    Detects the local terminal host by probing for tmux sessions or
+    wezterm panes.  Returns None when no local session is found (remote
+    runtime or non-interactive environment).
+    """
+    import shutil
+    import subprocess
+
+    # Try tmux first
+    if shutil.which("tmux"):
+        try:
+            result = subprocess.run(
+                ["tmux", "has-session", "-t", f"agp-{agent_id}"],
+                capture_output=True, timeout=3,
+            )
+            if result.returncode == 0:
+                return (
+                    f"Tip: peek at live output with:\n"
+                    f"  tmux capture-pane -t agp-{agent_id} -p -S -30"
+                )
+        except Exception:
+            pass
+
+    # Try wezterm
+    if shutil.which("wezterm"):
+        try:
+            result = subprocess.run(
+                ["wezterm", "cli", "list", "--format", "json"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                import json as _json
+                for pane in _json.loads(result.stdout):
+                    title = pane.get("title", "")
+                    if f"AGP:{agent_id}" in title:
+                        pane_id = pane.get("pane_id")
+                        return (
+                            f"Tip: peek at live output with:\n"
+                            f"  wezterm cli get-text --pane-id {pane_id}"
+                        )
+        except Exception:
+            pass
+
+    return None
+
+
+def _print_peek_tip(agent_id: str) -> None:
+    """Print a peek tip if one is available."""
+    tip = _peek_tip(agent_id)
+    if tip:
+        typer.echo(tip)
+
+
 def _print_detached(job_id: str, agent_id: str) -> None:
     _print_banner("ACCEPTED", "Task Detached (Running Long)")
     typer.echo(f"JOB_ID:       {job_id}")
@@ -360,6 +415,7 @@ def _print_detached(job_id: str, agent_id: str) -> None:
     typer.echo("Notice: The CLI has detached to free your terminal.")
     typer.echo(f"- To check status manually:  agp status {job_id}")
     typer.echo(f"- To wait synchronously:     agp wait {job_id}")
+    _print_peek_tip(agent_id)
 
 
 def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0):
@@ -839,6 +895,7 @@ def send(
             return
 
         # Smart detach: sync window with heartbeat
+        _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, job_id, timeout)
         except _httpx.HTTPStatusError as exc:
@@ -968,7 +1025,12 @@ def review_cmd(
     reviewer_id: str = typer.Argument(..., help="Agent ID of the reviewer."),
     max_rounds: int = typer.Option(3, "--max-rounds", help="Maximum review rounds."),
     dev_id: str = typer.Option(None, "--dev", help="Agent ID of the developer (defaults to the source job's agent)."),
-    prompt: str = typer.Option("Review the following output for correctness, edge cases, and security. Write findings to /tmp/review-findings.md with APPROVED or CHANGES_REQUESTED at the top.", "--prompt", help="Review prompt template."),
+    prompt: str = typer.Option(
+        "Review the following output for correctness, edge cases, and security. "
+        "Respond with a JSON object: {\"verdict\": \"approved\" or \"changes_requested\", \"summary\": \"...\", \"findings\": [{\"severity\": \"high|medium|low\", \"description\": \"...\"}]}. "
+        "Also write findings to /tmp/review-findings.md for reference.",
+        "--prompt", help="Review prompt template.",
+    ),
     server_url: str = typer.Option(None, help="CP URL."),
     timeout_per_round: int = typer.Option(120, "--timeout", help="Seconds to wait per round."),
 ) -> None:
@@ -980,18 +1042,6 @@ def review_cmd(
     import json
     import time
     import httpx as _httpx
-
-    if (
-        os.environ.get("AGP_ARTIFACT_BACKEND", "localfs") != "http"
-        and "localhost" not in (server_url or "")
-        and "127.0.0.1" not in (server_url or "")
-    ):
-        typer.echo(
-            "Warning: AGP_ARTIFACT_BACKEND is not 'http' and server URL is not localhost. "
-            "Remote CPs cannot read file:// artifact refs from a localfs backend. "
-            "Set AGP_ARTIFACT_BACKEND=http for remote CPs.",
-            err=True,
-        )
 
     with _make_client(server_url) as client:
         try:
@@ -1006,24 +1056,42 @@ def review_cmd(
         for round_num in range(1, max_rounds + 1):
             typer.echo(f"[review] Round {round_num}/{max_rounds}")
 
+            # Build attachments list for the review send
+            review_attachments: list[dict[str, str]] = []
+
             if round_num == 1:
                 # First round: send source job result to reviewer
                 result_artifact_id = source_job.get("result_artifact_id")
                 review_text = prompt
                 if result_artifact_id:
-                    artifact = client.fetch_artifact(result_artifact_id, content=True)
-                    review_text = f"{prompt}\n\n---\nSource job {job_id} result:\n```\n{artifact.get('content', '')}\n```"
+                    try:
+                        artifact = client.fetch_artifact(result_artifact_id, content=True)
+                        artifact_content = artifact.get("content", "")
+                        if artifact_content:
+                            tmp = Path(f"/tmp/agp-review-{job_id}-source.txt")
+                            tmp.write_text(artifact_content, encoding="utf-8")
+                            review_attachments.append({"name": tmp.name, "role": "source-output", "content": artifact_content})
+                            review_text = f"{prompt}\n\nSource job result is attached as {tmp.name}."
+                    except Exception:
+                        review_text = f"{prompt}\n\n(Could not fetch source job artifact.)"
             else:
                 # Subsequent rounds: send dev's fixes to reviewer
                 fix_artifact_id = source_job.get("result_artifact_id")
                 if fix_artifact_id:
-                    fix_artifact = client.fetch_artifact(fix_artifact_id, content=True)
-                    fix_content = fix_artifact.get("content", "")
-                    review_text = (
-                        f"{prompt}\n\n---\n"
-                        f"[Round {round_num}] The developer addressed issues from the previous review.\n"
-                        f"Updated result:\n```\n{fix_content}\n```"
-                    )
+                    try:
+                        fix_artifact = client.fetch_artifact(fix_artifact_id, content=True)
+                        fix_content = fix_artifact.get("content", "")
+                        if fix_content:
+                            tmp = Path(f"/tmp/agp-review-{job_id}-fix-r{round_num}.txt")
+                            tmp.write_text(fix_content, encoding="utf-8")
+                            review_attachments.append({"name": tmp.name, "role": "fix-output", "content": fix_content})
+                        review_text = (
+                            f"{prompt}\n\n"
+                            f"[Round {round_num}] The developer addressed issues from the previous review.\n"
+                            f"Updated result is attached."
+                        )
+                    except Exception:
+                        review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
                 else:
                     review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
 
@@ -1057,6 +1125,7 @@ def review_cmd(
                     "agent", reviewer_id, review_text,
                     conversation_id=conversation_id,
                     output_contract=output_contract,
+                    attachments=review_attachments,
                     idempotency_key=f"review-{job_id}-r{round_num}",
                 )
             except _httpx.HTTPStatusError as exc:
@@ -1160,7 +1229,9 @@ def wait_cmd(
                 raise typer.Exit(1)
             return
 
-        typer.echo(f"[..] Re-attaching to {job_id} (agent={job.get('target_agent_id', '?')})...")
+        agent_id = job.get("target_agent_id", "?")
+        typer.echo(f"[..] Re-attaching to {job_id} (agent={agent_id})...")
+        _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, job_id, timeout)
         except _httpx.HTTPStatusError as exc:
@@ -1230,6 +1301,9 @@ def _status_job(job_id: str, server_url: str | None) -> None:
             typer.echo(f"RUN:          {job['latest_run_id']}")
         typer.echo(f"CREATED:      {job.get('created_at', '?')}")
         typer.echo(f"UPDATED:      {job.get('updated_at', '?')}")
+
+        if job["status"] in ("queued", "accepted", "leased", "running"):
+            _print_peek_tip(job.get("target_agent_id", ""))
 
         # Show result/failure artifact if terminal
         if job["status"] in ("completed", "failed") and job.get("result_artifact_id"):
