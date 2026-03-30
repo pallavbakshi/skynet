@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
@@ -32,7 +34,7 @@ def send_message(
     db: Session = Depends(get_db),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict:
-    request_hash = str(hash(request.model_dump_json()))
+    request_hash = hashlib.sha256(request.model_dump_json().encode()).hexdigest()
     if idempotency_key is not None:
         existing = db.get(IdempotencyKey, {"idempotency_key": idempotency_key, "endpoint": "/messages/send"})
         if existing is not None:
@@ -71,7 +73,17 @@ def send_message(
                     request_hash=request_hash, response_json=response,
                     expires_at=utc_now() + timedelta(days=1),
                 ))
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                if idempotency_key is not None:
+                    existing = db.get(IdempotencyKey, {"idempotency_key": idempotency_key, "endpoint": "/messages/send"})
+                    if existing is not None:
+                        if existing.request_hash != request_hash:
+                            raise HTTPException(status_code=409, detail="idempotency key reused with different payload")
+                        return existing.response_json
+                raise
             return response
 
     # Async path
@@ -88,7 +100,17 @@ def send_message(
             request_hash=request_hash, response_json=response,
             expires_at=utc_now() + timedelta(days=1),
         ))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if idempotency_key is not None:
+            existing = db.get(IdempotencyKey, {"idempotency_key": idempotency_key, "endpoint": "/messages/send"})
+            if existing is not None:
+                if existing.request_hash != request_hash:
+                    raise HTTPException(status_code=409, detail="idempotency key reused with different payload")
+                return existing.response_json
+        raise
     return response
 
 

@@ -13,6 +13,7 @@ All server-side imports are deferred to command bodies so that
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -44,6 +45,20 @@ def _default_server_url() -> str:
     host = os.environ.get("AGP_HOST") or "127.0.0.1"
     port = os.environ.get("AGP_PORT") or "7860"
     return f"http://{_connectable_host(host)}:{port}"
+
+
+def _format_http_error(exc) -> str:
+    """Extract a clean error message from an httpx.HTTPStatusError.
+
+    The CP returns ``{"ok": false, "error": {"code": ..., "message": ...}}``.
+    """
+    try:
+        body = exc.response.json()
+        err = body.get("error", {})
+        message = err.get("message") or err.get("code") or str(body)
+    except Exception:
+        message = exc.response.text or str(exc)
+    return f"[HTTP {exc.response.status_code}] {message}"
 
 
 @app.command(hidden=True)
@@ -634,7 +649,8 @@ def interrupt(
             if exc.response.status_code == 404:
                 is_agent = False
             else:
-                raise
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
 
         if is_agent:
             _interrupt_agent(client, target, purge=purge)
@@ -664,7 +680,8 @@ def _interrupt_agent(client, agent_id: str, *, purge: bool) -> None:
             _print_banner("ERROR", "Interrupt Failed")
             typer.echo(f"FATAL: Agent not found: {agent_id}")
             raise typer.Exit(1)
-        raise
+        typer.echo(_format_http_error(exc), err=True)
+        raise typer.Exit(1)
 
     halted = result.get("halted_job_id")
     dropped = result.get("dropped_job_ids", [])
@@ -726,7 +743,8 @@ def _interrupt_job(client, job_id: str) -> None:
             _print_banner("ERROR", "Interrupt Failed")
             typer.echo(f"FATAL: {detail}")
             raise typer.Exit(1)
-        raise
+        typer.echo(_format_http_error(exc), err=True)
+        raise typer.Exit(1)
 
     job_status = result.get("status", "cancelled")
 
@@ -756,7 +774,7 @@ def _interrupt_job(client, job_id: str) -> None:
 @app.command()
 def send(
     agent_id: str = typer.Argument(..., help="Target agent ID."),
-    task: str = typer.Argument(..., help="Task text to send."),
+    task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted)."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
     timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
@@ -790,18 +808,29 @@ def send(
     for item in attach or []:
         path, role = _parse_attachment_option(item)
         attachments.append({"name": path.name, "role": role, "content": path.read_text(encoding="utf-8")})
+    if task is None:
+        task = sys.stdin.read().strip()
+    if not task:
+        raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
+
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
         typer.echo(f"[..] Dispatching to {agent_id}...")
-        result = client.send(
-            "agent", agent_id, task,
-            metadata=metadata,
-            output_contract=parsed_output_contract,
-            conversation_id=conversation_id,
-            reply_to_message_id=reply_to,
-            timeout_seconds=timeout_seconds,
-            attachments=attachments,
-            idempotency_key=f"cli-{int(time.time())}",
-        )
+        try:
+            result = client.send(
+                "agent", agent_id, task,
+                metadata=metadata,
+                output_contract=parsed_output_contract,
+                conversation_id=conversation_id,
+                reply_to_message_id=reply_to,
+                timeout_seconds=timeout_seconds,
+                attachments=attachments,
+                idempotency_key=f"cli-{int(time.time())}",
+            )
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         job_id = result["job_id"]
 
         # Fire-and-forget
@@ -810,7 +839,11 @@ def send(
             return
 
         # Smart detach: sync window with heartbeat
-        job, timed_out = _poll_until_done(client, job_id, timeout)
+        try:
+            job, timed_out = _poll_until_done(client, job_id, timeout)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
 
         if not timed_out:
             _print_job_result(job, client)
@@ -847,8 +880,14 @@ def reply(
         if not isinstance(parsed_output_contract, dict):
             raise typer.BadParameter("--output-contract must decode to a JSON object")
 
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
-        source_job = client.get_job(job_id)
+        try:
+            source_job = client.get_job(job_id)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         message_id = source_job.get("message_id")
         if not message_id:
             typer.echo("source job is missing message_id", err=True)
@@ -859,24 +898,58 @@ def reply(
             typer.echo("source job is missing target_agent_id", err=True)
             raise typer.Exit(1)
 
+        # Fetch parent job's prompt + result artifacts to provide conversation context
+        context_task = task
+        prompt_text = ""
+        result_text = ""
+        try:
+            latest_run_id = source_job.get("latest_run_id")
+            if latest_run_id:
+                prompt_arts = client.list_run_artifacts(latest_run_id, role="prompt").get("items", [])
+                if prompt_arts:
+                    p_art = client.fetch_artifact(prompt_arts[0]["artifact_id"], content=True)
+                    prompt_text = p_art.get("content", "")
+            result_artifact_id = source_job.get("result_artifact_id")
+            if result_artifact_id:
+                r_art = client.fetch_artifact(result_artifact_id, content=True)
+                result_text = r_art.get("content", "")
+        except Exception:
+            pass  # proceed without context if artifact fetch fails
+        if prompt_text or result_text:
+            parts = ["Previous exchange:\n---"]
+            if prompt_text:
+                parts.append(f"Prompt: {prompt_text}")
+            if result_text:
+                parts.append(f"Response: {result_text}")
+            parts.append(f"---\nFollow-up: {task}")
+            context_task = "\n".join(parts)
+
         typer.echo(f"[..] Replying to {job_id} via {agent_id}...")
-        result = client.send(
-            "agent",
-            agent_id,
-            task,
-            metadata=metadata,
-            output_contract=parsed_output_contract,
-            conversation_id=conversation_id,
-            reply_to_message_id=message_id,
-            idempotency_key=f"cli-reply-{int(time.time())}",
-        )
+        try:
+            result = client.send(
+                "agent",
+                agent_id,
+                context_task,
+                metadata=metadata,
+                output_contract=parsed_output_contract,
+                conversation_id=conversation_id,
+                reply_to_message_id=message_id,
+                idempotency_key=f"cli-reply-{int(time.time())}",
+            )
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         new_job_id = result["job_id"]
 
         if detach:
             _print_detached(new_job_id, agent_id)
             return
 
-        job, timed_out = _poll_until_done(client, new_job_id, timeout)
+        try:
+            job, timed_out = _poll_until_done(client, new_job_id, timeout)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         if not timed_out:
             _print_job_result(job, client)
             if job["status"] == "failed":
@@ -906,9 +979,26 @@ def review_cmd(
     """
     import json
     import time
+    import httpx as _httpx
+
+    if (
+        os.environ.get("AGP_ARTIFACT_BACKEND", "localfs") != "http"
+        and "localhost" not in (server_url or "")
+        and "127.0.0.1" not in (server_url or "")
+    ):
+        typer.echo(
+            "Warning: AGP_ARTIFACT_BACKEND is not 'http' and server URL is not localhost. "
+            "Remote CPs cannot read file:// artifact refs from a localfs backend. "
+            "Set AGP_ARTIFACT_BACKEND=http for remote CPs.",
+            err=True,
+        )
 
     with _make_client(server_url) as client:
-        source_job = client.get_job(job_id)
+        try:
+            source_job = client.get_job(job_id)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
         dev_agent = dev_id or source_agent
         conversation_id = source_job.get("conversation_id")
@@ -925,7 +1015,17 @@ def review_cmd(
                     review_text = f"{prompt}\n\n---\nSource job {job_id} result:\n```\n{artifact.get('content', '')}\n```"
             else:
                 # Subsequent rounds: send dev's fixes to reviewer
-                review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
+                fix_artifact_id = source_job.get("result_artifact_id")
+                if fix_artifact_id:
+                    fix_artifact = client.fetch_artifact(fix_artifact_id, content=True)
+                    fix_content = fix_artifact.get("content", "")
+                    review_text = (
+                        f"{prompt}\n\n---\n"
+                        f"[Round {round_num}] The developer addressed issues from the previous review.\n"
+                        f"Updated result:\n```\n{fix_content}\n```"
+                    )
+                else:
+                    review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
 
             output_contract = {
                 "format": "json",
@@ -952,12 +1052,16 @@ def review_cmd(
             }
 
             typer.echo(f"[review] Sending to reviewer {reviewer_id}...")
-            review_result = client.send(
-                "agent", reviewer_id, review_text,
-                conversation_id=conversation_id,
-                output_contract=output_contract,
-                idempotency_key=f"review-{job_id}-r{round_num}",
-            )
+            try:
+                review_result = client.send(
+                    "agent", reviewer_id, review_text,
+                    conversation_id=conversation_id,
+                    output_contract=output_contract,
+                    idempotency_key=f"review-{job_id}-r{round_num}",
+                )
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
             review_job_id = review_result["job_id"]
             review_job, timed_out = _poll_until_done(client, review_job_id, timeout_per_round)
 
@@ -1004,11 +1108,15 @@ def review_cmd(
                     f"{content}\n\n"
                     f"Please address all findings and ensure the code is correct."
                 )
-                fix_result = client.send(
-                    "agent", dev_agent, fix_text,
-                    conversation_id=conversation_id,
-                    idempotency_key=f"fix-{job_id}-r{round_num}",
-                )
+                try:
+                    fix_result = client.send(
+                        "agent", dev_agent, fix_text,
+                        conversation_id=conversation_id,
+                        idempotency_key=f"fix-{job_id}-r{round_num}",
+                    )
+                except _httpx.HTTPStatusError as exc:
+                    typer.echo(_format_http_error(exc), err=True)
+                    raise typer.Exit(1)
                 fix_job_id = fix_result["job_id"]
                 fix_job, fix_timed_out = _poll_until_done(client, fix_job_id, timeout_per_round)
                 if fix_timed_out:
@@ -1037,9 +1145,15 @@ def wait_cmd(
     timeout: int = typer.Option(300, help="Wait timeout in seconds (default: 300)."),
 ) -> None:
     """Re-attach to a running job and wait for its result."""
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
         # Quick check — maybe it already finished
-        job = client.get_job(job_id)
+        try:
+            job = client.get_job(job_id)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         if job["status"] in ("completed", "failed", "cancelled"):
             _print_job_result(job, client)
             if job["status"] == "failed":
@@ -1047,7 +1161,11 @@ def wait_cmd(
             return
 
         typer.echo(f"[..] Re-attaching to {job_id} (agent={job.get('target_agent_id', '?')})...")
-        job, timed_out = _poll_until_done(client, job_id, timeout)
+        try:
+            job, timed_out = _poll_until_done(client, job_id, timeout)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
 
         if not timed_out:
             _print_job_result(job, client)
@@ -1092,8 +1210,14 @@ def _status_health(server_url: str | None) -> None:
 
 
 def _status_job(job_id: str, server_url: str | None) -> None:
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
-        job = client.get_job(job_id)
+        try:
+            job = client.get_job(job_id)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         retry_count = job.get("retry_count", 0)
         max_retries = job.get("max_retries", 3)
 
@@ -1138,12 +1262,18 @@ def jobs(
     filter_status: str = typer.Option(None, "--status", help="Filter by status (queued, running, completed, failed)."),
 ) -> None:
     """List recent jobs."""
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
-        data = client.list_jobs(
-            limit=limit,
-            target_agent_id=agent,
-            status=filter_status,
-        )
+        try:
+            data = client.list_jobs(
+                limit=limit,
+                target_agent_id=agent,
+                status=filter_status,
+            )
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         items = data.get("items", [])
         if not items:
             typer.echo("(no jobs)")
@@ -1176,12 +1306,21 @@ def ls(
 ) -> None:
     """List logical agents and available capabilities."""
     from datetime import datetime, timezone
+    import httpx as _httpx
 
     with _make_client(server_url) as client:
-        agents_data = client.list_agents()
+        try:
+            agents_data = client.list_agents()
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         agents = agents_data.get("items", [])
 
-        caps_data = client.list_capabilities()
+        try:
+            caps_data = client.list_capabilities()
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         caps = caps_data.get("items", [])
 
         # Build capability name lookup
@@ -1324,14 +1463,17 @@ def info(
     Accepts an agent ID (e.g. agt_local) or capability ID/name (e.g. cap_python).
     """
     from datetime import datetime, timezone
+    import httpx as _httpx
 
     with _make_client(server_url) as client:
         # Try agent first, fall back to capability
         agent = None
         try:
             agent = client.get_agent(target)
-        except Exception:
-            pass
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
 
         if agent is not None:
             _info_agent(agent, client)
@@ -1458,8 +1600,14 @@ def nudge(
             f"{message}"
         )
 
+    import httpx as _httpx
+
     with _make_client(server_url) as client:
-        result = client.create_nudge(target, payload, priority=priority, source=source)
+        try:
+            result = client.create_nudge(target, payload, priority=priority, source=source)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
         typer.echo(f"nudge queued: {result['nudge_id']} (priority={priority}, target={target})")
 
 
