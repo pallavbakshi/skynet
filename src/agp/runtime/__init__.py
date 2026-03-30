@@ -65,6 +65,7 @@ _COMPAT_IMPORTS: dict[str, tuple[str, str]] = {
     "WezTermHost": ("agp.plugins.wezterm", "WezTermHost"),
     "CodexAdapter": ("agp.plugins.codex", "CodexAdapter"),
     "_clean_codex_tui_output": ("agp.plugins.codex", "_clean_codex_tui_output"),
+    "_extract_codex_tui_result": ("agp.plugins.codex", "_extract_codex_tui_result"),
     "ClaudeCodeAdapter": ("agp.plugins.claude_code", "ClaudeCodeAdapter"),
     "_clean_claude_code_output": ("agp.plugins.claude_code", "_clean_claude_code_output"),
     "build_terminal_host": ("agp.plugins", "build_terminal_host"),
@@ -121,4 +122,5 @@ __all__ = [
     # client re-exports
     "RuntimeClient",
     "RuntimeIdentity",
+    "_extract_codex_tui_result",
 ]

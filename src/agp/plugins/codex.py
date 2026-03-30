@@ -105,6 +105,61 @@ def _clean_codex_tui_output(text: str) -> str:
     return "\n".join(_collect_bullet_lines(lines))
 
 
+def _candidate_codex_tui_result(candidate: str) -> tuple[str, bool, int, int]:
+    stripped = _strip_ansi(candidate)
+    answered_turns = [turn for turn in _parse_codex_turns(stripped) if turn["response"]]
+    bullet_lines = _collect_bullet_lines(stripped.splitlines())
+    cleaned = _clean_codex_tui_output(candidate).strip()
+    return cleaned, bool(answered_turns or bullet_lines), len(answered_turns), len(bullet_lines)
+
+
+def _extract_codex_tui_result(*candidates: str, baseline_last_response: str | None = None) -> str:
+    """Return the most meaningful Codex TUI response from candidate transcripts."""
+    fallback_candidates: list[str] = []
+    answered_candidates: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        cleaned, has_answer, answered_turn_count, bullet_line_count = _candidate_codex_tui_result(candidate)
+        if not cleaned:
+            continue
+        if has_answer:
+            fresh = int(cleaned != (baseline_last_response or ""))
+            # Caller order matters. If the visible pane shows a fresh answer,
+            # trust it immediately; only fall back to accumulated output when
+            # the visible pane is stale or does not contain an answer.
+            if fresh:
+                return cleaned
+            answered_candidates.append(cleaned)
+            continue
+        fallback_candidates.append(cleaned)
+    if answered_candidates:
+        return answered_candidates[0]
+    return fallback_candidates[0] if fallback_candidates else ""
+
+
+def _select_codex_tui_transcript(*candidates: str, baseline_last_response: str | None = None) -> str:
+    """Return the richest transcript that still contains an answered turn when possible."""
+    fallback = ""
+    answered_candidates: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        stripped = _strip_ansi(candidate)
+        cleaned, has_answer, answered_turn_count, bullet_line_count = _candidate_codex_tui_result(stripped)
+        if has_answer:
+            fresh = int(cleaned != (baseline_last_response or ""))
+            if fresh:
+                return stripped
+            answered_candidates.append(stripped)
+            continue
+        if not fallback:
+            fallback = stripped
+    if answered_candidates:
+        return answered_candidates[0]
+    return fallback
+
+
 def _parse_codex_turns(text: str) -> list[dict[str, Any]]:
     """Parse visible Codex TUI output into prompt/response turns."""
     stripped = _strip_ansi(text)
@@ -723,14 +778,25 @@ class CodexAdapter(AgentAdapter):
                 raise ExecutionTimeout("codex tui produced no output after dispatch")
             raise ExecutionTimeout("codex tui did not become idle within timeout")
 
-        # Prefer the cursor-based accumulated output because it preserves
-        # completions that have scrolled out of the visible pane.
+        # Prefer the visible TUI buffer for result extraction because tmux's
+        # accumulated scrollback can lag behind repaint-only responses and end
+        # up containing transient status lines instead of the final answer.
+        visible_output = _strip_ansi(host.read_visible(session))
         read = host.read_output(session, cursor)
-        raw_output = _strip_ansi(read.full_text or host.read_visible(session))
+        raw_output = _strip_ansi(read.full_text)
         # Preserve the updated cursor so the next sticky run starts from
         # this point instead of creating a fresh baseline.
         session.metadata["restored_cursor"] = read.cursor
-        cleaned = _clean_codex_tui_output(raw_output)
+        cleaned = _extract_codex_tui_result(
+            visible_output,
+            raw_output,
+            baseline_last_response=baseline_last_response,
+        )
+        transcript_output = _select_codex_tui_transcript(
+            visible_output,
+            raw_output,
+            baseline_last_response=baseline_last_response,
+        )
 
         if not cleaned.strip():
             raise ExecutionTimeout("codex tui produced no output after idle")
@@ -738,7 +804,7 @@ class CodexAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
-                ArtifactPayload(role="transcript_log", name="transcript.txt", content=raw_output),
+                ArtifactPayload(role="transcript_log", name="transcript.txt", content=transcript_output),
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],

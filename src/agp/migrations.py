@@ -46,10 +46,21 @@ def _execute_sql(session: Session, sql: str) -> None:
     if _is_postgres():
         session.execute(text(sql))
         return
+
+    def _strip_sql_comments(stmt: str) -> str:
+        lines = []
+        for line in stmt.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("--"):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
+
     # SQLite: split and execute statements individually
     for stmt in sql.split(";"):
         stmt = stmt.strip()
-        if not stmt or stmt.upper() in ("BEGIN", "COMMIT", "END"):
+        canonical = _strip_sql_comments(stmt)
+        if not canonical or canonical.upper() in ("BEGIN", "COMMIT", "END"):
             continue
         try:
             session.execute(text(stmt))

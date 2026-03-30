@@ -27,7 +27,15 @@ if settings.database_url.startswith("sqlite"):
         cursor.execute("PRAGMA busy_timeout=30000;")
         cursor.close()
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
+    @event.listens_for(engine, "begin")
+    def _sqlite_begin_immediate(conn):  # type: ignore[no-redef]
+        # SQLite's default deferred transactions can fail with immediate
+        # "database is locked" errors when concurrent requests both upgrade
+        # from read to write transactions. Acquiring the write lock at begin
+        # time lets busy_timeout apply predictably under local CP load.
+        conn.exec_driver_sql("BEGIN IMMEDIATE")
+
+SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
 
 def current_release_version() -> str:

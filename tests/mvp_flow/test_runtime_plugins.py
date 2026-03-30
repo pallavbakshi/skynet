@@ -813,10 +813,183 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         }
 
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        transcript_log = next(artifact for artifact in result.artifacts if artifact.name == "transcript.txt")
         exec_log = next(artifact for artifact in result.artifacts if artifact.name == "exec.txt")
         result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertIn("NEW_OK", transcript_log.content)
         self.assertIn("NEW_OK", exec_log.content)
         self.assertIn("NEW_OK", result_log.content)
+
+    def test_codex_adapter_tui_prefers_visible_screen_over_stale_exec_log_for_result(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class VisibleWinsHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+                self._output_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a old prompt\n\u2022 OLD_OK\n"
+                return (
+                    "\u203a Reply with exactly: pong\n"
+                    "\u2022 pong\n"
+                    "\n"
+                    "\u203a Explain this codebase\n"
+                    "  gpt-5.4 medium \u00b7 100% left \u00b7 ~/projects/skynet\n"
+                )
+
+            def read_output(self, session, cursor):
+                self._output_reads += 1
+                full_text = "Working (1s \u2022 esc to interrupt)\n"
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": self._output_reads}),
+                    text=full_text if self._output_reads == 1 else "",
+                    full_text=full_text,
+                    changed=self._output_reads == 1,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_visible_wins"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = VisibleWinsHost()
+        session = host.get_or_create_session(agent_id="agt_visible_wins")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_visible_wins",
+            "job": {"job_id": "job_visible_wins"},
+            "run": {"run_id": "run_visible_wins"},
+            "message": {"text": "Reply with exactly: pong"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        transcript_log = next(artifact for artifact in result.artifacts if artifact.name == "transcript.txt")
+        exec_log = next(artifact for artifact in result.artifacts if artifact.name == "exec.txt")
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertIn("pong", transcript_log.content)
+        self.assertEqual(exec_log.content, "Working (1s \u2022 esc to interrupt)\n")
+        self.assertEqual(result_log.content, "pong")
+
+    def test_extract_codex_tui_result_prefers_newer_accumulated_turn_over_stale_visible_turn(self) -> None:
+        visible_output = (
+            "\u203a old prompt\n"
+            "\u2022 OLD_OK\n"
+            "\n"
+            "\u203a Explain this codebase\n"
+            "  gpt-5.4 medium \u00b7 100% left \u00b7 ~/projects/skynet\n"
+        )
+        raw_output = (
+            "\u203a old prompt\n"
+            "\u2022 OLD_OK\n"
+            "\n"
+            "\u203a Reply with exactly: pong\n"
+            "\u2022 pong\n"
+            "\n"
+        )
+        self.assertEqual(
+            _extract_codex_tui_result(visible_output, raw_output, baseline_last_response="OLD_OK"),
+            "pong",
+        )
+
+    def test_codex_adapter_tui_prefers_visible_turn_when_turn_counts_tie(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class VisibleTieWinsHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+                self._output_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a old prompt\n\u2022 OLD_OK\n"
+                return (
+                    "\u203a Reply with exactly: ok\n"
+                    "\u2022 ok\n"
+                    "\n"
+                    "\u203a Explain this codebase\n"
+                    "  gpt-5.4 medium \u00b7 100% left \u00b7 ~/projects/skynet\n"
+                )
+
+            def read_output(self, session, cursor):
+                self._output_reads += 1
+                full_text = (
+                    "\u203a Reply with exactly: very long historical answer\n"
+                    "\u2022 very long historical answer\n"
+                    "\n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": self._output_reads}),
+                    text=full_text if self._output_reads == 1 else "",
+                    full_text=full_text,
+                    changed=self._output_reads == 1,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_visible_tie_wins"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = VisibleTieWinsHost()
+        session = host.get_or_create_session(agent_id="agt_visible_tie_wins")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_visible_tie_wins",
+            "job": {"job_id": "job_visible_tie_wins"},
+            "run": {"run_id": "run_visible_tie_wins"},
+            "message": {"text": "Reply with exactly: ok"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        transcript_log = next(artifact for artifact in result.artifacts if artifact.name == "transcript.txt")
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertIn("• ok", transcript_log.content)
+        self.assertEqual(result_log.content, "ok")
 
     def test_codex_adapter_tui_tmux_oneshot_shell_return_without_new_turn_raises_pane_died(self) -> None:
         class OneShotCrashHost(InProcessTerminalHost):
