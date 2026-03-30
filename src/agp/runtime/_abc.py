@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import contextlib
+import os
+import pwd
+import shlex
+import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 from abc import ABC, abstractmethod
 from os.path import basename
+from time import time
 from time import sleep
 from typing import Any
+from urllib.parse import urlparse, unquote
 
 from agp.plugins._output_contracts import prompt_for_claim
+from agp.plugins._provider_env import PROVIDER_ENV_VARS
 from agp.runtime._types import (
     ArtifactPayload,
     ExecutionResult,
@@ -20,6 +30,9 @@ from agp.runtime._types import (
 
 
 class TerminalHost(ABC):
+    _LAUNCH_ROOT_DIR = Path(tempfile.gettempdir()) / "agp-launches"
+    _STALE_LAUNCH_GRACE_SECONDS = 3600.0
+
     @property
     @abstractmethod
     def kind(self) -> str:
@@ -150,6 +163,140 @@ class TerminalHost(ABC):
         Default implementation returns True immediately (for in-process hosts).
         """
         return True
+
+    def _cleanup_launch_artifacts(self, *paths: Path) -> None:
+        for path in paths:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+                continue
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+
+    def _launch_owner_is_alive(self, owner_pid: int) -> bool:
+        if owner_pid <= 0:
+            return False
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(owner_pid, 0)
+            return True
+        return False
+
+    def _reap_stale_launch_directories(self) -> None:
+        launch_root = self._LAUNCH_ROOT_DIR
+        if not launch_root.exists():
+            return
+        for path in launch_root.glob("agp-launch-*"):
+            if not path.is_dir():
+                continue
+            owner_pid = -1
+            owner_path = path / ".owner-pid"
+            with contextlib.suppress(OSError, ValueError):
+                owner_pid = int(owner_path.read_text(encoding="utf-8").strip())
+            try:
+                age_seconds = max(0.0, time() - path.stat().st_mtime)
+            except OSError:
+                continue
+            try:
+                owner_is_alive = self._launch_owner_is_alive(owner_pid)
+            except PermissionError:
+                continue
+            if owner_is_alive:
+                continue
+            if age_seconds < self._STALE_LAUNCH_GRACE_SECONDS:
+                continue
+            self._cleanup_launch_artifacts(path)
+
+    def _reap_prior_launch_scripts(self, session: TerminalSession) -> None:
+        pending = session.metadata.pop("_pending_launch_scripts", [])
+        for item in pending:
+            script_path = item.get("script_path")
+            script_dir = item.get("script_dir")
+            paths: list[Path] = []
+            if script_path:
+                paths.append(Path(script_path))
+            if script_dir:
+                paths.append(Path(script_dir))
+            self._cleanup_launch_artifacts(*paths)
+
+    def _resolve_login_shell(self) -> str:
+        candidates: list[str] = []
+        env_shell = os.environ.get("SHELL")
+        if env_shell:
+            candidates.append(env_shell)
+        with contextlib.suppress(KeyError):
+            passwd_shell = pwd.getpwuid(os.getuid()).pw_shell
+            if passwd_shell:
+                candidates.append(passwd_shell)
+        for candidate in candidates:
+            resolved = candidate
+            if not os.path.isabs(resolved):
+                resolved = shutil.which(resolved) or resolved
+            if os.path.isfile(resolved) and os.access(resolved, os.X_OK):
+                return resolved
+        return "/bin/sh"
+
+    def launch_command(
+        self,
+        session: TerminalSession,
+        *,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+    ) -> subprocess.Popen[str]:
+        """Launch a foreground CLI in the pane without echoing secrets.
+
+        The default implementation writes a short-lived shell script containing
+        the environment setup and command, then asks the pane's existing shell
+        to execute that script in the foreground. This preserves normal shell
+        job-control semantics while keeping provider env out of visible
+        scrollback.
+        """
+        self._reap_stale_launch_directories()
+        self._reap_prior_launch_scripts(session)
+        launch_cwd = cwd or session.workspace_ref
+        if launch_cwd and "://" in launch_cwd:
+            parsed = urlparse(launch_cwd)
+            if parsed.scheme == "file":
+                launch_cwd = unquote(parsed.path)
+        self._LAUNCH_ROOT_DIR.mkdir(parents=True, exist_ok=True)
+        script_dir = Path(tempfile.mkdtemp(prefix="agp-launch-", dir=self._LAUNCH_ROOT_DIR))
+        script_fd, script_path_raw = tempfile.mkstemp(
+            prefix=".agp-launch-",
+            suffix=".sh",
+            dir=script_dir,
+            text=True,
+        )
+        script_path = Path(script_path_raw)
+        shell_setup = [f"unset {key}" for key in PROVIDER_ENV_VARS]
+        for key, value in (env or {}).items():
+            shell_setup.append(f"export {key}={shlex.quote(value)}")
+        inner_command_parts: list[str] = []
+        if launch_cwd:
+            inner_command_parts.append(f"cd {shlex.quote(str(Path(launch_cwd)))}")
+        inner_command_parts.extend(shell_setup)
+        inner_command_parts.append(f"rmdir {shlex.quote(str(script_dir))} >/dev/null 2>&1 || true")
+        inner_command_parts.append(command)
+        inner_command = "; ".join(inner_command_parts)
+        script_lines = [
+            "#!/bin/sh",
+            "set -eu",
+            "rm -f -- \"$0\"",
+        ]
+        script_lines.append(shlex.join(["exec", self._resolve_login_shell(), "-l", "-c", inner_command]))
+        try:
+            with os.fdopen(script_fd, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(script_lines) + "\n")
+            script_path.chmod(0o700)
+            (script_dir / ".owner-pid").write_text(f"{os.getpid()}\n", encoding="utf-8")
+            pending = session.metadata.setdefault("_pending_launch_scripts", [])
+            pending.append({
+                "script_path": str(script_path),
+                "script_dir": str(script_dir),
+            })
+            self.send_text(session, shlex.quote(str(script_path)), enter=True)
+        except Exception:
+            self._cleanup_launch_artifacts(script_path, script_dir)
+            raise
+        return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 class AgentAdapter(ABC):

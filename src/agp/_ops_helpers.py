@@ -23,6 +23,7 @@ from agp.control_plane import (
     build_app,
     sweep_expired_leases,
 )
+from agp._local_state import ensure_local_control_plane_stopped
 from agp.db import SessionLocal, current_release_version, engine
 from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
@@ -82,6 +83,7 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
     db_backup_path = Path(manifest["db_snapshot"])
     artifact_backup_path = Path(manifest["artifact_snapshot"])
 
+    ensure_local_control_plane_stopped(root=Path.cwd())
     engine.dispose()
     for suffix in ("", "-wal", "-shm"):
         candidate = Path(f"{db_path}{suffix}")

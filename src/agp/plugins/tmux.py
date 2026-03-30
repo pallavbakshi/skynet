@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import subprocess
 from pathlib import Path
 from time import monotonic, sleep
@@ -23,104 +22,6 @@ from agp.runtime import (
 
 _SHELL_PROMPT_CHARS = {"\u276f", "\u2733", "$", "%", "#"}
 _logger = logging.getLogger(__name__)
-
-
-def _ensure_codex_config(base_url: str) -> None:
-    """Best-effort: set ``openai_base_url`` in ``~/.codex/config.toml``.
-
-    Only used on the direct-OpenAI path (OPENAI_BASE_URL set, no profile).
-    Skipped silently if the config can't be parsed — the env var fallback
-    still works.
-    """
-    try:
-        import tomllib
-    except ModuleNotFoundError:
-        return
-    config_path = Path.home() / ".codex" / "config.toml"
-    if not config_path.exists():
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(f'openai_base_url = "{base_url}"\n')
-        return
-    try:
-        existing = tomllib.loads(config_path.read_text())
-    except Exception:
-        return
-    if existing.get("openai_base_url") == base_url:
-        return
-    # Don't rewrite — codex owns its config format; env var is the override.
-
-
-def _provider_env() -> dict[str, str]:
-    """Collect provider API keys and endpoint overrides for tmux sessions.
-
-    Three explicit paths for codex — set exactly one:
-
-    OAuth / default (no env vars needed):
-        Just run codex; it uses ~/.codex credentials.
-
-    Direct OpenAI (API key):
-        OPENAI_API_KEY=sk-...
-
-    OpenRouter (via codex profile):
-        OPENROUTER_API_KEY=sk-or-...
-        Use ``codex -p openrouter`` so the profile owns the base_url.
-        OPENROUTER_API_KEY is forwarded; no OPENAI_BASE_URL injection.
-
-    Model overrides (Claude Code):
-        ANTHROPIC_DEFAULT_OPUS_MODEL=anthropic/claude-opus-4.6
-        ANTHROPIC_DEFAULT_SONNET_MODEL=anthropic/claude-sonnet-4.6
-        ANTHROPIC_DEFAULT_HAIKU_MODEL=anthropic/claude-haiku-4.5
-        CLAUDE_CODE_SUBAGENT_MODEL=anthropic/claude-opus-4.6
-    """
-    env: dict[str, str] = {}
-
-    # ── Codex / OpenAI-compatible endpoint ───────────────────────────
-    openai_key = os.environ.get("OPENAI_API_KEY")
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY")
-    openai_base_url = os.environ.get("OPENAI_BASE_URL")
-    if openai_key:
-        env["OPENAI_API_KEY"] = openai_key
-    if openai_base_url:
-        _ensure_codex_config(openai_base_url)
-        env["OPENAI_BASE_URL"] = openai_base_url
-    if openrouter_key:
-        # Only forward if a named codex profile is configured — the profile
-        # reads the key via env_key = "OPENROUTER_API_KEY".  Without a profile
-        # the runtime uses OAuth/default and the key is irrelevant noise.
-        if " -p " in f" {settings.codex_cli_command} ":
-            env["OPENROUTER_API_KEY"] = openrouter_key
-
-    # ── Claude Code / Anthropic endpoint ─────────────────────────────
-    # ANTHROPIC_API_KEY can be explicitly empty ("") to force Claude Code
-    # to use ANTHROPIC_AUTH_TOKEN instead (required for OpenRouter).
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key is not None:
-        env["ANTHROPIC_API_KEY"] = anthropic_key
-
-    # Passthrough: endpoint, auth token, model overrides
-    _ANTHROPIC_PASSTHROUGH = (
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_DEFAULT_OPUS_MODEL",
-        "ANTHROPIC_DEFAULT_SONNET_MODEL",
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-        "CLAUDE_CODE_SUBAGENT_MODEL",
-        "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
-    )
-    for key in _ANTHROPIC_PASSTHROUGH:
-        val = os.environ.get(key)
-        if val:
-            env[key] = val
-
-    # ── AGP + container runtime vars ─────────────────────────────────
-    agp_server_url = os.environ.get("AGP_SERVER_URL")
-    if agp_server_url:
-        env["AGP_SERVER_URL"] = agp_server_url
-    for key in ("DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "NO_UPDATE_NOTIFIER"):
-        val = os.environ.get(key)
-        if val:
-            env[key] = val
-    return env
 
 
 class TmuxHost(TerminalHost):
@@ -179,6 +80,13 @@ class TmuxHost(TerminalHost):
         ).strip()
         return tty or None
 
+    def _pane_current_path(self, session_name: str) -> str | None:
+        path = self._run(
+            ["display-message", "-t", session_name, "-p", "#{pane_current_path}"],
+            allow_failure=True,
+        ).strip()
+        return path or None
+
     def _session_name(self, agent_id: str) -> str:
         return f"{self.session_prefix}-{agent_id}"
 
@@ -199,7 +107,7 @@ class TmuxHost(TerminalHost):
             return TerminalSession(
                 session_id=name,
                 agent_id=agent_id,
-                workspace_ref=workspace_ref,
+                workspace_ref=workspace_ref or self._pane_current_path(name) or self.default_cwd or None,
                 metadata={"tmux_session": name},
             )
         cwd = workspace_ref or self.default_cwd
@@ -207,39 +115,10 @@ class TmuxHost(TerminalHost):
         if cwd:
             args.extend(["-c", cwd])
         self._run(args)
-        # Forward environment variables that agent adapters may need.
-        # tmux set-environment only applies to NEW panes; the initial shell
-        # in pane 0 was already spawned.  So we also export into it directly.
-        provider_env = _provider_env()
-        for key, val in provider_env.items():
-            try:
-                self._run(["set-environment", "-t", name, key, val], allow_failure=True)
-            except Exception:
-                pass  # best-effort; test mocks may not support set-environment
-        # Explicitly unset provider vars that leak from the tmux server env
-        # but were intentionally not forwarded (e.g. OPENROUTER_API_KEY without
-        # a -p profile).  Without this, codex auto-selects providers based on
-        # stale keys inherited from the server process.
-        _PROVIDER_KEYS = (
-            "OPENROUTER_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
-            "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-        )
-        unsets = [k for k in _PROVIDER_KEYS if k not in provider_env]
-        if unsets:
-            try:
-                self._run(["send-keys", "-t", name, f"unset {' '.join(unsets)}", "Enter"], allow_failure=True)
-            except Exception:
-                pass
-        if provider_env:
-            exports = " ".join(f'{k}="{v}"' for k, v in provider_env.items())
-            try:
-                self._run(["send-keys", "-t", name, f"export {exports}", "Enter"], allow_failure=True)
-            except Exception:
-                pass
         return TerminalSession(
             session_id=name,
             agent_id=agent_id,
-            workspace_ref=workspace_ref,
+            workspace_ref=cwd or None,
             metadata={"tmux_session": name},
         )
 
@@ -362,6 +241,7 @@ class TmuxHost(TerminalHost):
         )
 
     def terminate_session(self, session: TerminalSession) -> None:
+        self._reap_prior_launch_scripts(session)
         self._run(["kill-session", "-t", session.session_id], allow_failure=True)
         acc = self._accumulators.pop(session.session_id, None)
         if acc is not None:

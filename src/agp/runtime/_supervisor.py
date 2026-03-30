@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Event, Thread
 from time import monotonic
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 import logging
 
@@ -17,6 +19,7 @@ from agp.artifact_store import ArtifactStore, get_artifact_store
 from agp.client._runtime import RuntimeClient, RuntimeIdentity
 from agp.config import settings
 from agp.logs import append_jsonl_log
+from agp.runtime._attachments import staged_attachment_relative_path
 
 _logger = logging.getLogger(__name__)
 
@@ -161,6 +164,47 @@ class RuntimeSupervisor:
         if job["status"] == "interrupt_requested":
             raise InterruptRequested("interrupt requested by control plane")
 
+    def _workspace_dir(self, session: TerminalSession) -> Path | None:
+        raw = session.workspace_ref
+        if not raw:
+            return None
+        if "://" in raw:
+            parsed = urlparse(raw)
+            if parsed.scheme == "file":
+                raw = unquote(parsed.path)
+        path = Path(raw)
+        return path if path.is_dir() else None
+
+    def _stage_job_attachments(self, *, session: TerminalSession, claimed: dict[str, Any]) -> None:
+        workspace = self._workspace_dir(session)
+        if workspace is None:
+            return
+        staged_roots: list[str] = list(session.metadata.get("staged_attachment_roots", []))
+        for item in claimed.get("job_attachments", []) or []:
+            name = str(item.get("name") or "").strip()
+            storage_ref = str(item.get("storage_ref") or "").strip()
+            artifact_id = str(item.get("artifact_id") or "").strip()
+            if not name or not storage_ref:
+                continue
+            content = self.artifact_store.read_text(storage_ref=storage_ref)
+            if content is None and artifact_id:
+                artifact = self.client.fetch_artifact_content(artifact_id)
+                content = artifact.get("content")
+            if content is None:
+                continue
+            relative = staged_attachment_relative_path(
+                artifact_id=artifact_id or "unscoped",
+                name=name,
+            )
+            target = workspace / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+            staged_root = str((workspace / relative.parts[0] / relative.parts[1]).resolve())
+            if staged_root not in staged_roots:
+                staged_roots.append(staged_root)
+        if staged_roots:
+            session.metadata["staged_attachment_roots"] = staged_roots
+
     def emit_progress(self, claimed: dict[str, Any], *, message: str, details: dict[str, Any] | None = None) -> dict:
         return self.client.progress(
             run_id=claimed["run"]["run_id"],
@@ -173,11 +217,17 @@ class RuntimeSupervisor:
     def _cleanup_workspace(self, session: TerminalSession, claimed: dict[str, Any]) -> None:
         """Best-effort post-run workspace cleanup.
 
-        Currently limited to logging.  Checkpoint cursor files are
-        intentionally retained for restart resilience.  No filesystem
-        artifacts are deleted — the host and adapter own their own
-        lifecycle for those.
+        Checkpoint cursor files are intentionally retained for restart
+        resilience. Temporary job attachments staged into the workspace are
+        deleted after execution to avoid dirtying the operator's worktree.
         """
+        for raw_path in session.metadata.pop("staged_attachment_roots", []):
+            try:
+                path = Path(raw_path)
+                if path.exists() and path.is_dir():
+                    shutil.rmtree(path)
+            except Exception:  # noqa: BLE001
+                pass
         try:
             run_id = claimed.get("run", {}).get("run_id", "unknown")
             _append_runtime_log(
@@ -350,12 +400,6 @@ class RuntimeSupervisor:
         lease = claimed["lease"]
         session = self.host.get_or_create_session(agent_id=claimed["agent_id"])
         self._active_session = session
-        # Attempt to restore a cursor checkpoint from a previous runtime
-        # process.  The adapter can use this via session.metadata["restored_cursor"].
-        restored = self.host.load_cursor(session)
-        if restored is not None:
-            session.metadata["restored_cursor"] = restored
-        self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
         stop = Event()
         startup_settled = Event()
         tui_died = Event()
@@ -364,18 +408,8 @@ class RuntimeSupervisor:
 
         max_missed_heartbeats = 6
         lease_lost = Event()  # signals that we lost the lease / fencing
-
-        # Dedicated httpx client for the heartbeat thread so it never blocks
-        # on the main thread's connection pool (critical over SSH tunnels).
-        import httpx as _httpx
-        _hb_headers: dict[str, str] = {}
-        if self.client.identity.token:
-            _hb_headers["Authorization"] = f"Bearer {self.client.identity.token}"
-        _hb_client = _httpx.Client(
-            base_url=self.client.identity.server_url.rstrip("/"),
-            timeout=10.0,
-            headers=_hb_headers,
-        )
+        thread: Thread | None = None
+        _hb_client = None
 
         def heartbeat_loop() -> None:
             consecutive_misses = 0
@@ -465,19 +499,39 @@ class RuntimeSupervisor:
                             stop.set()
                             break
             finally:
-                _hb_client.close()
+                if _hb_client is not None:
+                    _hb_client.close()
 
-        self.client.heartbeat(
-            run_id=run["run_id"],
-            lease_id=lease["lease_id"],
-            fencing_token=lease["fencing_token"],
-            extend_seconds=lease_ttl_seconds,
-        )
-        thread = Thread(target=heartbeat_loop, daemon=True)
-        thread.start()
         self._active_tui_died = tui_died
         self._active_tui_died_reason = "tui exited during execution"
         try:
+            self._stage_job_attachments(session=session, claimed=claimed)
+            # Attempt to restore a cursor checkpoint from a previous runtime
+            # process.  The adapter can use this via session.metadata["restored_cursor"].
+            restored = self.host.load_cursor(session)
+            if restored is not None:
+                session.metadata["restored_cursor"] = restored
+            self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
+
+            # Dedicated httpx client for the heartbeat thread so it never blocks
+            # on the main thread's connection pool (critical over SSH tunnels).
+            import httpx as _httpx
+            _hb_headers: dict[str, str] = {}
+            if self.client.identity.token:
+                _hb_headers["Authorization"] = f"Bearer {self.client.identity.token}"
+            _hb_client = _httpx.Client(
+                base_url=self.client.identity.server_url.rstrip("/"),
+                timeout=10.0,
+                headers=_hb_headers,
+            )
+            self.client.heartbeat(
+                run_id=run["run_id"],
+                lease_id=lease["lease_id"],
+                fencing_token=lease["fencing_token"],
+                extend_seconds=lease_ttl_seconds,
+            )
+            thread = Thread(target=heartbeat_loop, daemon=True)
+            thread.start()
             _append_runtime_log(
                 self.client.identity.runtime_id,
                 {
@@ -719,7 +773,9 @@ class RuntimeSupervisor:
             self._active_tui_died_reason = None
             session.metadata.pop("startup_settled_event", None)
             stop.set()
-            thread.join(timeout=heartbeat_interval_seconds + 1.0)
-            _hb_client.close()  # idempotent if thread already closed it
+            if thread is not None:
+                thread.join(timeout=heartbeat_interval_seconds + 1.0)
+            if _hb_client is not None:
+                _hb_client.close()  # idempotent if thread already closed it
             # Workspace cleanup: remove temp files, stale locks, session residue
             self._cleanup_workspace(session, claimed)

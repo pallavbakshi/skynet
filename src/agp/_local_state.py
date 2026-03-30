@@ -1,0 +1,126 @@
+"""Helpers for protecting local SQLite state during bare-metal workflows."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+
+DEFAULT_CONTROL_PLANE_PID_FILE = Path(".skyops-pids/control-plane.pid")
+
+
+def _read_pid(pid_file: Path) -> int | None:
+    try:
+        return int(pid_file.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _pid_exists(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _process_command(pid: int) -> str:
+    proc = subprocess.run(
+        ["ps", "-p", str(pid), "-o", "command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip()
+
+
+def _process_cwd(pid: int) -> Path | None:
+    proc_cwd = Path(f"/proc/{pid}/cwd")
+    try:
+        return proc_cwd.resolve()
+    except OSError:
+        proc = subprocess.run(
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        for line in proc.stdout.splitlines():
+            if not line.startswith("n"):
+                continue
+            try:
+                return Path(line[1:]).resolve()
+            except OSError:
+                return None
+        return None
+
+
+def _looks_like_control_plane_command(command: str) -> bool:
+    normalized = " ".join(command.split()).lower()
+    if "serve" not in normalized:
+        return False
+    indicators = (
+        " agp serve",
+        " agp.cli serve",
+        " -m agp.cli serve",
+        "/agp serve",
+    )
+    return any(indicator in f" {normalized}" for indicator in indicators)
+
+
+def _is_local_control_plane_process(pid: int) -> bool:
+    if not _pid_exists(pid):
+        return False
+    command = _process_command(pid)
+    if not command:
+        return True
+    return _looks_like_control_plane_command(command)
+
+
+def _candidate_control_plane_pids(*, root: Path, pid_file: Path) -> list[int]:
+    candidates: list[int] = []
+    tracked_pid = _read_pid(pid_file)
+    if tracked_pid is not None and _is_local_control_plane_process(tracked_pid):
+        candidates.append(tracked_pid)
+
+    proc = subprocess.run(
+        ["ps", "-eo", "pid=,command="],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        pid_text, _, _command = line.partition(" ")
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if not _looks_like_control_plane_command(_command):
+            continue
+        if pid in candidates or not _is_local_control_plane_process(pid):
+            continue
+        proc_root = _process_cwd(pid)
+        if proc_root == root:
+            candidates.append(pid)
+    return candidates
+
+
+def ensure_local_control_plane_stopped(pid_file: str | Path = DEFAULT_CONTROL_PLANE_PID_FILE, *, root: str | Path | None = None) -> None:
+    """Refuse destructive local-state resets while a matching local CP is still running."""
+    pid_path = Path(pid_file)
+    repo_root = Path(root or Path.cwd()).resolve()
+    pids = _candidate_control_plane_pids(root=repo_root, pid_file=pid_path)
+    if pids:
+        pid_list = ", ".join(str(pid) for pid in pids)
+        raise RuntimeError(
+            f"local control plane is still running (pid {pid_list}); "
+            "stop it with `make local-down` or `make stop-cp` before resetting local state"
+        )

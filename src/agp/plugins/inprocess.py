@@ -54,6 +54,7 @@ class InProcessTerminalHost(TerminalHost):
         self._history.setdefault(session.session_id, []).append("INTERRUPT")
 
     def reset_session(self, session: TerminalSession) -> TerminalSession:
+        self._reap_prior_launch_scripts(session)
         reset = TerminalSession(
             session_id=f"{session.session_id}-reset-{int(monotonic() * 1000)}",
             agent_id=session.agent_id,
@@ -65,6 +66,7 @@ class InProcessTerminalHost(TerminalHost):
         return reset
 
     def terminate_session(self, session: TerminalSession) -> None:
+        self._reap_prior_launch_scripts(session)
         self._sessions.pop(session.agent_id, None)
 
     def snapshot(self, session: TerminalSession) -> dict[str, Any]:

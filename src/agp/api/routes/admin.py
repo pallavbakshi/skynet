@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from agp.api.helpers import _apply_created_cursor, _encode_cursor, _ok, _page, _serialize
-from agp.db import get_db
+from agp.db import SessionLocal, ensure_sqlite_runtime_database_available, get_db
 from agp.models import Capability, Nudge, QueueDeliveryRecord, utc_now
 from agp.schemas import CapabilitySeedRequest, CreateNudgeRequest, HealthResponse
 from agp.services._helpers import (
@@ -24,6 +26,10 @@ router = APIRouter()
 
 @router.get("/health")
 def health() -> dict:
+    if os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD") == "1":
+        ensure_sqlite_runtime_database_available()
+    with SessionLocal() as session:
+        session.execute(text("SELECT 1"))
     payload = HealthResponse(components={"api": "ok", "db": "ok"})
     return _ok(payload.model_dump())
 

@@ -257,6 +257,20 @@ class RuntimeClient:
         )
         return payload
 
+    def fetch_artifact_content(self, artifact_id: str) -> dict:
+        response = self._client.get(f"/artifacts/{artifact_id}/content")
+        response.raise_for_status()
+        payload = response.json()["data"]
+        self._log(
+            {
+                "kind": "runtime_client",
+                "action": "fetch_artifact_content",
+                "artifact_id": artifact_id,
+                "size_bytes": payload.get("size_bytes"),
+            }
+        )
+        return payload
+
     def cancel(
         self,
         *,

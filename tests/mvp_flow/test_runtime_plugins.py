@@ -1,9 +1,329 @@
 """Runtime host, adapter, plugin, and terminal integration flows."""
 
+import json
+import os
+import shlex
+import subprocess
+import sys
+from time import time
+
 from tests.mvp_flow.base import *
 
 
 class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
+    def test_launch_command_clears_stale_provider_env_before_exec(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-env"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_env", workspace_ref=str(workspace))
+        probe = (
+            "import json, os; "
+            "print(json.dumps({"
+            "\"OPENAI_API_KEY\": os.environ.get(\"OPENAI_API_KEY\"), "
+            "\"ANTHROPIC_API_KEY\": os.environ.get(\"ANTHROPIC_API_KEY\"), "
+            "\"OPENAI_BASE_URL\": os.environ.get(\"OPENAI_BASE_URL\")"
+            "}))"
+        )
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}"
+
+        host.launch_command(
+            session,
+            command=command,
+            env={"OPENAI_API_KEY": "fresh-openai-key"},
+            cwd=str(workspace),
+        )
+        script_path = Path(shlex.split(host.sent[-1])[0])
+        script_text = script_path.read_text(encoding="utf-8")
+
+        inherited_env = os.environ.copy()
+        inherited_env["OPENAI_API_KEY"] = "stale-openai-key"
+        inherited_env["ANTHROPIC_API_KEY"] = "stale-anthropic-key"
+        inherited_env["OPENAI_BASE_URL"] = "https://stale.example.invalid/v1"
+        completed = subprocess.run(
+            [str(script_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=inherited_env,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertEqual(payload["OPENAI_API_KEY"], "fresh-openai-key")
+        self.assertIsNone(payload["ANTHROPIC_API_KEY"])
+        self.assertIsNone(payload["OPENAI_BASE_URL"])
+        self.assertIn("unset OPENAI_API_KEY", script_text)
+        self.assertIn("unset ANTHROPIC_API_KEY", script_text)
+        self.assertIn("unset OPENAI_BASE_URL", script_text)
+        self.assertIn("export OPENAI_API_KEY=fresh-openai-key", script_text)
+        self.assertIn(" -l -c ", script_text)
+
+    def test_launch_command_runs_user_command_via_selected_login_shell_path(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-login-shell"
+        workspace.mkdir(parents=True, exist_ok=True)
+        shell_path = self._tmp_root / "fake-login-shell"
+        shell_marker = self._tmp_root / "fake-login-shell-marker"
+        shell_path.write_text(
+            "#!/bin/sh\n"
+            "set -eu\n"
+            "test \"$1\" = \"-l\"\n"
+            "test \"$2\" = \"-c\"\n"
+            f"printf '%s' \"$0\" > {shlex.quote(str(shell_marker))}\n"
+            "exec /bin/sh -lc \"$3\"\n",
+            encoding="utf-8",
+        )
+        shell_path.chmod(0o700)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_login_shell", workspace_ref=str(workspace))
+        probe = (
+            "import json, os; "
+            "print(json.dumps({"
+            "\"marker\": os.environ.get(\"LOGIN_SHELL_MARKER_FILE\"), "
+            "\"openai_api_key\": os.environ.get(\"OPENAI_API_KEY\")"
+            "}))"
+        )
+        command = f"{shlex.quote(sys.executable)} -c {shlex.quote(probe)}"
+        with patch.dict(os.environ, {"SHELL": str(shell_path)}):
+            host.launch_command(
+                session,
+                command=command,
+                env={
+                    "OPENAI_API_KEY": "fresh-openai-key",
+                },
+                cwd=str(workspace),
+            )
+            script_path = Path(shlex.split(host.sent[-1])[0])
+            script_text = script_path.read_text(encoding="utf-8")
+
+        inherited_env = os.environ.copy()
+        inherited_env["SHELL"] = str(shell_path)
+        inherited_env["OPENAI_API_KEY"] = "stale-openai-key"
+        completed = subprocess.run(
+            [str(script_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=inherited_env,
+        )
+        payload = json.loads(completed.stdout)
+
+        self.assertIsNone(payload["marker"])
+        self.assertEqual(payload["openai_api_key"], "fresh-openai-key")
+        self.assertEqual(shell_marker.read_text(encoding="utf-8"), str(shell_path))
+        self.assertIn(str(shell_path), script_text)
+        self.assertIn(" -l -c ", script_text)
+
+    def test_pending_launch_script_waits_for_explicit_reap(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-pending"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+                super().send_text(session, text, enter=enter)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_pending", workspace_ref=str(workspace))
+        host.launch_command(
+            session,
+            command="printf pending-test",
+            env={"OPENAI_API_KEY": "sk-secret"},
+            cwd=str(workspace),
+        )
+        script_path = Path(shlex.split(host.sent[-1])[0])
+        script_dir = script_path.parent
+
+        self.assertNotEqual(script_dir, workspace)
+        self.assertNotIn(workspace, script_path.parents)
+        self.assertIn("sk-secret", script_path.read_text(encoding="utf-8"))
+        sleep(0.05)
+        self.assertTrue(script_path.exists())
+        self.assertTrue(script_dir.exists())
+
+    def test_launch_command_reaps_stale_orphaned_launch_directory_from_prior_process(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-orphan-reap"
+        workspace.mkdir(parents=True, exist_ok=True)
+        launch_root = self._tmp_root / "launch-root"
+        stale_dir = launch_root / "agp-launch-stale"
+        stale_dir.mkdir(parents=True, exist_ok=True)
+        (stale_dir / ".owner-pid").write_text("99999999\n", encoding="utf-8")
+        (stale_dir / ".agp-launch-stale.sh").write_text("secret\n", encoding="utf-8")
+        stale_mtime = time() - 10.0
+        os.utime(stale_dir, (stale_mtime, stale_mtime))
+
+        class LaunchHost(InProcessTerminalHost):
+            _LAUNCH_ROOT_DIR = launch_root
+            _STALE_LAUNCH_GRACE_SECONDS = 0.01
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_orphan_reap", workspace_ref=str(workspace))
+        host.launch_command(
+            session,
+            command="printf orphan-reap-test",
+            env={"OPENAI_API_KEY": "sk-secret"},
+            cwd=str(workspace),
+        )
+
+        self.assertFalse(stale_dir.exists())
+        self.assertTrue(Path(shlex.split(host.sent[-1])[0]).exists())
+
+    def test_launch_command_skips_foreign_owned_stale_directory(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-foreign-owner"
+        workspace.mkdir(parents=True, exist_ok=True)
+        launch_root = self._tmp_root / "launch-root-foreign"
+        foreign_dir = launch_root / "agp-launch-foreign"
+        foreign_dir.mkdir(parents=True, exist_ok=True)
+        (foreign_dir / ".owner-pid").write_text("12345\n", encoding="utf-8")
+        stale_mtime = time() - 10.0
+        os.utime(foreign_dir, (stale_mtime, stale_mtime))
+
+        class LaunchHost(InProcessTerminalHost):
+            _LAUNCH_ROOT_DIR = launch_root
+            _STALE_LAUNCH_GRACE_SECONDS = 0.01
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_foreign_owner", workspace_ref=str(workspace))
+        with patch("agp.runtime._abc.os.kill", side_effect=PermissionError("foreign process")):
+            host.launch_command(
+                session,
+                command="printf foreign-owner-test",
+                env={"OPENAI_API_KEY": "sk-secret"},
+                cwd=str(workspace),
+            )
+
+        self.assertTrue(foreign_dir.exists())
+        self.assertTrue(Path(shlex.split(host.sent[-1])[0]).exists())
+
+    def test_reset_session_reaps_pending_launch_scripts(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-reset-cleanup"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_reset", workspace_ref=str(workspace))
+        host.launch_command(
+            session,
+            command="printf reset-cleanup-test",
+            env={"OPENAI_API_KEY": "sk-secret"},
+            cwd=str(workspace),
+        )
+        script_path = Path(shlex.split(host.sent[-1])[0])
+        script_dir = script_path.parent
+
+        reset = host.reset_session(session)
+
+        self.assertFalse(script_path.exists())
+        self.assertFalse(script_dir.exists())
+        self.assertNotIn("_pending_launch_scripts", reset.metadata)
+
+    def test_second_launch_reaps_prior_pending_launch_script(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-repeat-cleanup"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_repeat", workspace_ref=str(workspace))
+        host.launch_command(
+            session,
+            command="printf first-launch",
+            env={"OPENAI_API_KEY": "sk-first"},
+            cwd=str(workspace),
+        )
+        first_script_path = Path(shlex.split(host.sent[-1])[0])
+        first_script_dir = first_script_path.parent
+
+        host.launch_command(
+            session,
+            command="printf second-launch",
+            env={"OPENAI_API_KEY": "sk-second"},
+            cwd=str(workspace),
+        )
+        second_script_path = Path(shlex.split(host.sent[-1])[0])
+
+        self.assertFalse(first_script_path.exists())
+        self.assertFalse(first_script_dir.exists())
+        self.assertTrue(second_script_path.exists())
+        pending = session.metadata.get("_pending_launch_scripts", [])
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["script_path"], str(second_script_path))
+
+    def test_terminate_session_reaps_pending_launch_scripts(self) -> None:
+        workspace = self._tmp_root / "workspace-launch-terminate-cleanup"
+        workspace.mkdir(parents=True, exist_ok=True)
+
+        class LaunchHost(InProcessTerminalHost):
+            def __init__(self) -> None:
+                super().__init__()
+                self.sent: list[str] = []
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch_terminate", workspace_ref=str(workspace))
+        host.launch_command(
+            session,
+            command="printf terminate-cleanup-test",
+            env={"OPENAI_API_KEY": "sk-secret"},
+            cwd=str(workspace),
+        )
+        script_path = Path(shlex.split(host.sent[-1])[0])
+        script_dir = script_path.parent
+
+        host.terminate_session(session)
+
+        self.assertFalse(script_path.exists())
+        self.assertFalse(script_dir.exists())
+
     def test_codex_adapter_appends_output_contract_instruction(self) -> None:
         class ContractHost(InProcessTerminalHost):
             def __init__(self) -> None:
@@ -555,6 +875,79 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertIn("no output", str(ctx.exception))
 
+    def test_codex_tui_bootstrap_launches_hidden_command_with_provider_env(self) -> None:
+        class LaunchHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "wezterm"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launches: list[tuple[str, dict[str, str] | None, str | None]] = []
+                self.sent: list[str] = []
+
+            def launch_command(self, session, *, command: str, env: dict[str, str] | None = None, cwd: str | None = None):
+                self.launches.append((command, env, cwd))
+                self._history.setdefault(session.session_id, []).append("›\n")
+                return None
+
+            def read_visible(self, session) -> str:
+                return "".join(self._history.get(session.session_id, []))
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                self.sent.append(text)
+                super().send_text(session, text, enter=enter)
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_timeout_seconds=0.1,
+        )
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_launch")
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False):
+            adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        self.assertEqual(len(host.launches), 1)
+        command, env, cwd = host.launches[0]
+        self.assertEqual(command, "codex --full-auto")
+        self.assertEqual(env["OPENAI_API_KEY"], "sk-test")
+        self.assertIsNone(cwd)
+        self.assertEqual(host.sent, [])
+
+    def test_claude_code_bootstrap_launches_hidden_command_with_provider_env(self) -> None:
+        class LaunchHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "wezterm"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launches: list[tuple[str, dict[str, str] | None, str | None]] = []
+
+            def launch_command(self, session, *, command: str, env: dict[str, str] | None = None, cwd: str | None = None):
+                self.launches.append((command, env, cwd))
+                self._history.setdefault(session.session_id, []).append("Claude Code\n────────\n❯\n")
+                return None
+
+            def read_visible(self, session) -> str:
+                return "".join(self._history.get(session.session_id, []))
+
+        adapter = ClaudeCodeAdapter(
+            cli_command="claude",
+            idle_poll_seconds=0.0,
+            idle_timeout_seconds=0.1,
+        )
+        host = LaunchHost()
+        session = host.get_or_create_session(agent_id="agt_claude_launch")
+        with patch.dict(os.environ, {"ANTHROPIC_AUTH_TOKEN": "tok-test"}, clear=False):
+            adapter.ensure_bootstrapped(host=host, session=session, claimed={})
+        self.assertEqual(len(host.launches), 1)
+        command, env, cwd = host.launches[0]
+        self.assertEqual(command, "claude --dangerously-skip-permissions")
+        self.assertEqual(env["ANTHROPIC_AUTH_TOKEN"], "tok-test")
+        self.assertIsNone(cwd)
+
     def test_codex_adapter_tui_mode_tmux_launches_prompt_inline_per_run(self) -> None:
         class TmuxTuiHost(InProcessTerminalHost):
             @property
@@ -914,6 +1307,166 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             _extract_codex_tui_result(visible_output, raw_output, baseline_last_response="OLD_OK"),
             "pong",
         )
+
+    def test_codex_adapter_tui_extracts_trailing_json_for_output_contract_jobs(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class JsonContractHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a old prompt\n\u2022 OLD_OK\n"
+                return (
+                    "\u203a Review output\n"
+                    "\u2022 I found two issues.\n"
+                    '{"verdict":"changes_requested","summary":"needs fixes"}\n'
+                    "\n"
+                    "\u203a Next prompt\n"
+                )
+
+            def read_output(self, session, cursor):
+                full_text = (
+                    "\u203a Review output\n"
+                    "\u2022 I found two issues.\n"
+                    '{"verdict":"changes_requested","summary":"needs fixes"}\n'
+                    "\n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": 1}),
+                    text=full_text,
+                    full_text=full_text,
+                    changed=True,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_json_contract"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = JsonContractHost()
+        session = host.get_or_create_session(agent_id="agt_json_contract")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_json_contract",
+            "job": {
+                "job_id": "job_json_contract",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["verdict", "summary"],
+                    },
+                },
+            },
+            "run": {"run_id": "run_json_contract"},
+            "message": {"text": "Review output"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertEqual(result_log.content, '{"verdict":"changes_requested","summary":"needs fixes"}')
+
+    def test_codex_adapter_tui_recovers_wrapped_json_for_output_contract_jobs(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class WrappedJsonHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a old prompt\n\u2022 OLD_OK\n"
+                return (
+                    "\u203a Review output\n"
+                    "\u2022 notes first\n"
+                    '{"verdict":"changes_requested","summary":"wrapped re\n'
+                    'view"}\n'
+                    "\n"
+                    "\u203a Next prompt\n"
+                )
+
+            def read_output(self, session, cursor):
+                full_text = (
+                    "\u203a Review output\n"
+                    "\u2022 notes first\n"
+                    '{"verdict":"changes_requested","summary":"wrapped re\n'
+                    'view"}\n'
+                    "\n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": 1}),
+                    text=full_text,
+                    full_text=full_text,
+                    changed=True,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_wrapped_json_contract"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = WrappedJsonHost()
+        session = host.get_or_create_session(agent_id="agt_wrapped_json_contract")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_wrapped_json_contract",
+            "job": {
+                "job_id": "job_wrapped_json_contract",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["verdict", "summary"],
+                    },
+                },
+            },
+            "run": {"run_id": "run_wrapped_json_contract"},
+            "message": {"text": "Review output"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertEqual(result_log.content, '{"verdict":"changes_requested","summary":"wrapped review"}')
 
     def test_codex_adapter_tui_prefers_visible_turn_when_turn_counts_tie(self) -> None:
         from agp.runtime._types import OutputCursor, OutputReadResult
@@ -1476,6 +2029,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             if argv[1] == "has-session":
                 return Result(returncode=0)
             if argv[1] == "display-message":
+                if "#{pane_current_path}" in argv:
+                    return Result("/tmp/reused-pane\n")
                 return Result("0")
             if argv[1] == "capture-pane":
                 return Result("existing\n")
@@ -1486,6 +2041,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         s1 = host.get_or_create_session(agent_id="agt_reuse")
         s2 = host.get_or_create_session(agent_id="agt_reuse")
         self.assertEqual(s1.session_id, s2.session_id)
+        self.assertEqual(s2.workspace_ref, "/tmp/reused-pane")
 
     def test_tmux_host_read_visible_captures_current_screen(self) -> None:
         class Result:

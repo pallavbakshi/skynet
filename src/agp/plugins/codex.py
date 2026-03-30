@@ -7,6 +7,7 @@ from time import monotonic, sleep
 from typing import Any
 
 from agp.plugins._output_contracts import apply_output_contract_instruction, prompt_for_claim
+from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
@@ -69,6 +70,31 @@ def _collect_bullet_lines(lines: list[str]) -> list[str]:
         if s.startswith(_RESPONSE_MARKER):
             result.append(s.removeprefix(_RESPONSE_MARKER).strip())
     return result
+
+
+def _extract_trailing_json_text(text: str) -> str | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    decoder = json.JSONDecoder()
+    for idx in range(len(stripped) - 1, -1, -1):
+        if stripped[idx] not in "[{":
+            continue
+        suffix = stripped[idx:]
+        attempts = [
+            suffix,
+            "".join(line.strip() for line in suffix.splitlines()),
+            " ".join(line.strip() for line in suffix.splitlines()),
+        ]
+        for attempt in attempts:
+            try:
+                payload, end = decoder.raw_decode(attempt)
+            except json.JSONDecodeError:
+                continue
+            if attempt[end:].strip():
+                continue
+            return json.dumps(payload, separators=(",", ":"))
+    return None
 
 
 def _clean_codex_tui_output(text: str) -> str:
@@ -274,7 +300,12 @@ class CodexAdapter(AgentAdapter):
             if hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
                 session.metadata["codex_bootstrapped"] = True
                 return
-            host.send_text(session, self.cli_command, enter=True)
+            host.launch_command(
+                session,
+                command=self.cli_command,
+                env=collect_provider_env(),
+                cwd=session.workspace_ref,
+            )
             # Poll the visible screen (alternate buffer) to detect gate
             # prompts, CLI exit, and the Codex ready state.
             deadline = monotonic() + (self.idle_timeout_seconds if self.idle_timeout_seconds > 0 else 60.0)
@@ -670,10 +701,12 @@ class CodexAdapter(AgentAdapter):
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
         if host.kind == "tmux":
-            # Provider env vars are already exported into the shell by
-            # get_or_create_session (called via reset_session above), so
-            # codex inherits them without inline key interpolation.
-            host.send_text(session, f"{self.cli_command} {shlex.quote(prompt)}", enter=True)
+            host.launch_command(
+                session,
+                command=f"{self.cli_command} {shlex.quote(prompt)}",
+                env=collect_provider_env(),
+                cwd=session.workspace_ref,
+            )
         else:
             host.send_text(session, prompt, enter=True)
 
@@ -792,6 +825,9 @@ class CodexAdapter(AgentAdapter):
             raw_output,
             baseline_last_response=baseline_last_response,
         )
+        contract = (claimed.get("job") or {}).get("output_contract_json") or {}
+        if isinstance(contract, dict) and contract.get("format", "json") == "json":
+            cleaned = _extract_trailing_json_text(cleaned) or cleaned
         transcript_output = _select_codex_tui_transcript(
             visible_output,
             raw_output,

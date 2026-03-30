@@ -98,6 +98,7 @@ install-docker: ## Install Docker Engine + Compose for `make up`
 .PHONY: local-reset local-initdb local-serve local-up local-down local-status
 
 local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
+	@$(RUN) python -c "from agp._local_state import ensure_local_control_plane_stopped; ensure_local_control_plane_stopped()"
 	@rm -f agp.db agp.db-wal agp.db-shm
 	@rm -rf .agp-artifacts .agp-logs .agp-checkpoints
 	@echo "Local state cleared."
@@ -106,6 +107,7 @@ local-initdb: export AGP_DATABASE_URL=sqlite+pysqlite:///$(ROOT)/agp.db
 local-initdb: export AGP_QUEUE_BACKEND=delivery_table
 local-initdb: export AGP_ARTIFACT_BACKEND=localfs
 local-initdb: ## Init local SQLite database
+	@$(RUN) python -c "from agp._local_state import ensure_local_control_plane_stopped; ensure_local_control_plane_stopped()"
 	@mkdir -p .agp-artifacts .agp-logs .agp-checkpoints
 	$(RUN) agp initdb
 

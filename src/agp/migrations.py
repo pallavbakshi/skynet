@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from agp.db import Base, SessionLocal, engine, current_release_version
@@ -84,6 +85,26 @@ def _current_schema_version(session: Session) -> str | None:
     except Exception:
         session.rollback()
         return None
+
+
+def _probe_schema_version(session: Session) -> str | None:
+    """Return schema version, distinguishing missing schema from other DB failures."""
+    try:
+        row = session.execute(
+            text("SELECT value FROM system_metadata WHERE key = 'schema_version'")
+        ).fetchone()
+        return row[0] if row else None
+    except SQLAlchemyError as exc:
+        session.rollback()
+        message = str(exc).lower()
+        missing_markers = (
+            "no such table",
+            "does not exist",
+            "undefined table",
+        )
+        if any(marker in message for marker in missing_markers):
+            return None
+        raise
 
 
 def _set_schema_version(session: Session, version: str) -> None:
@@ -232,5 +253,18 @@ def schema_status() -> dict:
             "engine": dialect,
             "release_version": current_release_version(),
         }
+    finally:
+        session.close()
+
+
+def require_initialized_schema() -> None:
+    """Raise when the configured database has no initialized AGP schema."""
+    session = SessionLocal()
+    try:
+        current = _probe_schema_version(session)
+        if current is None:
+            raise RuntimeError(
+                "database schema is missing or uninitialized; run `agp initdb` before `agp serve`"
+            )
     finally:
         session.close()

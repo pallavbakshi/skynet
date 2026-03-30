@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+import os
 import unittest
 from unittest.mock import Mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from fastapi.testclient import TestClient
+from typer.testing import CliRunner
+
+from agp.cli import app as agp_app
 from agp.config import settings
-from agp.db import Base, SessionLocal, engine, init_db
+from agp.control_plane import build_app
+from agp.db import Base, SessionLocal, engine, ensure_sqlite_runtime_database_available, init_db
 from agp.migrations import (
     apply_migrations,
     schema_status,
+    require_initialized_schema,
     _current_schema_version,
     _discover_migrations,
     _resolve_migrations_dir,
@@ -20,6 +27,7 @@ from tests._base import _reset_sqlite_database
 
 
 _ORIGINAL_DATABASE_URL = settings.database_url
+runner = CliRunner()
 
 
 class MigrationInitTest(unittest.TestCase):
@@ -187,3 +195,73 @@ class VersionIncompatibilityTest(unittest.TestCase):
         with self.assertRaises(RuntimeError) as ctx:
             apply_migrations()
         self.assertIn("ahead of the code", str(ctx.exception))
+
+
+class ServeSchemaValidationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        engine.dispose()
+        _reset_sqlite_database()
+
+    def tearDown(self) -> None:
+        settings.database_url = _ORIGINAL_DATABASE_URL
+
+    def test_require_initialized_schema_rejects_uninitialized_db(self) -> None:
+        with self.assertRaises(RuntimeError) as ctx:
+            require_initialized_schema()
+        self.assertIn("agp initdb", str(ctx.exception))
+
+    def test_require_initialized_schema_propagates_non_schema_db_errors(self) -> None:
+        with unittest.mock.patch("agp.migrations._probe_schema_version", side_effect=RuntimeError("db unavailable")):
+            with self.assertRaises(RuntimeError) as ctx:
+                require_initialized_schema()
+        self.assertIn("db unavailable", str(ctx.exception))
+
+    def test_serve_fails_fast_when_schema_is_uninitialized(self) -> None:
+        with unittest.mock.patch("agp.cli._require_server_extra", return_value=None), \
+             unittest.mock.patch("uvicorn.run") as mock_run:
+            result = runner.invoke(agp_app, ["serve"])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("missing or uninitialized", (result.output or "") + (result.stderr or ""))
+        mock_run.assert_not_called()
+
+    def test_serve_starts_when_schema_is_initialized(self) -> None:
+        init_db()
+        with unittest.mock.patch("agp.cli._require_server_extra", return_value=None), \
+             unittest.mock.patch("uvicorn.run") as mock_run:
+            result = runner.invoke(agp_app, ["serve"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        mock_run.assert_called_once()
+
+    def test_runtime_sqlite_guard_rejects_missing_database_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings.database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'missing.db'}"
+            with self.assertRaises(RuntimeError) as ctx:
+                ensure_sqlite_runtime_database_available()
+        self.assertIn("missing while the control plane is running", str(ctx.exception))
+
+    def test_runtime_sqlite_guard_rejects_database_without_schema(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "empty.db"
+            db_path.touch()
+            settings.database_url = f"sqlite+pysqlite:///{db_path}"
+            with self.assertRaises(RuntimeError) as ctx:
+                ensure_sqlite_runtime_database_available()
+        self.assertIn("missing the AGP schema", str(ctx.exception))
+
+    def test_health_endpoint_reports_db_guard_failure_when_sqlite_file_is_missing(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "missing.db"
+            settings.database_url = f"sqlite+pysqlite:///{db_path}"
+            old_flag = os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD")
+            os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = "1"
+            try:
+                with unittest.mock.patch("agp.control_plane._load_persisted_auth_settings", return_value=None):
+                    client = TestClient(build_app(), raise_server_exceptions=False)
+                    response = client.get("/health")
+            finally:
+                if old_flag is None:
+                    os.environ.pop("AGP_ENFORCE_SQLITE_RUNTIME_GUARD", None)
+                else:
+                    os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = old_flag
+        self.assertEqual(response.status_code, 500)
+        self.assertIn("configured SQLite database file is missing", response.text)

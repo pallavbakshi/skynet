@@ -8,6 +8,7 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from agp._local_state import ensure_local_control_plane_stopped
 from agp.config import settings
 from agp.db import Base, SessionLocal, engine, init_db
 from agp.models import Capability, utc_now
@@ -28,6 +29,10 @@ def _reset_sqlite_database() -> None:
     prefix = "sqlite+pysqlite:///"
     if settings.database_url.startswith(prefix):
         db_path = Path(settings.database_url.removeprefix(prefix))
+        repo_root = Path(__file__).resolve().parents[1]
+        local_db_path = (repo_root / "agp.db").resolve()
+        if db_path.resolve() == local_db_path:
+            ensure_local_control_plane_stopped(repo_root / ".skyops-pids" / "control-plane.pid", root=repo_root)
         for suffix in ("", "-wal", "-shm"):
             path = Path(f"{db_path}{suffix}")
             if path.exists():

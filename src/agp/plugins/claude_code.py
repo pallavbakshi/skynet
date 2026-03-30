@@ -5,6 +5,7 @@ from time import monotonic, sleep
 from typing import Any
 
 from agp.plugins._output_contracts import apply_output_contract_instruction, prompt_for_claim
+from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     AuthFailure, BootstrapFailure, ExecutionTimeout, PaneDied,
@@ -275,7 +276,12 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         # Launch Claude Code interactively with permissions bypassed
         # so tool-use prompts don't block autonomous execution.
-        host.send_text(session, f"{self.cli_command} --dangerously-skip-permissions", enter=True)
+        host.launch_command(
+            session,
+            command=f"{self.cli_command} --dangerously-skip-permissions",
+            env=collect_provider_env(),
+            cwd=session.workspace_ref,
+        )
 
         deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
         while monotonic() < deadline:

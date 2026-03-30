@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
 
 import typer
@@ -59,6 +60,54 @@ def _format_http_error(exc) -> str:
     except Exception:
         message = exc.response.text or str(exc)
     return f"[HTTP {exc.response.status_code}] {message}"
+
+
+def _cli_idempotency_key(prefix: str) -> str:
+    return f"{prefix}-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+
+def _extract_trailing_json_payload(text: str) -> dict | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    decoder = json.JSONDecoder()
+    for idx in range(len(stripped) - 1, -1, -1):
+        if stripped[idx] not in "[{":
+            continue
+        suffix = stripped[idx:]
+        attempts = [
+            suffix,
+            "".join(line.strip() for line in suffix.splitlines()),
+            " ".join(line.strip() for line in suffix.splitlines()),
+        ]
+        for attempt in attempts:
+            try:
+                payload, end = decoder.raw_decode(attempt)
+            except json.JSONDecodeError:
+                continue
+            if attempt[end:].strip():
+                continue
+            if isinstance(payload, dict):
+                return payload
+    return None
+
+
+def _review_attachment_note(*, attachment_name: str, short_output_guidance: str) -> str:
+    return (
+        f"Source job result is attached as {attachment_name}. "
+        f"AGP should also materialize that attachment under agp-attachments/ in the workspace before execution; "
+        f"search by the attached filename if needed. "
+        f"{short_output_guidance}"
+    )
+
+
+def _review_fix_attachment_note(*, attachment_name: str, short_output_guidance: str) -> str:
+    return (
+        f"Updated result is attached as {attachment_name}. "
+        f"AGP should also materialize that attachment under agp-attachments/ in the workspace before execution; "
+        f"search by the attached filename if needed. "
+        f"{short_output_guidance}"
+    )
 
 
 @app.command(hidden=True)
@@ -116,9 +165,16 @@ def serve(
     import uvicorn
     from agp.config import settings
     from agp.control_plane import build_app
+    from agp.migrations import require_initialized_schema
 
     actual_host = host if host is not None else settings.host
     actual_port = port if port is not None else settings.port
+    try:
+        require_initialized_schema()
+    except RuntimeError as exc:
+        typer.echo(f"ERROR: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = "1"
     uvicorn.run(build_app(), host=actual_host, port=actual_port)
 
 
@@ -846,8 +902,6 @@ def send(
     Use --detach for fire-and-forget.  Use --timeout to adjust the sync window.
     Use --nudge <orc_id> to get a push notification when the task finishes.
     """
-    import time
-
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
@@ -882,7 +936,7 @@ def send(
                 reply_to_message_id=reply_to,
                 timeout_seconds=timeout_seconds,
                 attachments=attachments,
-                idempotency_key=f"cli-{int(time.time())}",
+                idempotency_key=_cli_idempotency_key("cli"),
             )
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
@@ -923,8 +977,6 @@ def reply(
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
 ) -> None:
     """Reply to an existing job, preserving its conversation context."""
-    import time
-
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
@@ -991,7 +1043,7 @@ def reply(
                 output_contract=parsed_output_contract,
                 conversation_id=conversation_id,
                 reply_to_message_id=message_id,
-                idempotency_key=f"cli-reply-{int(time.time())}",
+                idempotency_key=_cli_idempotency_key("cli-reply"),
             )
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
@@ -1049,9 +1101,14 @@ def review_cmd(
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
+        short_output_guidance = (
+            "The attached result may legitimately be short, single-line, or an exact-output-only reply. "
+            "Do not infer staging failure or incompleteness from short length alone; review the content that was actually delivered."
+        )
         source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
         dev_agent = dev_id or source_agent
         conversation_id = source_job.get("conversation_id")
+        review_attempt_id = uuid.uuid4().hex[:12]
 
         for round_num in range(1, max_rounds + 1):
             typer.echo(f"[review] Round {round_num}/{max_rounds}")
@@ -1068,10 +1125,12 @@ def review_cmd(
                         artifact = client.fetch_artifact(result_artifact_id, content=True)
                         artifact_content = artifact.get("content", "")
                         if artifact_content:
-                            tmp = Path(f"/tmp/agp-review-{job_id}-source.txt")
-                            tmp.write_text(artifact_content, encoding="utf-8")
-                            review_attachments.append({"name": tmp.name, "role": "source-output", "content": artifact_content})
-                            review_text = f"{prompt}\n\nSource job result is attached as {tmp.name}."
+                            attachment_name = f"agp-review-{job_id}-source.txt"
+                            review_attachments.append({"name": attachment_name, "role": "source-output", "content": artifact_content})
+                            review_text = f"{prompt}\n\n" + _review_attachment_note(
+                                attachment_name=attachment_name,
+                                short_output_guidance=short_output_guidance,
+                            )
                     except Exception:
                         review_text = f"{prompt}\n\n(Could not fetch source job artifact.)"
             else:
@@ -1081,14 +1140,18 @@ def review_cmd(
                     try:
                         fix_artifact = client.fetch_artifact(fix_artifact_id, content=True)
                         fix_content = fix_artifact.get("content", "")
+                        attachment_note = ""
                         if fix_content:
-                            tmp = Path(f"/tmp/agp-review-{job_id}-fix-r{round_num}.txt")
-                            tmp.write_text(fix_content, encoding="utf-8")
-                            review_attachments.append({"name": tmp.name, "role": "fix-output", "content": fix_content})
+                            attachment_name = f"agp-review-{job_id}-fix-r{round_num}.txt"
+                            review_attachments.append({"name": attachment_name, "role": "fix-output", "content": fix_content})
+                            attachment_note = _review_fix_attachment_note(
+                                attachment_name=attachment_name,
+                                short_output_guidance=short_output_guidance,
+                            )
                         review_text = (
                             f"{prompt}\n\n"
                             f"[Round {round_num}] The developer addressed issues from the previous review.\n"
-                            f"Updated result is attached."
+                            f"{attachment_note or 'Updated result is attached and should also be materialized into the workspace.'}"
                         )
                     except Exception:
                         review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
@@ -1126,7 +1189,7 @@ def review_cmd(
                     conversation_id=conversation_id,
                     output_contract=output_contract,
                     attachments=review_attachments,
-                    idempotency_key=f"review-{job_id}-r{round_num}",
+                    idempotency_key=f"review-{job_id}-r{round_num}-{review_attempt_id}",
                 )
             except _httpx.HTTPStatusError as exc:
                 typer.echo(_format_http_error(exc), err=True)
@@ -1157,10 +1220,16 @@ def review_cmd(
             verdict = "changes_requested"
             try:
                 structured = json.loads(content)
+            except json.JSONDecodeError:
+                structured = _extract_trailing_json_payload(content)
+                if structured is None:
+                    summary = content[:500]
+                else:
+                    verdict = structured.get("verdict", "changes_requested")
+                    summary = structured.get("summary", "")
+            else:
                 verdict = structured.get("verdict", "changes_requested")
                 summary = structured.get("summary", "")
-            except json.JSONDecodeError:
-                summary = content[:500]
 
             typer.echo(f"[review] Verdict: {verdict}")
             typer.echo(f"[review] Summary: {summary[:200]}")
@@ -1181,7 +1250,7 @@ def review_cmd(
                     fix_result = client.send(
                         "agent", dev_agent, fix_text,
                         conversation_id=conversation_id,
-                        idempotency_key=f"fix-{job_id}-r{round_num}",
+                        idempotency_key=f"fix-{job_id}-r{round_num}-{review_attempt_id}",
                     )
                 except _httpx.HTTPStatusError as exc:
                     typer.echo(_format_http_error(exc), err=True)

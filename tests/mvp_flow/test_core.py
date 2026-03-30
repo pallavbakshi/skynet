@@ -1,5 +1,10 @@
 """Core agent/job/orchestration and artifact flows."""
 
+from tempfile import TemporaryDirectory
+
+from agp.artifact_store import get_artifact_store
+from agp.runtime import TerminalSession
+
 from tests.mvp_flow.base import *
 
 
@@ -1398,6 +1403,232 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         job = self.client.get(f"/jobs/{job_id}").json()["data"]
         self.assertEqual(job["status"], "completed")
         self.assertIsNotNone(job["result_artifact_id"])
+
+    def test_runtime_worker_stages_job_attachments_into_workspace(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            stored = artifact_store.write_text(
+                namespace="control-plane",
+                job_id="job_attach",
+                name="note.txt",
+                content="attached body",
+                role="attachment",
+            )
+            runtime_client = RuntimeClient(
+                RuntimeIdentity(runtime_id="rtm_worker_attach", hostname="localhost", server_url="http://testserver"),
+                client=self.client,
+            )
+            worker = RuntimeSupervisor(
+                runtime_client,
+                host=InProcessTerminalHost(),
+                adapter=DefaultAgentAdapter(),
+                artifact_root=".agp-artifacts-tests",
+                artifact_store=artifact_store,
+            )
+            session = TerminalSession(session_id="sess_attach", agent_id="agt_runtime_attach", workspace_ref=tmpdir)
+            worker._stage_job_attachments(
+                session=session,
+                claimed={
+                    "job_attachments": [
+                        {
+                            "artifact_id": "art_attach",
+                            "name": "note.txt",
+                            "storage_ref": stored.storage_ref,
+                        }
+                    ]
+                },
+            )
+            runtime_client.close()
+            staged = Path(tmpdir) / "agp-attachments" / "art_attach" / "note.txt"
+            self.assertTrue(staged.exists())
+            self.assertEqual(staged.read_text(encoding="utf-8"), "attached body")
+
+    def test_runtime_worker_stages_http_backed_job_attachments_via_control_plane_fetch(self) -> None:
+        class NoReadArtifactStore:
+            def read_text(self, *, storage_ref: str) -> str | None:
+                return None
+
+        with TemporaryDirectory() as tmpdir:
+            runtime_client = RuntimeClient(
+                RuntimeIdentity(runtime_id="rtm_worker_attach_http", hostname="localhost", server_url="http://testserver"),
+                client=self.client,
+            )
+            worker = RuntimeSupervisor(
+                runtime_client,
+                host=InProcessTerminalHost(),
+                adapter=DefaultAgentAdapter(),
+                artifact_root=".agp-artifacts-tests",
+                artifact_store=NoReadArtifactStore(),
+            )
+            fetch_calls: list[str] = []
+
+            def _fetch_artifact_content(artifact_id: str) -> dict[str, str]:
+                fetch_calls.append(artifact_id)
+                return {"content": "fetched from cp"}
+
+            runtime_client.fetch_artifact_content = _fetch_artifact_content  # type: ignore[method-assign]
+            session = TerminalSession(session_id="sess_attach_http", agent_id="agt_runtime_attach_http", workspace_ref=tmpdir)
+            worker._stage_job_attachments(
+                session=session,
+                claimed={
+                    "job_attachments": [
+                        {
+                            "artifact_id": "art_attach_http",
+                            "name": "note.txt",
+                            "storage_ref": "agp://opaque",
+                        }
+                    ]
+                },
+            )
+            runtime_client.close()
+            staged = Path(tmpdir) / "agp-attachments" / "art_attach_http" / "note.txt"
+            self.assertEqual(fetch_calls, ["art_attach_http"])
+            self.assertTrue(staged.exists())
+            self.assertEqual(staged.read_text(encoding="utf-8"), "fetched from cp")
+
+    def test_runtime_worker_cleanup_removes_staged_workspace_attachments(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            runtime_client = RuntimeClient(
+                RuntimeIdentity(runtime_id="rtm_worker_cleanup", hostname="localhost", server_url="http://testserver"),
+                client=self.client,
+            )
+            worker = RuntimeSupervisor(
+                runtime_client,
+                host=InProcessTerminalHost(),
+                adapter=DefaultAgentAdapter(),
+                artifact_root=".agp-artifacts-tests",
+            )
+            staged_root = Path(tmpdir) / "agp-attachments" / "art_cleanup"
+            staged_root.mkdir(parents=True)
+            staged = staged_root / "staged.txt"
+            staged.write_text("temp", encoding="utf-8")
+            session = TerminalSession(
+                session_id="sess_cleanup_attach",
+                agent_id="agt_runtime_cleanup",
+                workspace_ref=tmpdir,
+                metadata={"staged_attachment_roots": [str(staged_root)]},
+            )
+            worker._cleanup_workspace(session, {"run": {"run_id": "run_cleanup"}})
+            runtime_client.close()
+            self.assertFalse(staged.exists())
+            self.assertFalse(staged_root.exists())
+            self.assertNotIn("staged_attachment_roots", session.metadata)
+
+    def test_runtime_worker_staging_does_not_overwrite_workspace_files_with_same_basename(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            stored = artifact_store.write_text(
+                namespace="control-plane",
+                job_id="job_attach_same_name",
+                name="README.md",
+                content="attached body",
+                role="attachment",
+            )
+            original = Path(tmpdir) / "README.md"
+            original.write_text("real workspace file", encoding="utf-8")
+            runtime_client = RuntimeClient(
+                RuntimeIdentity(runtime_id="rtm_worker_attach_same_name", hostname="localhost", server_url="http://testserver"),
+                client=self.client,
+            )
+            worker = RuntimeSupervisor(
+                runtime_client,
+                host=InProcessTerminalHost(),
+                adapter=DefaultAgentAdapter(),
+                artifact_root=".agp-artifacts-tests",
+                artifact_store=artifact_store,
+            )
+            session = TerminalSession(session_id="sess_attach_same_name", agent_id="agt_runtime_attach_same_name", workspace_ref=tmpdir)
+            worker._stage_job_attachments(
+                session=session,
+                claimed={
+                    "job_attachments": [
+                        {
+                            "artifact_id": "art_same_name",
+                            "name": "README.md",
+                            "storage_ref": stored.storage_ref,
+                        }
+                    ]
+                },
+            )
+            runtime_client.close()
+            staged = Path(tmpdir) / "agp-attachments" / "art_same_name" / "README.md"
+            self.assertEqual(original.read_text(encoding="utf-8"), "real workspace file")
+            self.assertEqual(staged.read_text(encoding="utf-8"), "attached body")
+
+    def test_runtime_worker_fails_promptly_when_attachment_staging_raises(self) -> None:
+        class AttachmentHost(InProcessTerminalHost):
+            def __init__(self, workspace_ref: str) -> None:
+                super().__init__()
+                self._workspace_ref = workspace_ref
+
+            def get_or_create_session(self, *, agent_id: str, workspace_ref: str | None = None):
+                session = super().get_or_create_session(agent_id=agent_id, workspace_ref=workspace_ref)
+                session.workspace_ref = self._workspace_ref
+                return session
+
+        class FakeRuntimeClient:
+            def __init__(self) -> None:
+                self._log_fn = None
+                self.identity = type(
+                    "Identity",
+                    (),
+                    {"runtime_id": "rtm_stage_fail", "server_url": "http://example.invalid", "token": None, "metadata": {}},
+                )()
+                self.fail_calls: list[dict[str, object]] = []
+
+            def register(self):
+                return {"status": "ok"}
+
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+                return {
+                    "claimed": True,
+                    "agent_id": agent_id,
+                    "job": {"job_id": "job_stage_fail", "status": "running"},
+                    "run": {"run_id": "run_stage_fail"},
+                    "lease": {"lease_id": "lease_stage_fail", "fencing_token": 9},
+                    "message": {"text": "review", "metadata": {}},
+                    "job_attachments": [
+                        {
+                            "artifact_id": "art_stage_fail",
+                            "name": "note.txt",
+                            "storage_ref": "agp://broken",
+                        }
+                    ],
+                }
+
+            def heartbeat(self, **kwargs):  # noqa: ARG002
+                return {"interrupt_requested": False}
+
+            def progress(self, **kwargs):  # noqa: ARG002
+                return {"status": "ok"}
+
+            def fail(self, **kwargs):
+                self.fail_calls.append(kwargs)
+                return {"job_status": "failed"}
+
+        with TemporaryDirectory() as tmpdir:
+            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            original_read_text = artifact_store.read_text
+
+            def _raising_read_text(*, storage_ref: str) -> str | None:
+                if storage_ref == "agp://broken":
+                    raise RuntimeError("attachment backend exploded")
+                return original_read_text(storage_ref=storage_ref)
+
+            artifact_store.read_text = _raising_read_text  # type: ignore[method-assign]
+            client = FakeRuntimeClient()
+            worker = RuntimeSupervisor(
+                client,
+                host=AttachmentHost(tmpdir),
+                adapter=DefaultAgentAdapter(),
+                artifact_root=".agp-artifacts-tests",
+                artifact_store=artifact_store,
+            )
+            outcome = worker.run_once(agent_id="agt_stage_fail")
+
+        self.assertTrue(outcome["claimed"])
+        self.assertIn("attachment backend exploded", outcome["error"])
+        self.assertEqual(len(client.fail_calls), 1)
 
     def test_build_runtime_plugin_factories_support_inprocess_and_wezterm(self) -> None:
         self.assertEqual(build_terminal_host("inprocess").kind, "inprocess")

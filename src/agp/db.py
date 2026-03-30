@@ -1,5 +1,9 @@
 """Database bootstrap for the AGP scaffold."""
 
+import os
+import sqlite3
+from pathlib import Path
+
 from collections.abc import Generator
 from importlib.metadata import PackageNotFoundError, version as package_version
 
@@ -36,6 +40,8 @@ if settings.database_url.startswith("sqlite"):
         conn.exec_driver_sql("BEGIN IMMEDIATE")
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
+_SQLITE_URL_PREFIX = "sqlite+pysqlite:///"
+_sqlite_runtime_state_cache: dict[str, tuple[int, int, int]] = {}
 
 
 def current_release_version() -> str:
@@ -60,9 +66,73 @@ def init_db() -> None:
     apply_migrations()
 
 
+def sqlite_db_path() -> Path | None:
+    """Return the configured SQLite database path, if any."""
+    if not settings.database_url.startswith(_SQLITE_URL_PREFIX):
+        return None
+    return Path(settings.database_url.removeprefix(_SQLITE_URL_PREFIX))
+
+
+def ensure_sqlite_runtime_database_available() -> None:
+    """Fail fast if the configured SQLite database vanished or lost its schema.
+
+    A live CP on an unlinked/replaced SQLite file can drift into a split-brain
+    state where old connections still work while new ones see an empty database.
+    Detect that before request handling opens a new ORM session.
+    """
+    db_path = sqlite_db_path()
+    if db_path is None:
+        return
+    try:
+        stat = db_path.stat()
+    except FileNotFoundError as exc:
+        _sqlite_runtime_state_cache.pop(str(db_path), None)
+        raise RuntimeError(
+            "configured SQLite database file is missing while the control plane is running; "
+            "stop the control plane and recreate local state with `make local-up`"
+        ) from exc
+
+    signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+    cache_key = str(db_path)
+    if _sqlite_runtime_state_cache.get(cache_key) == signature:
+        return
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=rw", uri=True, timeout=1)
+    except sqlite3.Error as exc:
+        raise RuntimeError(
+            f"configured SQLite database is not readable in read/write mode: {exc}"
+        ) from exc
+
+    try:
+        try:
+            row = conn.execute(
+                "SELECT value FROM system_metadata WHERE key = 'schema_version'"
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            if "no such table" in message:
+                raise RuntimeError(
+                    "configured SQLite database is missing the AGP schema while the control plane is running; "
+                    "stop the control plane and recreate local state with `make local-up`"
+                ) from exc
+            raise RuntimeError(f"unable to verify configured SQLite database schema: {exc}") from exc
+        if row is None or not row[0]:
+            raise RuntimeError(
+                "configured SQLite database is missing schema metadata while the control plane is running; "
+                "stop the control plane and recreate local state with `make local-up`"
+            )
+    finally:
+        conn.close()
+
+    _sqlite_runtime_state_cache[cache_key] = signature
+
+
 def get_db() -> Generator:
     """Yield a request-scoped database session."""
 
+    if os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD") == "1":
+        ensure_sqlite_runtime_database_available()
     session = SessionLocal()
     try:
         yield session
