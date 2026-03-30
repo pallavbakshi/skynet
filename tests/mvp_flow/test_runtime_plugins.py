@@ -669,6 +669,205 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertEqual(result.artifacts[-1].content, "LOCAL_OK")
 
+    def test_codex_adapter_tui_tmux_oneshot_shell_return_after_new_turn_succeeds(self) -> None:
+        class OneShotCompleteHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex " in text:
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a previous prompt\n"
+                        "\u2022 PREVIOUS_OK\n"
+                        "\n"
+                        "\u203a tmux oneshot task\n"
+                        "\u2022 NEW_OK\n"
+                        "\n"
+                    )
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a previous prompt\n\u2022 PREVIOUS_OK\n"
+                return (
+                    "\u203a previous prompt\n"
+                    "\u2022 PREVIOUS_OK\n"
+                    "\n"
+                    "\u203a tmux oneshot task\n"
+                    "\u2022 NEW_OK\n"
+                    "\n"
+                    "shell resumed\n"
+                    "pwd\n"
+                    "/workspace\n"
+                    "echo done\n"
+                    "done\n"
+                    "$ \n"
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_oneshot_ok"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = OneShotCompleteHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_oneshot_ok")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_tmux_oneshot_ok",
+            "job": {"job_id": "job_tmux_oneshot_ok"},
+            "run": {"run_id": "run_tmux_oneshot_ok"},
+            "message": {"text": "tmux oneshot task"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        exec_log = next(artifact for artifact in result.artifacts if artifact.name == "exec.txt")
+        self.assertIn("NEW_OK", exec_log.content)
+
+    def test_codex_adapter_tui_tmux_oneshot_shell_return_after_new_turn_scrolled_out_succeeds(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class OneShotScrolledCompleteHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+                self._output_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a previous prompt\n\u2022 PREVIOUS_OK\n"
+                return "shell resumed\npwd\n/workspace\n$ \n"
+
+            def read_output(self, session, cursor):
+                self._output_reads += 1
+                full_text = (
+                    "\u203a previous prompt\n"
+                    "\u2022 PREVIOUS_OK\n"
+                    "\n"
+                    "\u203a tmux oneshot task\n"
+                    "\u2022 NEW_OK\n"
+                    "\n"
+                    "shell resumed\n"
+                    "pwd\n"
+                    "/workspace\n"
+                    "$ \n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": self._output_reads}),
+                    text=full_text if self._output_reads == 1 else "",
+                    full_text=full_text,
+                    changed=self._output_reads == 1,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_oneshot_scrolled_ok"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = OneShotScrolledCompleteHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_oneshot_scrolled_ok")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_tmux_oneshot_scrolled_ok",
+            "job": {"job_id": "job_tmux_oneshot_scrolled_ok"},
+            "run": {"run_id": "run_tmux_oneshot_scrolled_ok"},
+            "message": {"text": "tmux oneshot task"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        exec_log = next(artifact for artifact in result.artifacts if artifact.name == "exec.txt")
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertIn("NEW_OK", exec_log.content)
+        self.assertIn("NEW_OK", result_log.content)
+
+    def test_codex_adapter_tui_tmux_oneshot_shell_return_without_new_turn_raises_pane_died(self) -> None:
+        class OneShotCrashHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u203a previous prompt\n\u2022 PREVIOUS_OK\n"
+                return "$ \n"
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_oneshot_crash"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = OneShotCrashHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_oneshot_crash")
+        session.metadata["codex_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_tmux_oneshot_crash",
+            "job": {"job_id": "job_tmux_oneshot_crash"},
+            "run": {"run_id": "run_tmux_oneshot_crash"},
+            "message": {"text": "tmux oneshot task"},
+        }
+
+        with self.assertRaises(PaneDied) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("codex cli exited during execution", str(ctx.exception))
+
     def test_codex_adapter_tui_ignores_stale_completed_turns_from_prior_prompt(self) -> None:
         class StalePromptHost(InProcessTerminalHost):
             @property

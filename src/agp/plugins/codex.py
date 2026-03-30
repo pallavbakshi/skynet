@@ -637,6 +637,7 @@ class CodexAdapter(AgentAdapter):
         dispatch_time = monotonic()
         last_heartbeat_at = dispatch_time
         poll_count = 0
+        accumulated_turns_above_baseline = 0
         while monotonic() < idle_deadline:
             poll_count += 1
             sleep(self.idle_poll_seconds)
@@ -644,6 +645,11 @@ class CodexAdapter(AgentAdapter):
             screen = _strip_ansi(host.read_visible(session))
             read = host.read_output(session, cursor)
             cursor = read.cursor
+            answered_turns = [turn for turn in _parse_codex_turns(read.full_text) if turn["response"]]
+            accumulated_turns_above_baseline = max(
+                accumulated_turns_above_baseline,
+                len(answered_turns) - len(baseline_turns),
+            )
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
             changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
@@ -672,6 +678,8 @@ class CodexAdapter(AgentAdapter):
             if startup_settled_event is not None and startup_settled:
                 startup_settled_event.set()
             if startup_settled and self._looks_like_shell_returned(screen):
+                if accumulated_turns_above_baseline > 0:
+                    break
                 raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
                 # Only dismiss if the screen changed since the last dismiss
@@ -715,11 +723,10 @@ class CodexAdapter(AgentAdapter):
                 raise ExecutionTimeout("codex tui produced no output after dispatch")
             raise ExecutionTimeout("codex tui did not become idle within timeout")
 
-        # Use the visible screen for TUI output — scrollback deltas are
-        # unreliable because TUI apps repaint the entire screen.
-        raw_output = _strip_ansi(host.read_visible(session))
-        # Also update the cursor/accumulator for bookkeeping.
+        # Prefer the cursor-based accumulated output because it preserves
+        # completions that have scrolled out of the visible pane.
         read = host.read_output(session, cursor)
+        raw_output = _strip_ansi(read.full_text or host.read_visible(session))
         # Preserve the updated cursor so the next sticky run starts from
         # this point instead of creating a fresh baseline.
         session.metadata["restored_cursor"] = read.cursor
