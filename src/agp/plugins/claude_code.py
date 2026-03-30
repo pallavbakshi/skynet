@@ -613,7 +613,10 @@ class ClaudeCodeAdapter(AgentAdapter):
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
                     )
-                host.send_text(session, self._gate_response(screen), enter=True)
+                # Only dismiss if the screen changed since the last dismiss
+                # to avoid spamming Enter on an unrecognised persistent dialog.
+                if snap != prev_screen:
+                    host.send_text(session, self._gate_response(screen), enter=True)
                 prev_screen = snap
                 prev_tail = tail
                 unchanged = 0
@@ -625,6 +628,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             else:
                 unchanged = 0
                 tui_active = True
+                deadline = monotonic() + timeout
             prev_screen = snap
             prev_tail = tail
 

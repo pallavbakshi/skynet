@@ -194,8 +194,8 @@ class RuntimeSupervisor:
         agent_id: str | None = None,
         capability_id: str | None = None,
         capabilities: list[str] | None = None,
-        lease_ttl_seconds: int = 30,
-        heartbeat_interval_seconds: float = 5.0,
+        lease_ttl_seconds: int = 120,
+        heartbeat_interval_seconds: float = 10.0,
         agent_heartbeat_seconds: float = 15.0,
         idle_sleep_seconds: float = 0.25,
         max_iterations: int | None = None,
@@ -307,8 +307,8 @@ class RuntimeSupervisor:
         *,
         agent_id: str | None = None,
         capability_id: str | None = None,
-        lease_ttl_seconds: int = 30,
-        heartbeat_interval_seconds: float = 5.0,
+        lease_ttl_seconds: int = 120,
+        heartbeat_interval_seconds: float = 10.0,
         max_local_recoveries: int = 1,
         max_local_recovery_seconds: float = 30.0,
     ) -> dict[str, Any]:
@@ -344,62 +344,80 @@ class RuntimeSupervisor:
         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
         stop = Event()
 
-        max_missed_heartbeats = 3
+        max_missed_heartbeats = 6
         lease_lost = Event()  # signals that we lost the lease / fencing
+
+        # Dedicated httpx client for the heartbeat thread so it never blocks
+        # on the main thread's connection pool (critical over SSH tunnels).
+        import httpx as _httpx
+        _hb_headers: dict[str, str] = {}
+        if self.client.identity.token:
+            _hb_headers["Authorization"] = f"Bearer {self.client.identity.token}"
+        _hb_client = _httpx.Client(
+            base_url=self.client.identity.server_url.rstrip("/"),
+            timeout=10.0,
+            headers=_hb_headers,
+        )
 
         def heartbeat_loop() -> None:
             consecutive_misses = 0
-            while not stop.wait(heartbeat_interval_seconds):
-                try:
-                    hb_response = self.client.heartbeat(
-                        run_id=run["run_id"],
-                        lease_id=lease["lease_id"],
-                        fencing_token=lease["fencing_token"],
-                        extend_seconds=lease_ttl_seconds,
-                    )
-                    consecutive_misses = 0
-                    # Check if the CP surfaced an interrupt in the heartbeat response
-                    if isinstance(hb_response, dict) and hb_response.get("interrupt_requested"):
-                        _append_runtime_log(
-                            self.client.identity.runtime_id,
-                            {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
+            try:
+                while not stop.wait(heartbeat_interval_seconds):
+                    try:
+                        resp = _hb_client.post(
+                            f"/runs/{run['run_id']}/heartbeat",
+                            json={
+                                "runtime_id": self.client.identity.runtime_id,
+                                "lease_id": lease["lease_id"],
+                                "fencing_token": lease["fencing_token"],
+                                "extend_seconds": lease_ttl_seconds,
+                            },
                         )
-                        claimed["job"]["status"] = "interrupt_requested"
-                        try:
-                            self.host.interrupt(session)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        stop.set()
-                        break
-                except Exception:  # noqa: BLE001
-                    consecutive_misses += 1
-                    _append_runtime_log(
-                        self.client.identity.runtime_id,
-                        {
-                            "kind": "runtime_worker",
-                            "action": "heartbeat_missed",
-                            "run_id": run["run_id"],
-                            "consecutive_misses": consecutive_misses,
-                        },
-                    )
-                    if consecutive_misses >= max_missed_heartbeats:
+                        resp.raise_for_status()
+                        hb_response = resp.json()["data"]
+                        consecutive_misses = 0
+                        if isinstance(hb_response, dict) and hb_response.get("interrupt_requested"):
+                            _append_runtime_log(
+                                self.client.identity.runtime_id,
+                                {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
+                            )
+                            claimed["job"]["status"] = "interrupt_requested"
+                            try:
+                                self.host.interrupt(session)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            stop.set()
+                            break
+                    except Exception:  # noqa: BLE001
+                        consecutive_misses += 1
                         _append_runtime_log(
                             self.client.identity.runtime_id,
                             {
                                 "kind": "runtime_worker",
-                                "action": "heartbeat_budget_exhausted",
+                                "action": "heartbeat_missed",
                                 "run_id": run["run_id"],
-                                "max_missed": max_missed_heartbeats,
+                                "consecutive_misses": consecutive_misses,
                             },
                         )
-                        lease_lost.set()
-                        # Attempt to kill local execution context (fencing handoff)
-                        try:
-                            self.host.interrupt(session)
-                        except Exception:  # noqa: BLE001
-                            pass
-                        stop.set()
-                        break
+                        if consecutive_misses >= max_missed_heartbeats:
+                            _append_runtime_log(
+                                self.client.identity.runtime_id,
+                                {
+                                    "kind": "runtime_worker",
+                                    "action": "heartbeat_budget_exhausted",
+                                    "run_id": run["run_id"],
+                                    "max_missed": max_missed_heartbeats,
+                                },
+                            )
+                            lease_lost.set()
+                            try:
+                                self.host.interrupt(session)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            stop.set()
+                            break
+            finally:
+                _hb_client.close()
 
         self.client.heartbeat(
             run_id=run["run_id"],
@@ -534,13 +552,28 @@ class RuntimeSupervisor:
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in result.artifacts
             ]
-            completed = self.client.complete(
-                run_id=run["run_id"],
-                lease_id=lease["lease_id"],
-                fencing_token=lease["fencing_token"],
-                artifacts=stored_artifacts,
-                summary=result.summary,
-            )
+            try:
+                completed = self.client.complete(
+                    run_id=run["run_id"],
+                    lease_id=lease["lease_id"],
+                    fencing_token=lease["fencing_token"],
+                    artifacts=stored_artifacts,
+                    summary=result.summary,
+                )
+            except Exception as comp_exc:  # noqa: BLE001
+                # Lease expired or CP rejected — job is lost; log and move on
+                # instead of crashing into the death loop.
+                _append_runtime_log(
+                    self.client.identity.runtime_id,
+                    {
+                        "kind": "runtime_worker",
+                        "action": "complete_rejected",
+                        "run_id": run["run_id"],
+                        "error": str(comp_exc),
+                    },
+                )
+                _logger.warning("complete() rejected for run %s: %s", run["run_id"], comp_exc)
+                return {"claimed": True, "claim": claimed, "error": str(comp_exc)}
             _append_runtime_log(
                 self.client.identity.runtime_id,
                 {
@@ -561,12 +594,16 @@ class RuntimeSupervisor:
                 self.client.identity.runtime_id,
                 {"kind": "runtime_worker", "action": "interrupt_observed", "run_id": run["run_id"], "reason": str(exc)},
             )
-            cancelled = self.client.cancel(
-                run_id=run["run_id"],
-                lease_id=lease["lease_id"],
-                fencing_token=lease["fencing_token"],
-                reason=str(exc),
-            )
+            try:
+                cancelled = self.client.cancel(
+                    run_id=run["run_id"],
+                    lease_id=lease["lease_id"],
+                    fencing_token=lease["fencing_token"],
+                    reason=str(exc),
+                )
+            except Exception as cancel_exc:  # noqa: BLE001
+                _logger.warning("cancel() rejected for run %s: %s", run["run_id"], cancel_exc)
+                return {"claimed": True, "claim": claimed, "cancelled": True, "error": str(cancel_exc)}
             return {"claimed": True, "claim": claimed, "cancelled": True, "result": cancelled}
         except Exception as exc:
             _append_runtime_log(
@@ -592,17 +629,31 @@ class RuntimeSupervisor:
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in failure_result.artifacts
             ]
-            failed = self.client.fail(
-                run_id=run["run_id"],
-                lease_id=lease["lease_id"],
-                fencing_token=lease["fencing_token"],
-                error=str(exc),
-                artifacts=artifacts,
-                summary=failure_result.summary,
-            )
+            try:
+                failed = self.client.fail(
+                    run_id=run["run_id"],
+                    lease_id=lease["lease_id"],
+                    fencing_token=lease["fencing_token"],
+                    error=str(exc),
+                    artifacts=artifacts,
+                    summary=failure_result.summary,
+                )
+            except Exception as fail_exc:  # noqa: BLE001
+                _append_runtime_log(
+                    self.client.identity.runtime_id,
+                    {
+                        "kind": "runtime_worker",
+                        "action": "fail_rejected",
+                        "run_id": run["run_id"],
+                        "error": str(fail_exc),
+                    },
+                )
+                _logger.warning("fail() rejected for run %s: %s", run["run_id"], fail_exc)
+                return {"claimed": True, "claim": claimed, "error": str(exc)}
             return {"claimed": True, "claim": claimed, "error": str(exc), "result": failed}
         finally:
             stop.set()
             thread.join(timeout=heartbeat_interval_seconds + 1.0)
+            _hb_client.close()  # idempotent if thread already closed it
             # Workspace cleanup: remove temp files, stale locks, session residue
             self._cleanup_workspace(session, claimed)
