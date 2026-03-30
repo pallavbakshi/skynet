@@ -392,6 +392,9 @@ def complete_run_service(
     job.status = JobStatus.COMPLETED.value
     job.result_artifact_id = result_artifact_id
     job.updated_at = utc_now()
+    # SessionLocal uses autoflush=False, so flush terminal state transitions
+    # before querying for any remaining active work.
+    db.flush()
     if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
         agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
     if not _has_active_leases(db, runtime.runtime_id):
@@ -435,6 +438,9 @@ def fail_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.FAILED.value
     job.updated_at = utc_now()
+    # SessionLocal uses autoflush=False, so flush terminal state transitions
+    # before querying for any remaining active work.
+    db.flush()
     if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
         agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
     if not _has_active_leases(db, runtime.runtime_id):
@@ -524,6 +530,9 @@ def cancel_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.CANCELLED.value
     job.updated_at = utc_now()
+    # SessionLocal uses autoflush=False, so flush terminal state transitions
+    # before querying for any remaining active work.
+    db.flush()
     if agent is not None and agent.status not in _PRESERVE_AGENT_STATUSES:
         agent.status = AgentStatus.IDLE.value if not _has_active_runs(db, agent.agent_id) else agent.status
     if not _has_active_leases(db, runtime.runtime_id):
