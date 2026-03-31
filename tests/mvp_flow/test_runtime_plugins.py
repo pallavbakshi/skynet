@@ -789,6 +789,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
     def test_codex_adapter_tui_mode_send_wait_read_cycle(self) -> None:
         class TuiHost(InProcessTerminalHost):
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
                 if text.startswith("codex"):
@@ -963,6 +967,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                 self.reset_calls += 1
                 return super().reset_session(session)
 
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 self.sent.append(text)
                 super().send_text(session, text, enter=enter)
@@ -1016,6 +1024,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def __init__(self) -> None:
                 super().__init__()
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
@@ -1071,6 +1083,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def __init__(self) -> None:
                 super().__init__()
                 self._visible_reads = 0
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
@@ -1543,6 +1559,46 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
         self.assertIn("• ok", transcript_log.content)
         self.assertEqual(result_log.content, "ok")
+
+    def test_repair_json_string_fixes_unescaped_interior_quotes(self) -> None:
+        from agp.plugins.codex import _repair_json_string
+        # Simple unescaped quote
+        self.assertEqual(
+            json.loads(_repair_json_string('{"a":"he said "hello" today"}')),
+            {"a": 'he said "hello" today'},
+        )
+        # Unescaped quote followed by colon (the case the reviewer flagged)
+        self.assertEqual(
+            json.loads(_repair_json_string('{"summary":"he said "x": y"}')),
+            {"summary": 'he said "x": y'},
+        )
+        # Multiple unescaped quotes in different fields
+        self.assertEqual(
+            json.loads(_repair_json_string(
+                '{"a":"uses "foo" lib","b":"calls "bar" api"}'
+            )),
+            {"a": 'uses "foo" lib', "b": 'calls "bar" api'},
+        )
+        # Already-valid JSON is returned unchanged
+        valid = '{"ok":true,"msg":"clean"}'
+        self.assertEqual(_repair_json_string(valid), valid)
+        # Backslash-parity: even backslashes before quote means unescaped
+        self.assertEqual(
+            json.loads(_repair_json_string('{"a":"X\\\\"Y"}')),
+            {"a": 'X\\"Y'},
+        )
+
+    def test_extract_trailing_json_text_repairs_unescaped_quotes(self) -> None:
+        from agp.plugins.codex import _extract_trailing_json_text
+        text = (
+            "Here is my review.\n"
+            '{"verdict":"changes_requested","summary":"fails on "nested escapes" badly"}'
+        )
+        result = _extract_trailing_json_text(text)
+        self.assertIsNotNone(result)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["verdict"], "changes_requested")
+        self.assertIn("nested escapes", parsed["summary"])
 
     def test_codex_adapter_tui_tmux_oneshot_shell_return_without_new_turn_raises_pane_died(self) -> None:
         class OneShotCrashHost(InProcessTerminalHost):
@@ -2405,6 +2461,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             def is_foreground_tui(self, session):
                 return tui_alive["value"]
 
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
         adapter = CodexAdapter(
             tui_mode=True,
             session_mode="sticky",
@@ -2848,6 +2908,149 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         tui_screen = "\u23fa response\n\u2500\u2500\u2500\u2500\n\u276f \n"
         self.assertFalse(adapter._looks_like_shell_returned(tui_screen))
 
+    def test_claude_code_tui_shell_return_after_completed_turn_succeeds(self) -> None:
+        """When Claude Code finishes and the shell returns, the adapter should
+        succeed via last_good_screen instead of raising PaneDied."""
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class ClaudeOneShotHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._phase = "bootstrap"  # bootstrap → response → shell
+                self._response_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if self._phase == "bootstrap" and "task prompt" in text:
+                    self._phase = "response"
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u276f task prompt\n"
+                        "\u23fa Here is the answer.\n"
+                        "\u2500\u2500\u2500\u2500\n"
+                        "\u276f \n"
+                    )
+
+            def read_visible(self, session):
+                if self._phase == "bootstrap":
+                    # Idle Claude TUI for bootstrap + baseline capture
+                    return "\u276f \n\u2500\u2500\u2500\u2500\n"
+                if self._phase == "response":
+                    self._response_reads += 1
+                    if self._response_reads > 3:
+                        self._phase = "shell"
+                        return "$ \n"
+                    return (
+                        "\u276f task prompt\n"
+                        "\u23fa Here is the answer.\n"
+                        "\u2500\u2500\u2500\u2500\n"
+                        "\u276f \n"
+                    )
+                return "$ \n"
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_oneshot"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = ClaudeOneShotHost()
+        session = host.get_or_create_session(agent_id="agt_cc_oneshot")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_cc_oneshot",
+            "job": {"job_id": "job_cc_oneshot"},
+            "run": {"run_id": "run_cc_oneshot"},
+            "message": {"text": "task prompt"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(a for a in result.artifacts if a.name == "result.txt")
+        self.assertIn("Here is the answer", result_log.content)
+
+    def test_claude_code_tui_last_good_screen_fallback_on_tui_exit_race(self) -> None:
+        """When read_visible returns empty after the loop (TUI exited),
+        last_good_screen should provide the result."""
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class ClaudeExitRaceHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._phase = "bootstrap"
+                self._response_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if self._phase == "bootstrap" and "task prompt" in text:
+                    self._phase = "response"
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u276f task prompt\n"
+                        "\u23fa Race condition result.\n"
+                        "\u2500\u2500\u2500\u2500\n"
+                        "\u276f \n"
+                    )
+
+            def read_visible(self, session):
+                if self._phase == "bootstrap":
+                    return "\u276f \n\u2500\u2500\u2500\u2500\n"
+                if self._phase == "response":
+                    self._response_reads += 1
+                    if self._response_reads > 3:
+                        self._phase = "exited"
+                        return ""  # TUI exited — blank screen (the race)
+                    return (
+                        "\u276f task prompt\n"
+                        "\u23fa Race condition result.\n"
+                        "\u2500\u2500\u2500\u2500\n"
+                        "\u276f \n"
+                    )
+                return ""  # blank after exit
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_race"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = ClaudeExitRaceHost()
+        session = host.get_or_create_session(agent_id="agt_cc_race")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_cc_race",
+            "job": {"job_id": "job_cc_race"},
+            "run": {"run_id": "run_cc_race"},
+            "message": {"text": "task prompt"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(a for a in result.artifacts if a.name == "result.txt")
+        self.assertIn("Race condition result", result_log.content)
+
     def test_claude_code_bootstrap_verifies_health(self) -> None:
         from agp.runtime import SessionHealth
 
@@ -2878,6 +3081,10 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def is_foreground_tui(self, session):
                 return tui_alive["value"]
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         adapter = ClaudeCodeAdapter(
             session_mode="sticky",

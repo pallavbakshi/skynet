@@ -604,6 +604,8 @@ class ClaudeCodeAdapter(AgentAdapter):
         unchanged = 0
         tui_active = False
         dispatch_time = monotonic()
+        accumulated_turns_above_baseline = 0
+        last_good_screen = ""
 
         while monotonic() < deadline:
             sleep(self.idle_poll_seconds)
@@ -611,6 +613,11 @@ class ClaudeCodeAdapter(AgentAdapter):
             screen = _strip_ansi(host.read_visible(session))
             read = host.read_output(session, cursor)
             cursor = read.cursor
+            answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
+            accumulated_turns_above_baseline = max(
+                accumulated_turns_above_baseline,
+                len(answered_turns) - len(baseline_turns),
+            )
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
 
@@ -618,6 +625,24 @@ class ClaudeCodeAdapter(AgentAdapter):
             if startup_settled_event is not None and startup_settled:
                 startup_settled_event.set()
             if startup_settled and self._looks_like_shell_returned(screen):
+                if accumulated_turns_above_baseline > 0:
+                    break
+                # The scrollback may not have captured turns that the
+                # visible screen showed before the TUI exited.  Check
+                # last_good_screen for a completed turn.
+                if last_good_screen and self._looks_like_completed_turn(
+                    last_good_screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                ):
+                    break
+                # Guard against false positives during CLI startup: the
+                # visible buffer may still show the pre-launch shell
+                # prompt while the CLI is loading.  Use process-based
+                # detection as a tiebreaker — but only when the host
+                # supports it (_get_pane_tty returns a TTY).
+                if host._get_pane_tty(session) is not None and not host.shell_idle(session):
+                    continue
                 raise PaneDied("claude code cli exited during execution")
 
             if self._looks_like_gate_prompt(screen):
@@ -644,6 +669,10 @@ class ClaudeCodeAdapter(AgentAdapter):
                 deadline = monotonic() + timeout
             prev_screen = snap
             prev_tail = tail
+            # Preserve the last screen with TUI content for extraction,
+            # because the TUI may exit between loop break and read_visible.
+            if _PROMPT_PREFIX in screen:
+                last_good_screen = screen
 
             stable_after = max(1, self.idle_after - 1)
             if unchanged < stable_after:
@@ -667,7 +696,11 @@ class ClaudeCodeAdapter(AgentAdapter):
         raw_output = _strip_ansi(host.read_visible(session))
         read = host.read_output(session, cursor)
         session.metadata["restored_cursor"] = read.cursor
+        # Try the live visible screen first; fall back to last_good_screen
+        # if the TUI exited between the loop break and read_visible.
         cleaned = _clean_claude_code_output(raw_output)
+        if not cleaned.strip() and last_good_screen:
+            cleaned = _clean_claude_code_output(last_good_screen)
 
         if not cleaned.strip():
             raise ExecutionTimeout("claude code tui produced no output after idle")

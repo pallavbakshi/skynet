@@ -72,6 +72,45 @@ def _collect_bullet_lines(lines: list[str]) -> list[str]:
     return result
 
 
+def _repair_json_string(text: str) -> str:
+    """Best-effort repair of unescaped double-quotes in LLM JSON output.
+
+    Iteratively parses the text, finds the position where parsing fails
+    (typically right after an unescaped interior quote that the parser
+    mistook for a string terminator), escapes the offending quote, and
+    retries.  Handles chains of unescaped quotes like ``"x": y`` inside
+    a JSON string value.
+    """
+    repaired = text
+    for _ in range(50):
+        try:
+            json.loads(repaired)
+            return repaired
+        except (json.JSONDecodeError, ValueError) as exc:
+            pos = getattr(exc, "pos", None)
+            if pos is None or pos <= 0:
+                break
+            # Walk backward from the error position to find the
+            # unescaped " that the parser treated as a string close.
+            fixed = False
+            for j in range(pos - 1, 0, -1):
+                if repaired[j] != '"':
+                    continue
+                # Count consecutive backslashes before this quote.
+                # Even count (including zero) means the quote is unescaped.
+                num_bs = 0
+                while j - 1 - num_bs >= 0 and repaired[j - 1 - num_bs] == '\\':
+                    num_bs += 1
+                if num_bs % 2 != 0:
+                    continue  # quote is already escaped
+                repaired = repaired[:j] + '\\"' + repaired[j + 1:]
+                fixed = True
+                break
+            if not fixed:
+                break
+    return repaired
+
+
 def _extract_trailing_json_text(text: str) -> str | None:
     stripped = text.strip()
     if not stripped:
@@ -87,13 +126,14 @@ def _extract_trailing_json_text(text: str) -> str | None:
             " ".join(line.strip() for line in suffix.splitlines()),
         ]
         for attempt in attempts:
-            try:
-                payload, end = decoder.raw_decode(attempt)
-            except json.JSONDecodeError:
-                continue
-            if attempt[end:].strip():
-                continue
-            return json.dumps(payload, separators=(",", ":"))
+            for text_to_parse in (attempt, _repair_json_string(attempt)):
+                try:
+                    payload, end = decoder.raw_decode(text_to_parse)
+                except json.JSONDecodeError:
+                    continue
+                if text_to_parse[end:].strip():
+                    continue
+                return json.dumps(payload, separators=(",", ":"))
     return None
 
 
@@ -726,6 +766,7 @@ class CodexAdapter(AgentAdapter):
         last_heartbeat_at = dispatch_time
         poll_count = 0
         accumulated_turns_above_baseline = 0
+        last_good_screen = ""  # last screen that had meaningful TUI content
         while monotonic() < idle_deadline:
             poll_count += 1
             sleep(self.idle_poll_seconds)
@@ -768,6 +809,22 @@ class CodexAdapter(AgentAdapter):
             if startup_settled and self._looks_like_shell_returned(screen):
                 if accumulated_turns_above_baseline > 0:
                     break
+                # The scrollback may not have captured turns that the
+                # visible screen showed before the TUI exited.  Check
+                # last_good_screen for a completed turn.
+                if last_good_screen and self._looks_like_completed_turn(
+                    last_good_screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                ):
+                    break
+                # Guard against false positives during CLI startup: the
+                # visible buffer may still show the pre-launch shell
+                # prompt while the CLI is loading.  Use process-based
+                # detection as a tiebreaker — but only when the host
+                # supports it (_get_pane_tty returns a TTY).
+                if host._get_pane_tty(session) is not None and not host.shell_idle(session):
+                    continue
                 raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):
                 # Only dismiss if the screen changed since the last dismiss
@@ -788,6 +845,10 @@ class CodexAdapter(AgentAdapter):
                 tui_active = True
             prev_screen = snap
             prev_tail = tail
+            # Preserve the last screen that has TUI content for extraction,
+            # because the TUI may exit between loop break and read_visible.
+            if _PROMPT_MARKER in screen or _RESPONSE_MARKER in screen:
+                last_good_screen = screen
 
             # Stability gate: only evaluate state after the screen is stable.
             stable_after = max(1, self.idle_after - 1)
@@ -814,6 +875,8 @@ class CodexAdapter(AgentAdapter):
         # Prefer the visible TUI buffer for result extraction because tmux's
         # accumulated scrollback can lag behind repaint-only responses and end
         # up containing transient status lines instead of the final answer.
+        # Also use last_good_screen as a candidate because the TUI may exit
+        # between the loop break and this read_visible call.
         visible_output = _strip_ansi(host.read_visible(session))
         read = host.read_output(session, cursor)
         raw_output = _strip_ansi(read.full_text)
@@ -822,14 +885,32 @@ class CodexAdapter(AgentAdapter):
         session.metadata["restored_cursor"] = read.cursor
         cleaned = _extract_codex_tui_result(
             visible_output,
+            last_good_screen,
             raw_output,
             baseline_last_response=baseline_last_response,
         )
         contract = (claimed.get("job") or {}).get("output_contract_json") or {}
         if isinstance(contract, dict) and contract.get("format", "json") == "json":
-            cleaned = _extract_trailing_json_text(cleaned) or cleaned
+            # Try extracting JSON from the primary result first.
+            json_text = _extract_trailing_json_text(cleaned)
+            if not json_text:
+                # The primary candidate may have lost the JSON (e.g. the
+                # TUI exited between loop break and read_visible, or the
+                # prompt scrolled off).  Try each raw source directly.
+                for source in (visible_output, last_good_screen, raw_output):
+                    if not source:
+                        continue
+                    json_text = _extract_trailing_json_text(_clean_codex_tui_output(source))
+                    if json_text:
+                        break
+                    bullet_text = "\n".join(_collect_bullet_lines(_strip_ansi(source).splitlines()))
+                    json_text = _extract_trailing_json_text(bullet_text)
+                    if json_text:
+                        break
+            cleaned = json_text or cleaned
         transcript_output = _select_codex_tui_transcript(
             visible_output,
+            last_good_screen,
             raw_output,
             baseline_last_response=baseline_last_response,
         )
