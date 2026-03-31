@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 
@@ -111,6 +113,50 @@ def _candidate_control_plane_pids(*, root: Path, pid_file: Path) -> list[int]:
         if proc_root == root:
             candidates.append(pid)
     return candidates
+
+
+def stop_local_control_plane(
+    pid_file: str | Path = DEFAULT_CONTROL_PLANE_PID_FILE,
+    *,
+    root: str | Path | None = None,
+    timeout_seconds: float = 5.0,
+) -> list[int]:
+    """Stop matching local control-plane processes for this worktree.
+
+    Returns the list of PIDs that were signalled. Best effort only: stale pid
+    files are removed and already-exited processes are ignored.
+    """
+    pid_path = Path(pid_file)
+    repo_root = Path(root or Path.cwd()).resolve()
+    pids = _candidate_control_plane_pids(root=repo_root, pid_file=pid_path)
+    if not pids:
+        return []
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            continue
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while time.monotonic() < deadline:
+        remaining = [pid for pid in pids if _pid_exists(pid)]
+        if not remaining:
+            break
+        time.sleep(0.1)
+
+    remaining = [pid for pid in pids if _pid_exists(pid)]
+    for pid in remaining:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+
+    try:
+        pid_path.unlink()
+    except OSError:
+        pass
+    return pids
 
 
 def ensure_local_control_plane_stopped(pid_file: str | Path = DEFAULT_CONTROL_PLANE_PID_FILE, *, root: str | Path | None = None) -> None:

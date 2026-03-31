@@ -98,7 +98,7 @@ install-docker: ## Install Docker Engine + Compose for `make up`
 .PHONY: local-reset local-initdb local-serve local-up local-down local-status
 
 local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
-	@$(RUN) python -c "from agp._local_state import ensure_local_control_plane_stopped; ensure_local_control_plane_stopped()"
+	@$(RUN) python -c "from agp._local_state import stop_local_control_plane; pids = stop_local_control_plane(); print('Stopped local control plane pid(s): ' + ', '.join(str(pid) for pid in pids)) if pids else None"
 	@rm -f agp.db agp.db-wal agp.db-shm
 	@rm -rf .agp-artifacts .agp-logs .agp-checkpoints
 	@echo "Local state cleared."
@@ -305,6 +305,17 @@ ps: ## Show docker compose status
 
 runtime: ## Start a local runtime (agent self-registers with CP)
 	$(call require_provider_env)
+	@echo "Waiting for local control plane readiness..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -fsS --max-time 2 http://127.0.0.1:$(AGP_PORT)/health >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		if [ $$i -eq 10 ]; then \
+			echo "ERROR: Local control plane is not healthy at http://127.0.0.1:$(AGP_PORT). Run make local-up first."; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
 	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
 	$(_PROVIDER_ENV) \
 	AGP_ARTIFACT_BACKEND=http \

@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
+import signal
+import threading
 from collections.abc import AsyncIterator
 
 import httpx  # noqa: F401 — kept at module level so tests can patch `control_plane_module.httpx`
@@ -53,6 +56,25 @@ from agp.services.exceptions import DomainError
 from agp.services._helpers import _load_persisted_auth_settings
 
 
+def _is_fatal_local_sqlite_guard_error(exc: Exception) -> bool:
+    detail = str(exc)
+    return (
+        os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD") == "1"
+        and "configured SQLite database" in detail
+        and "while the control plane is running" in detail
+    )
+
+
+def _schedule_fatal_local_shutdown() -> None:
+    """Terminate the local CP soon after a fatal SQLite guard failure."""
+    def _shutdown() -> None:
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    thread = threading.Timer(0.01, _shutdown)
+    thread.daemon = True
+    thread.start()
+
+
 @contextlib.asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Startup hook: refresh active leases so the sweeper doesn't mass-expire after CP restart."""
@@ -80,6 +102,20 @@ def build_app() -> FastAPI:
             "Agent registration endpoints (/agents/up, /agents/{id}/down, /runtimes/register, /runs/*) "
             "are unauthenticated. Set AGP_RUNTIME_BEARER_TOKEN to secure them."
         )
+
+    @app.middleware("http")
+    async def local_sqlite_guard_middleware(request, call_next):  # type: ignore[override]
+        try:
+            return await call_next(request)
+        except RuntimeError as exc:
+            if not _is_fatal_local_sqlite_guard_error(exc):
+                raise
+            logging.getLogger("agp.control_plane").critical(
+                "Fatal local SQLite state failure detected; terminating control plane: %s",
+                exc,
+            )
+            _schedule_fatal_local_shutdown()
+            raise
 
     app.middleware("http")(auth_middleware)
 

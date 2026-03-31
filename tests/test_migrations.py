@@ -255,7 +255,8 @@ class ServeSchemaValidationTest(unittest.TestCase):
             old_flag = os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD")
             os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = "1"
             try:
-                with unittest.mock.patch("agp.control_plane._load_persisted_auth_settings", return_value=None):
+                with unittest.mock.patch("agp.control_plane._load_persisted_auth_settings", return_value=None), \
+                     unittest.mock.patch("agp.control_plane._schedule_fatal_local_shutdown") as mock_shutdown:
                     client = TestClient(build_app(), raise_server_exceptions=False)
                     response = client.get("/health")
             finally:
@@ -265,3 +266,4 @@ class ServeSchemaValidationTest(unittest.TestCase):
                     os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = old_flag
         self.assertEqual(response.status_code, 500)
         self.assertIn("configured SQLite database file is missing", response.text)
+        mock_shutdown.assert_called_once()

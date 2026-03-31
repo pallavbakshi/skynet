@@ -9,7 +9,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from agp._local_state import _looks_like_control_plane_command, _process_cwd, ensure_local_control_plane_stopped
+from agp._local_state import (
+    _looks_like_control_plane_command,
+    _process_cwd,
+    ensure_local_control_plane_stopped,
+    stop_local_control_plane,
+)
 from agp.config import settings
 from tests._base import _reset_sqlite_database
 
@@ -130,6 +135,25 @@ class LocalControlPlaneGuardTest(unittest.TestCase):
 
             with patch("agp._local_state._candidate_control_plane_pids", return_value=[]):
                 ensure_local_control_plane_stopped(pid_file, root=root)
+
+    def test_stop_local_control_plane_signals_matching_processes_and_clears_pidfile(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pid_file = root / "control-plane.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+            seen: list[tuple[int, int]] = []
+
+            def fake_kill(pid: int, sig: int) -> None:
+                seen.append((pid, sig))
+
+            with patch("agp._local_state._candidate_control_plane_pids", return_value=[12345]), \
+                 patch("agp._local_state._pid_exists", return_value=False), \
+                 patch("agp._local_state.os.kill", side_effect=fake_kill):
+                stopped = stop_local_control_plane(pid_file, root=root, timeout_seconds=0.0)
+
+        self.assertEqual(stopped, [12345])
+        self.assertEqual(seen, [(12345, 15)])
+        self.assertFalse(pid_file.exists())
 
     def test_process_cwd_falls_back_to_lsof_when_proc_unavailable(self) -> None:
         completed = type("Completed", (), {"returncode": 0, "stdout": "p123\nn/tmp/example\n"})()
