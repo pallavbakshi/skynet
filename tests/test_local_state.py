@@ -142,7 +142,7 @@ class LocalControlPlaneGuardTest(unittest.TestCase):
 
         with patch("pathlib.Path.resolve", new=fake_resolve), \
              patch("subprocess.run", return_value=completed):
-            self.assertEqual(_process_cwd(123), Path("/tmp/example"))
+            self.assertEqual(_process_cwd(123), Path("/tmp/example").resolve())
 
     def test_reset_sqlite_database_checks_local_control_plane_before_touching_repo_db(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

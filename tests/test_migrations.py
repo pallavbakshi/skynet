@@ -168,7 +168,7 @@ class MigrationSessionRecoveryTest(unittest.TestCase):
                 resolved = _resolve_migrations_dir(anchor)
             finally:
                 os.chdir(old_cwd)
-            self.assertEqual(resolved, tmp / "migrations")
+            self.assertEqual(resolved, (tmp / "migrations").resolve())
 
 
 class VersionIncompatibilityTest(unittest.TestCase):

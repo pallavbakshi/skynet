@@ -67,6 +67,26 @@ def _cli_idempotency_key(prefix: str) -> str:
 
 
 def _extract_trailing_json_payload(text: str) -> dict | None:
+    def _candidate_attempts(raw: str) -> list[str]:
+        attempts = [
+            raw,
+            "".join(line.strip() for line in raw.splitlines()),
+            " ".join(line.strip() for line in raw.splitlines()),
+        ]
+        stripped = raw.strip()
+        if stripped.startswith("```") and stripped.endswith("```"):
+            fence_end = stripped.find("\n")
+            if fence_end != -1:
+                fenced_body = stripped[fence_end + 1 : -3].strip()
+                attempts.extend(
+                    [
+                        fenced_body,
+                        "".join(line.strip() for line in fenced_body.splitlines()),
+                        " ".join(line.strip() for line in fenced_body.splitlines()),
+                    ]
+                )
+        return attempts
+
     stripped = text.strip()
     if not stripped:
         return None
@@ -75,12 +95,10 @@ def _extract_trailing_json_payload(text: str) -> dict | None:
         if stripped[idx] not in "[{":
             continue
         suffix = stripped[idx:]
-        attempts = [
-            suffix,
-            "".join(line.strip() for line in suffix.splitlines()),
-            " ".join(line.strip() for line in suffix.splitlines()),
-        ]
-        for attempt in attempts:
+        fence_start = stripped.rfind("```", 0, idx)
+        if fence_start != -1 and stripped.find("\n", fence_start, idx) != -1:
+            suffix = stripped[fence_start:]
+        for attempt in _candidate_attempts(suffix):
             try:
                 payload, end = decoder.raw_decode(attempt)
             except json.JSONDecodeError:
@@ -340,6 +358,30 @@ def _make_client(server_url: str | None = None):
     if server_url:
         profile.server_url = server_url
     return AgpClient(profile=profile)
+
+
+def _cli_client(server_url: str | None = None):
+    """_make_client wrapper that converts transport errors to friendly messages.
+
+    Use this in user-facing CLI commands so that connection-refused /
+    DNS-failure / timeout errors produce a one-line message instead of a
+    raw Python traceback.  Commands with their own retry logic (e.g. ``up``)
+    should continue using ``_make_client`` directly.
+    """
+    from contextlib import contextmanager
+
+    import httpx as _httpx
+
+    @contextmanager
+    def _ctx():
+        try:
+            with _make_client(server_url) as client:
+                yield client
+        except _httpx.TransportError as exc:
+            typer.echo(f"connection error: control plane unreachable ({exc})", err=True)
+            raise typer.Exit(1)
+
+    return _ctx()
 
 
 def _parse_attachment_option(value: str) -> tuple[Path, str]:
@@ -663,7 +705,7 @@ def down(
     """
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         typer.echo(f"[..] Locating agent {agent_id}...")
 
         try:
@@ -752,7 +794,7 @@ def interrupt(
     """
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         # Detect target type: try agent first, fall back to job
         is_agent = True
         try:
@@ -925,7 +967,7 @@ def send(
 
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         typer.echo(f"[..] Dispatching to {agent_id}...")
         try:
             result = client.send(
@@ -991,7 +1033,7 @@ def reply(
 
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             source_job = client.get_job(job_id)
         except _httpx.HTTPStatusError as exc:
@@ -1095,7 +1137,7 @@ def review_cmd(
     import time
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             source_job = client.get_job(job_id)
         except _httpx.HTTPStatusError as exc:
@@ -1285,7 +1327,7 @@ def wait_cmd(
     """Re-attach to a running job and wait for its result."""
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         # Quick check — maybe it already finished
         try:
             job = client.get_job(job_id)
@@ -1388,7 +1430,7 @@ def _status_health(server_url: str | None) -> None:
 def _status_job(job_id: str, server_url: str | None) -> None:
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             job = client.get_job(job_id)
         except _httpx.HTTPStatusError as exc:
@@ -1443,7 +1485,7 @@ def jobs(
     """List recent jobs."""
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             data = client.list_jobs(
                 limit=limit,
@@ -1487,7 +1529,7 @@ def ls(
     from datetime import datetime, timezone
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             agents_data = client.list_agents()
         except _httpx.HTTPStatusError as exc:
@@ -1647,7 +1689,7 @@ def info(
     from datetime import datetime, timezone
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         # Try agent first, fall back to capability
         agent = None
         try:
@@ -1784,7 +1826,7 @@ def nudge(
 
     import httpx as _httpx
 
-    with _make_client(server_url) as client:
+    with _cli_client(server_url) as client:
         try:
             result = client.create_nudge(target, payload, priority=priority, source=source)
         except _httpx.HTTPStatusError as exc:

@@ -114,6 +114,7 @@ local-initdb: ## Init local SQLite database
 local-serve: export AGP_DATABASE_URL=sqlite+pysqlite:///$(ROOT)/agp.db
 local-serve: export AGP_QUEUE_BACKEND=delivery_table
 local-serve: export AGP_ARTIFACT_BACKEND=localfs
+local-serve: export AGP_ENFORCE_SQLITE_RUNTIME_GUARD=1
 local-serve: ## Start local CP + sweepers (SQLite, no infra)
 	@mkdir -p $(PID_DIR) .agp-logs .agp-artifacts .agp-checkpoints
 	@if lsof -nP -iTCP:$(AGP_PORT) -sTCP:LISTEN >/dev/null 2>&1; then \
@@ -123,13 +124,19 @@ local-serve: ## Start local CP + sweepers (SQLite, no infra)
 	fi
 	@echo "Starting local control plane on :$(AGP_PORT)..."
 	@$(RUN) agp serve > .agp-logs/control-plane.out 2>&1 & echo $$! > $(PID_DIR)/control-plane.pid
-	@sleep 2
-	@if ! curl -fsS http://127.0.0.1:$(AGP_PORT)/health >/dev/null 2>&1; then \
-		echo "ERROR: Control plane failed to start. Check .agp-logs/control-plane.out"; \
-		test -f $(PID_DIR)/control-plane.pid && kill "$$(cat $(PID_DIR)/control-plane.pid)" 2>/dev/null || true; \
-		rm -f $(PID_DIR)/control-plane.pid; \
-		exit 1; \
-	fi
+	@echo "Waiting for health check..."
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if curl -fsS --max-time 2 http://127.0.0.1:$(AGP_PORT)/health >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		if [ $$i -eq 10 ]; then \
+			echo "ERROR: Control plane failed to start within 10s. Check .agp-logs/control-plane.out"; \
+			test -f $(PID_DIR)/control-plane.pid && kill "$$(cat $(PID_DIR)/control-plane.pid)" 2>/dev/null || true; \
+			rm -f $(PID_DIR)/control-plane.pid; \
+			exit 1; \
+		fi; \
+		sleep 1; \
+	done
 	@echo "Starting sweepers..."
 	@$(RUN) agp sweep-loop --interval-seconds 5 > .agp-logs/lease-sweeper.out 2>&1 & echo $$! > $(PID_DIR)/lease-sweeper.pid
 	@$(RUN) agp sweep-runtimes-loop --interval-seconds 10 > .agp-logs/runtime-sweeper.out 2>&1 & echo $$! > $(PID_DIR)/runtime-sweeper.pid
@@ -159,10 +166,10 @@ local-status: ## Show local stack health and registered agents
 	if [ $$found -eq 0 ]; then echo "(none running)"; fi
 	@echo ""
 	@echo "=== Health ==="
-	@curl -s http://127.0.0.1:$(AGP_PORT)/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Local CP not reachable"
+	@curl -s --max-time 5 http://127.0.0.1:$(AGP_PORT)/health 2>/dev/null | python3 -m json.tool 2>/dev/null || echo "Local CP not reachable"
 	@echo ""
 	@echo "=== Agents ==="
-	@curl -s http://127.0.0.1:$(AGP_PORT)/agents 2>/dev/null | python3 -c \
+	@curl -s --max-time 5 http://127.0.0.1:$(AGP_PORT)/agents 2>/dev/null | python3 -c \
 		"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
 		[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
 		or print('  (none registered)')" 2>/dev/null || echo "  CP not reachable"
@@ -232,13 +239,13 @@ status: ## Show running services, health, and agents
 	@_local=http://127.0.0.1:$(AGP_PORT); \
 	_remote=$(AGP_REMOTE_SERVER_URL); \
 	_url=""; _loc=""; \
-	if curl -sf "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; _loc="LOCAL"; \
-	elif curl -sf "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; _loc="REMOTE"; fi; \
+	if curl -sf --max-time 5 "$$_local/ops/health" >/dev/null 2>&1; then _url="$$_local"; _loc="LOCAL"; \
+	elif curl -sf --max-time 5 "$$_remote/ops/health" >/dev/null 2>&1; then _url="$$_remote"; _loc="REMOTE"; fi; \
 	\
 	echo "=== Control Plane ==="; \
 	if [ -n "$$_url" ]; then \
 		echo "  location : $$_loc — $$_url"; \
-		curl -s "$$_url/ops/health" | python3 -c \
+		curl -s --max-time 5 "$$_url/ops/health" | python3 -c \
 			"import sys,json; d=json.load(sys.stdin)['data']; \
 			a=d['agents']; j=d['jobs']; \
 			print(f'  agents   : idle={a[\"idle\"]}  busy={a[\"busy\"]}  draining={a[\"draining\"]}'); \
@@ -271,7 +278,7 @@ status: ## Show running services, health, and agents
 	echo ""; \
 	echo "=== Registered Agents ==="; \
 	if [ -n "$$_url" ]; then \
-		curl -s "$$_url/agents" | python3 -c \
+		curl -s --max-time 5 "$$_url/agents" | python3 -c \
 			"import sys,json; d=json.load(sys.stdin); items=d.get('data',{}).get('items',[]); \
 			[print(f'  {a[\"agent_id\"]:<20s} {str(\",\".join(a.get(\"capabilities\",[]))):<20s} {a[\"status\"]}') for a in items] \
 			or print('  (none registered)')"; \
@@ -385,10 +392,10 @@ runtime-clean: ## Tear down ALL agents on the CP + kill local processes and sess
 	@echo "Tearing down all agents registered with CP..."
 	@_url=""; \
 	for u in http://127.0.0.1:$(AGP_PORT) $(AGP_REMOTE_SERVER_URL); do \
-		if curl -sf "$$u/ops/health" >/dev/null 2>&1; then _url="$$u"; break; fi; \
+		if curl -sf --max-time 5 "$$u/ops/health" >/dev/null 2>&1; then _url="$$u"; break; fi; \
 	done; \
 	if [ -n "$$_url" ]; then \
-		for agent_id in $$(curl -s "$$_url/agents" | python3 -c "import sys,json; [print(a['agent_id']) for a in json.load(sys.stdin).get('data',{}).get('items',[])]" 2>/dev/null); do \
+		for agent_id in $$(curl -s --max-time 5 "$$_url/agents" | python3 -c "import sys,json; [print(a['agent_id']) for a in json.load(sys.stdin).get('data',{}).get('items',[])]" 2>/dev/null); do \
 			echo "  agp down --force $$agent_id"; \
 			$(RUN) agp down "$$agent_id" --force --server-url "$$_url" 2>/dev/null || true; \
 		done; \
