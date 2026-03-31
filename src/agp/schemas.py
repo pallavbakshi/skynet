@@ -2,7 +2,7 @@
 
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agp.db import current_release_version
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
@@ -77,6 +77,13 @@ class AgentUpRequest(BaseModel):
     capabilities: list[str] | None = None
     metadata: dict[str, Any] | None = None
     workspace_ref: str | None = None
+
+    @field_validator("capabilities", mode="before")
+    @classmethod
+    def _strip_control_chars(cls, v: list[str] | None) -> list[str] | None:
+        if v is None:
+            return v
+        return ["".join(ch for ch in s if ch.isprintable()) if isinstance(s, str) else s for s in v]
 
 
 class AgentPatchRequest(BaseModel):

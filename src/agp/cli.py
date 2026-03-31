@@ -228,7 +228,11 @@ def runtime_work_loop(
 
     actual_hostname = hostname or _socket.gethostname()
     runtime_token = os.environ.get("AGP_RUNTIME_BEARER_TOKEN") or None
-    resolved_capabilities = [c.strip() for c in capabilities.split(",") if c.strip()] if capabilities else None
+    resolved_capabilities = [
+        "".join(ch for ch in c.strip() if ch.isprintable())
+        for c in capabilities.split(",")
+        if c.strip()
+    ] if capabilities else None
     payload: list[dict] = []
     restart_attempt = 0
 
