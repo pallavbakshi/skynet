@@ -70,7 +70,7 @@ def _schedule_fatal_local_shutdown() -> None:
     def _shutdown() -> None:
         os.kill(os.getpid(), signal.SIGTERM)
 
-    thread = threading.Timer(0.01, _shutdown)
+    thread = threading.Timer(1.0, _shutdown)
     thread.daemon = True
     thread.start()
 
