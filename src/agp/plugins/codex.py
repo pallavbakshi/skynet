@@ -566,6 +566,16 @@ class CodexAdapter(AgentAdapter):
         return any(ln.strip().startswith("Working (") for ln in text.splitlines())
 
     @staticmethod
+    def _visible_ends_with_prompt(text: str) -> bool:
+        """Return True when the last meaningful line on screen is a prompt marker."""
+        for raw in reversed(_strip_ansi(text).splitlines()):
+            s = raw.strip()
+            if not s or _is_noise_line(raw):
+                continue
+            return s.startswith(_PROMPT_MARKER)
+        return False
+
+    @staticmethod
     def _screen_tail(text: str, n: int = 10) -> str:
         """Return the last N non-empty lines of the visible screen."""
         lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
@@ -786,8 +796,6 @@ class CodexAdapter(AgentAdapter):
             tail = self._screen_tail(screen)
             changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
             now = monotonic()
-            if changed:
-                idle_deadline = now + timeout
             last_heartbeat_at = self._maybe_emit_progress_heartbeat(
                 supervisor=supervisor,
                 claimed=claimed,
@@ -846,6 +854,10 @@ class CodexAdapter(AgentAdapter):
             else:
                 unchanged = 0
                 tui_active = True
+                # Only extend idle deadline on actual content progress
+                # (tail changes), not on full-screen diffs from TUI
+                # repaints that shift absolute scrollback lines.
+                idle_deadline = now + timeout
             prev_screen = snap
             prev_tail = tail
             # Preserve the last screen that has TUI content for extraction,
@@ -869,6 +881,14 @@ class CodexAdapter(AgentAdapter):
                 baseline_answered_turns=len(baseline_turns),
                 baseline_last_response=baseline_last_response,
             ):
+                break
+            # Fallback: when the response is long enough to scroll the
+            # • markers off the visible screen, _looks_like_completed_turn
+            # fails because _parse_codex_turns finds no turns.  Use the
+            # scrollback-based turn count instead: if the full accumulated
+            # output has new answered turns and the visible screen ends
+            # with a prompt marker, treat as completed.
+            if accumulated_turns_above_baseline > 0 and self._visible_ends_with_prompt(screen):
                 break
         else:
             if not prev_screen.strip():

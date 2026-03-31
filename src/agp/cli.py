@@ -1149,6 +1149,13 @@ def review_cmd(
         )
         source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
         dev_agent = dev_id or source_agent
+        if not dev_id and dev_agent == reviewer_id:
+            typer.echo(
+                "[review] Error: source job's agent is the reviewer itself. "
+                "Use --dev to specify which agent should apply fixes.",
+                err=True,
+            )
+            raise typer.Exit(1)
         conversation_id = source_job.get("conversation_id")
         review_attempt_id = uuid.uuid4().hex[:12]
 
