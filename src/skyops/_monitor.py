@@ -87,7 +87,7 @@ def metrics(
             result = client.observability_metrics()
             typer.echo(result)
         else:
-            result = client.observability_summary()
+            result = client.ops_health()
             _emit(result)
 
 

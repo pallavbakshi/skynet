@@ -806,7 +806,7 @@ class TestStatus(unittest.TestCase):
         cfg = SkyopsConfig()
         cfg.stack.mode = "bare-metal"
         mock_client = _mock_agp_client(
-            observability_summary={
+            ops_health={
                 "jobs": {
                     "queued": 1,
                     "running": 2,
@@ -1150,7 +1150,7 @@ class TestMonitorMetrics(unittest.TestCase):
     def test_metrics_summary(self):
         import tempfile
 
-        mock_client = _mock_agp_client(observability_summary={"total_jobs": 10})
+        mock_client = _mock_agp_client(ops_health={"total_jobs": 10})
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")

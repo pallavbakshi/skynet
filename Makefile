@@ -434,7 +434,7 @@ runtime-deploy: ## Generate deploy script for a remote runtime
 .PHONY: test lint
 
 test: ## Run test suite
-	$(RUN) python -m pytest tests/ -x -q
+	$(RUN) python -m pytest tests/ -x -q --tb=short
 
 lint: ## Run linter
 	$(RUN) python -m ruff check src/ tests/

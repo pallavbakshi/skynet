@@ -11,7 +11,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-_TEST_DB_PATH = Path(tempfile.gettempdir()) / "agp-pytest.db"
+_TEST_DB_PATH = Path(tempfile.gettempdir()) / f"agp-pytest-{os.getpid()}.db"
 os.environ["AGP_DATABASE_URL"] = f"sqlite+pysqlite:///{_TEST_DB_PATH}"
 
 sys.path.insert(0, os.path.dirname(__file__))

@@ -2,6 +2,7 @@
 
 import os
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 
 from collections.abc import Generator
@@ -15,6 +16,9 @@ from agp.config import settings
 
 class Base(DeclarativeBase):
     """Base class for ORM models."""
+
+
+sqlite3.register_adapter(datetime, lambda value: value.isoformat(sep=" "))
 
 
 engine_kwargs: dict[str, object] = {"future": True}

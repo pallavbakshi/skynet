@@ -575,6 +575,9 @@ class CodexAdapter(AgentAdapter):
     def _idle_timeout_window(self) -> float:
         if self.idle_timeout_seconds > 0:
             return self.idle_timeout_seconds
+        if self.idle_timeout_polls > 0:
+            poll_seconds = self.idle_poll_seconds if self.tui_mode else self.poll_interval_seconds
+            return max(0.0, self.idle_timeout_polls * poll_seconds)
         # Keep a legacy fallback when the explicit idle timeout is unset so
         # older configs still terminate, but all execution loops consume the
         # resolved window as a single timeout budget.

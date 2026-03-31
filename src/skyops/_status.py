@@ -166,7 +166,7 @@ def _platform_summary(cfg: SkyopsConfig) -> list[str]:
         from skyops._client import build_client
 
         with build_client(cfg) as client:
-            summary = client.observability_summary()
+            summary = client.ops_health()
             job_counts = summary.get("jobs", {}) or {}
             total = sum(int(value or 0) for value in job_counts.values())
             running = int(job_counts.get("running", 0) or 0)

@@ -63,7 +63,7 @@ def health(ctx: typer.Context) -> None:
             from skyops._client import build_client
 
             with build_client(cfg) as client:
-                summary = client.observability_summary()
+                summary = client.ops_health()
                 jobs_total = summary.get("total_jobs", "?")
                 agents_active = summary.get("active_agents", "?")
                 checks.append(("  api", True, f"jobs={jobs_total} agents={agents_active}"))

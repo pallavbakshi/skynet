@@ -2243,7 +2243,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             headers={"Idempotency-Key": "obs-inline-1"},
         )
 
-        summary = self.agp.observability_summary()
+        summary = self.agp.ops_health()
         self.assertGreaterEqual(summary["jobs"]["queued"], 1)
         self.assertGreaterEqual(summary["jobs"]["completed"], 1)
         self.assertGreaterEqual(summary["agents"]["idle"], 1)
