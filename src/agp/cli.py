@@ -128,6 +128,69 @@ def _review_fix_attachment_note(*, attachment_name: str, short_output_guidance: 
     )
 
 
+def _capture_git_diff() -> tuple[str | None, str | None]:
+    """Best-effort capture of ``git diff HEAD`` (staged + unstaged) and stat.
+
+    Also lists untracked files via ``git ls-files --others --exclude-standard``.
+    Returns ``(stat, diff)`` where either or both may be ``None`` if the
+    command fails or we are not inside a git repo.  Never raises.
+    """
+    import shutil
+    import subprocess
+
+    if not shutil.which("git"):
+        return None, None
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+    except Exception:
+        return None, None
+
+    stat_parts: list[str] = []
+    diff_parts: list[str] = []
+
+    # Staged + unstaged changes vs HEAD
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD", "--stat"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        stat_output = result.stdout.strip()
+        if stat_output:
+            stat_parts.append(stat_output)
+    except Exception:
+        pass
+    try:
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            capture_output=True, text=True, timeout=30, check=True,
+        )
+        diff_output = result.stdout.strip()
+        if diff_output:
+            diff_parts.append(diff_output)
+    except Exception:
+        pass
+
+    # Untracked files
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            capture_output=True, text=True, timeout=10, check=True,
+        )
+        untracked = result.stdout.strip()
+        if untracked:
+            stat_parts.append(f"\nUntracked files:\n{untracked}")
+            diff_parts.append(f"Untracked files:\n{untracked}")
+    except Exception:
+        pass
+
+    stat_final = "\n".join(stat_parts).strip() or None
+    diff_final = "\n".join(diff_parts).strip() or None
+    return stat_final, diff_final
+
+
 @app.command(hidden=True)
 def initdb() -> None:
     """Initialize or migrate the database schema."""
@@ -1015,7 +1078,7 @@ def send(
 @app.command()
 def reply(
     job_id: str = typer.Argument(..., help="Source job ID to reply to."),
-    task: str = typer.Argument(..., help="Reply text to send."),
+    task: str | None = typer.Argument(None, help="Reply text to send; if omitted, read from stdin."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
     timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
@@ -1034,6 +1097,10 @@ def reply(
             raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
         if not isinstance(parsed_output_contract, dict):
             raise typer.BadParameter("--output-contract must decode to a JSON object")
+    if task is None:
+        task = sys.stdin.read().strip()
+    if not task:
+        raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
 
     import httpx as _httpx
 
@@ -1125,12 +1192,14 @@ def review_cmd(
     dev_id: str = typer.Option(None, "--dev", help="Agent ID of the developer (defaults to the source job's agent)."),
     prompt: str = typer.Option(
         "Review the following output for correctness, edge cases, and security. "
+        "If a git diff is attached, cross-reference the developer's claims against the actual code changes. "
         "Respond with a JSON object: {\"verdict\": \"approved\" or \"changes_requested\", \"summary\": \"...\", \"findings\": [{\"severity\": \"high|medium|low\", \"description\": \"...\"}]}. "
         "Also write findings to /tmp/review-findings.md for reference.",
         "--prompt", help="Review prompt template.",
     ),
     server_url: str = typer.Option(None, help="CP URL."),
     timeout_per_round: int = typer.Option(120, "--timeout", help="Seconds to wait per round."),
+    attach_diff: bool = typer.Option(False, "--diff/--no-diff", help="Attach local git diff alongside the source artifact (best-effort, opt-in)."),
 ) -> None:
     """Run an automated review loop: reviewer reviews, dev fixes, reviewer re-reviews.
 
@@ -1186,6 +1255,14 @@ def review_cmd(
                             )
                     except Exception:
                         review_text = f"{prompt}\n\n(Could not fetch source job artifact.)"
+                # Best-effort: attach git diff alongside source output
+                if attach_diff:
+                    _stat, _diff = _capture_git_diff()
+                    if _stat:
+                        review_attachments.append({"name": f"agp-review-{job_id}-diff-stat.txt", "role": "diff-summary", "content": _stat})
+                    if _diff:
+                        review_attachments.append({"name": f"agp-review-{job_id}-diff.txt", "role": "diff-full", "content": _diff})
+                        review_text += f"\n\nThe full git diff is attached as agp-review-{job_id}-diff.txt. Cross-reference the developer's claims against the actual code changes."
             else:
                 # Subsequent rounds: send dev's fixes to reviewer
                 fix_artifact_id = source_job.get("result_artifact_id")

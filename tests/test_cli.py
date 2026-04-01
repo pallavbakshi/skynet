@@ -6,13 +6,19 @@ import json
 import unittest
 from unittest.mock import MagicMock, patch
 
+from typer.testing import CliRunner
+
 from agp.cli import (
+    _capture_git_diff,
     _cli_client,
     _cli_idempotency_key,
     _extract_trailing_json_payload,
     _review_attachment_note,
     _review_fix_attachment_note,
+    app,
 )
+
+runner = CliRunner()
 
 
 class CliHelpersTest(unittest.TestCase):
@@ -123,3 +129,128 @@ class CliClientTransportErrorTest(unittest.TestCase):
         with self.assertRaises(httpx.HTTPStatusError):
             with _cli_client("http://localhost:9999") as client:
                 client.get_job("job_123")
+
+
+class ReplyCommandTest(unittest.TestCase):
+    @patch("agp.cli._make_client")
+    def test_reply_accepts_task_from_stdin_when_argument_omitted(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(app, ["reply", "job_src", "--detach"], input="follow-up from stdin\n")
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[:3], ("agent", "agt_reply", "follow-up from stdin"))
+
+    @patch("agp.cli._make_client")
+    @patch("agp.cli.sys.stdin.read", side_effect=AssertionError("stdin should not be read"))
+    def test_reply_validates_output_contract_before_reading_stdin(
+        self,
+        _mock_stdin_read: MagicMock,
+        mock_make: MagicMock,
+    ) -> None:
+        result = runner.invoke(app, ["reply", "job_src", "--detach", "--output-contract", "{"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("invalid JSON for --output-contract", result.output)
+        mock_make.assert_not_called()
+
+    @patch("agp.cli._make_client")
+    def test_reply_rejects_empty_stdin_when_argument_omitted(self, mock_make: MagicMock) -> None:
+        result = runner.invoke(app, ["reply", "job_src", "--detach"], input="\n")
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("task is required", result.output)
+        mock_make.assert_not_called()
+
+
+class CaptureGitDiffTest(unittest.TestCase):
+    """Verify _capture_git_diff handles missing git and real repos gracefully."""
+
+    @patch("shutil.which", return_value=None)
+    def test_returns_none_when_git_binary_missing(self, _mock_which: MagicMock) -> None:
+        stat, diff = _capture_git_diff()
+        self.assertIsNone(stat)
+        self.assertIsNone(diff)
+
+    @patch("subprocess.run", side_effect=Exception("no git"))
+    def test_returns_none_when_rev_parse_fails(self, _mock_run: MagicMock) -> None:
+        stat, diff = _capture_git_diff()
+        self.assertIsNone(stat)
+        self.assertIsNone(diff)
+
+    @patch("shutil.which", return_value="git")
+    def test_returns_stat_and_diff_in_git_repo(self, mock_which: MagicMock) -> None:
+        from unittest.mock import MagicMock as _Mag
+
+        def fake_run(cmd: list[str], **kwargs):
+            result = _Mag()
+            result.returncode = 0
+            if "rev-parse" in cmd:
+                result.stdout = "true\n"
+                result.check_returncode = lambda: None
+            elif "--stat" in cmd:
+                result.stdout = " file.py | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+            elif "diff" in cmd and "HEAD" in cmd:
+                result.stdout = "diff --git a/file.py b/file.py\n--- a/file.py\n+++ b/file.py\n@@ -1,1 +1,1 @@\n-old\n+new\n"
+            elif "ls-files" in cmd:
+                result.stdout = ""
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            stat, diff = _capture_git_diff()
+        self.assertIn("file.py", stat)
+        self.assertIn("diff --git", diff)
+        self.assertNotIn("Untracked", diff)
+
+    @patch("shutil.which", return_value="git")
+    def test_returns_none_when_diff_is_empty(self, mock_which: MagicMock) -> None:
+        from unittest.mock import MagicMock as _Mag
+
+        def fake_run(cmd: list[str], **kwargs):
+            result = _Mag()
+            result.returncode = 0
+            if "rev-parse" in cmd:
+                result.stdout = "true\n"
+            else:
+                result.stdout = ""
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            stat, diff = _capture_git_diff()
+        self.assertIsNone(stat)
+        self.assertIsNone(diff)
+
+    @patch("shutil.which", return_value="git")
+    def test_includes_untracked_files(self, mock_which: MagicMock) -> None:
+        from unittest.mock import MagicMock as _Mag
+
+        def fake_run(cmd: list[str], **kwargs):
+            result = _Mag()
+            result.returncode = 0
+            if "rev-parse" in cmd:
+                result.stdout = "true\n"
+            elif "ls-files" in cmd:
+                result.stdout = "new_file.py\n"
+            elif "--stat" in cmd:
+                result.stdout = ""
+            elif "diff" in cmd and "HEAD" in cmd:
+                result.stdout = ""
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            stat, diff = _capture_git_diff()
+        self.assertIn("new_file.py", stat)
+        self.assertIn("Untracked", diff)

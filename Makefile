@@ -48,6 +48,7 @@ AGP_REMOTE_SERVER_URL  ?= http://your-server.example.com:7860
 AGP_RUNTIME_ID         ?= rtm_local
 AGP_RUNTIME_AGENT_ID   ?= agt_local
 AGP_RUNTIME_CAPS       ?= code,python
+ADAPTER_KIND            ?= codex
 
 # Provider auto-detection: prefer OPENAI_API_KEY, fall back to OPENROUTER_API_KEY
 _RUNTIME_API_KEY       := $(or $(OPENAI_API_KEY),$(OPENROUTER_API_KEY))
@@ -301,7 +302,7 @@ ps: ## Show docker compose status
 
 # ── Runtime targets ──────────────────────────────────────────────────
 
-.PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm runtime-clean runtime-deploy
+.PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm runtime-clean runtime-deploy codex-dev codex-reviewer claude-dev claude-reviewer
 
 runtime: ## Start a local runtime (agent self-registers with CP)
 	$(call require_provider_env)
@@ -329,9 +330,23 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 	$(RUN) agp runtime-work-loop $(AGP_RUNTIME_ID) \
 		--server-url http://127.0.0.1:$(AGP_PORT) \
 		--host-kind tmux \
-		--adapter-kind codex \
+		--adapter-kind $(ADAPTER_KIND) \
 		--agent-id $(AGP_RUNTIME_AGENT_ID) \
 		--capabilities $(AGP_RUNTIME_CAPS)
+
+# ── Convenience runtime targets ──────────────────────────────────────
+
+codex-dev: ## Start codex-dev agent (code,python capabilities)
+	$(MAKE) runtime AGP_RUNTIME_ID=rtm-codex-dev AGP_RUNTIME_AGENT_ID=codex-dev AGP_RUNTIME_CAPS=code,python
+
+codex-reviewer: ## Start codex-reviewer agent (review capability)
+	$(MAKE) runtime AGP_RUNTIME_ID=rtm-codex-reviewer AGP_RUNTIME_AGENT_ID=codex-reviewer AGP_RUNTIME_CAPS=review
+
+claude-dev: ## Start claude-dev agent (code,python capabilities)
+	$(MAKE) runtime AGP_RUNTIME_ID=rtm-claude-dev AGP_RUNTIME_AGENT_ID=claude-dev AGP_RUNTIME_CAPS=code,python ADAPTER_KIND=claude_code
+
+claude-reviewer: ## Start claude-reviewer agent (review capability)
+	$(MAKE) runtime AGP_RUNTIME_ID=rtm-claude-reviewer AGP_RUNTIME_AGENT_ID=claude-reviewer AGP_RUNTIME_CAPS=review ADAPTER_KIND=claude_code
 
 runtime-remote: ## Start a runtime connecting to remote CP
 	$(call require_provider_env)
