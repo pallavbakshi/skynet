@@ -562,21 +562,30 @@ class CodexAdapter(AgentAdapter):
 
     @staticmethod
     def _looks_like_working(text: str) -> bool:
-        """Return True when Codex shows an active Working indicator."""
-        for line in text.splitlines():
+        """Return True when Codex shows an active Working indicator.
+
+        Only scans the BOTTOM of the screen (last ~5 meaningful lines) to avoid
+        false positives from response content that quotes working indicators.
+        """
+        # Collect the last few meaningful lines from the bottom of the screen.
+        # Working indicators always appear at or near the bottom — scanning
+        # the full screen would match quoted code in response content.
+        meaningful: list[str] = []
+        for line in reversed(text.splitlines()):
             s = line.strip()
             if not s:
                 continue
-            # "Working (3s • esc to interrupt)" is the genuine active-work
-            # indicator — check it before the noise-skip guard (it IS in
-            # _NOISE_PREFIXES for stability purposes, but here we want it).
-            if s.startswith("Working ("):
-                return True
-            # Skip other noise/status lines so that stale "esc to interrupt"
-            # text in transient status lines does not falsely report the
-            # agent as still working.
             if _is_noise_line(line):
                 continue
+            meaningful.append(s)
+            if len(meaningful) >= 5:
+                break
+
+        for s in meaningful:
+            # "Working (3s • esc to interrupt)" is the genuine active-work
+            # indicator.
+            if s.startswith("Working ("):
+                return True
             if "esc to interrupt" in s.lower():
                 return True
         return False
@@ -1240,6 +1249,23 @@ class CodexAdapter(AgentAdapter):
         error: Exception,
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
+        if isinstance(error, StableButIndeterminate):
+            screen = error.screen or _strip_ansi(host.read_visible(session))
+            cleaned = _clean_codex_tui_output(error.last_good_screen or screen)
+            return ExecutionResult(
+                artifacts=[
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
+                    ArtifactPayload(role="result", name="result.txt", content=cleaned),
+                    ArtifactPayload(role="failure_evidence", name="screen.txt", content=screen),
+                    ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
+                ],
+                summary={
+                    "adapter": self.kind,
+                    "host": host.kind,
+                    "exception_type": "StableButIndeterminate",
+                    "indeterminate": True,
+                },
+            )
         if isinstance(error, AdapterExecutionFailed):
             return ExecutionResult(
                 artifacts=[
