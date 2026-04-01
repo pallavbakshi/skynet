@@ -168,14 +168,12 @@ class LocalControlPlaneGuardTest(unittest.TestCase):
              patch("subprocess.run", return_value=completed):
             self.assertEqual(_process_cwd(123), Path("/tmp/example").resolve())
 
-    def test_reset_sqlite_database_checks_local_control_plane_before_touching_repo_db(self) -> None:
+    def test_reset_sqlite_database_refuses_to_delete_repo_db(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         original_database_url = settings.database_url
         settings.database_url = f"sqlite+pysqlite:///{repo_root / 'agp.db'}"
         try:
-            with patch("tests._base.ensure_local_control_plane_stopped") as mock_guard:
+            with self.assertRaises(RuntimeError, msg="refusing to delete the repo-local agp.db"):
                 _reset_sqlite_database()
         finally:
             settings.database_url = original_database_url
-
-        mock_guard.assert_called_once_with(repo_root / ".skyops-pids" / "control-plane.pid", root=repo_root)

@@ -65,6 +65,27 @@ def _is_fatal_local_sqlite_guard_error(exc: Exception) -> bool:
     )
 
 
+CRASH_BREADCRUMB_FILE = ".agp-crash"
+
+
+def _write_crash_breadcrumb(reason: str) -> None:
+    """Write a crash breadcrumb file that survives the restart."""
+    import json
+    from datetime import datetime, timezone
+
+    try:
+        breadcrumb = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "pid": os.getpid(),
+            "reason": reason,
+        }
+        with open(CRASH_BREADCRUMB_FILE, "w") as f:
+            json.dump(breadcrumb, f, indent=2)
+            f.write("\n")
+    except Exception:
+        pass  # best-effort
+
+
 def _schedule_fatal_local_shutdown() -> None:
     """Terminate the local CP soon after a fatal SQLite guard failure."""
     def _shutdown() -> None:
@@ -110,12 +131,25 @@ def build_app() -> FastAPI:
         except RuntimeError as exc:
             if not _is_fatal_local_sqlite_guard_error(exc):
                 raise
+            detail = str(exc)
             logging.getLogger("agp.control_plane").critical(
                 "Fatal local SQLite state failure detected; terminating control plane: %s",
                 exc,
             )
+            _write_crash_breadcrumb(detail)
             _schedule_fatal_local_shutdown()
-            raise
+            from fastapi.responses import JSONResponse
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "code": "database_unavailable",
+                        "message": detail,
+                        "retryable": False,
+                        "hint": "Run `make local-restart` to recover state, or `make local-up` for a clean start.",
+                    }
+                },
+            )
 
     app.middleware("http")(auth_middleware)
 

@@ -538,14 +538,9 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         backup_dir = Path(mkdtemp(prefix="agp-backup-"))
         create_backup_snapshot(backup_dir=backup_dir)
 
+        from tests._base import _reset_sqlite_database
         engine.dispose()
-        db_path = Path(settings.database_url.removeprefix("sqlite+pysqlite:///"))
-        if db_path.exists():
-            db_path.unlink()
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{db_path}{suffix}")
-            if sidecar.exists():
-                sidecar.unlink()
+        _reset_sqlite_database()
         if settings.artifact_root.exists():
             shutil.rmtree(settings.artifact_root)
         init_db()
@@ -668,14 +663,9 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         backup_dir = Path(mkdtemp(prefix="agp-backup-recover-"))
         create_backup_snapshot(backup_dir=backup_dir)
 
+        from tests._base import _reset_sqlite_database
         engine.dispose()
-        db_path = Path(settings.database_url.removeprefix("sqlite+pysqlite:///"))
-        if db_path.exists():
-            db_path.unlink()
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(f"{db_path}{suffix}")
-            if sidecar.exists():
-                sidecar.unlink()
+        _reset_sqlite_database()
         if settings.artifact_root.exists():
             shutil.rmtree(settings.artifact_root)
         init_db()

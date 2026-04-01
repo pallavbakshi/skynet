@@ -550,6 +550,27 @@ def _make_client(server_url: str | None = None):
     return AgpClient(profile=profile)
 
 
+def _show_crash_breadcrumb() -> None:
+    """If a crash breadcrumb file exists, display it and offer recovery hints."""
+    import json
+    breadcrumb_path = Path(".agp-crash")
+    if not breadcrumb_path.exists():
+        return
+    try:
+        data = json.loads(breadcrumb_path.read_text())
+        ts = data.get("timestamp", "?")
+        reason = data.get("reason", "unknown")
+        typer.echo("", err=True)
+        typer.echo("--- LAST CRASH ---", err=True)
+        typer.echo(f"  When:   {ts}", err=True)
+        typer.echo(f"  Reason: {reason}", err=True)
+        typer.echo("  Recover: `make local-restart` (preserves DB state)", err=True)
+        typer.echo("  Clean:   `make local-up` (wipes everything)", err=True)
+        typer.echo("------------------", err=True)
+    except Exception:
+        pass
+
+
 def _cli_client(server_url: str | None = None):
     """_make_client wrapper that converts transport errors to friendly messages.
 
@@ -569,6 +590,7 @@ def _cli_client(server_url: str | None = None):
                 yield client
         except _httpx.TransportError as exc:
             typer.echo(f"connection error: control plane unreachable ({exc})", err=True)
+            _show_crash_breadcrumb()
             raise typer.Exit(1)
 
     return _ctx()
@@ -1905,7 +1927,7 @@ def ls(
             typer.echo("[WARNINGS]")
             for item in warning_items:
                 typer.echo(item)
-            typer.echo("Action: stop stale local runtimes, run `make local-up`, then start fresh runtimes.")
+            typer.echo("Action: run `make local-restart` to recover state, or `make local-up` for a clean start.")
             typer.echo("")
 
         # ── Available Capabilities section

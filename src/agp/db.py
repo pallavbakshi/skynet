@@ -93,7 +93,7 @@ def ensure_sqlite_runtime_database_available() -> None:
         _sqlite_runtime_state_cache.pop(str(db_path), None)
         raise RuntimeError(
             "configured SQLite database file is missing while the control plane is running; "
-            "stop the control plane and recreate local state with `make local-up`"
+            "run `make local-restart` to recover, or `make local-up` for a clean start"
         ) from exc
 
     signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
@@ -118,13 +118,13 @@ def ensure_sqlite_runtime_database_available() -> None:
             if "no such table" in message:
                 raise RuntimeError(
                     "configured SQLite database is missing the AGP schema while the control plane is running; "
-                    "stop the control plane and recreate local state with `make local-up`"
+                    "run `make local-restart` to recover, or `make local-up` for a clean start"
                 ) from exc
             raise RuntimeError(f"unable to verify configured SQLite database schema: {exc}") from exc
         if row is None or not row[0]:
             raise RuntimeError(
                 "configured SQLite database is missing schema metadata while the control plane is running; "
-                "stop the control plane and recreate local state with `make local-up`"
+                "run `make local-restart` to recover, or `make local-up` for a clean start"
             )
     finally:
         conn.close()

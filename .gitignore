@@ -4,6 +4,7 @@ __pycache__/
 agp.db
 agp.db-shm
 agp.db-wal
+.agp-crash
 .agp-artifacts/
 .agp-artifacts-tests/
 .agp-checkpoints/

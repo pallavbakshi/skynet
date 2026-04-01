@@ -101,7 +101,7 @@ install-docker: ## Install Docker Engine + Compose for `make up`
 
 local-reset: ## Wipe local SQLite/log/artifact/checkpoint state
 	@$(RUN) python -c "from agp._local_state import stop_local_control_plane; pids = stop_local_control_plane(); print('Stopped local control plane pid(s): ' + ', '.join(str(pid) for pid in pids)) if pids else None"
-	@rm -f agp.db agp.db-wal agp.db-shm
+	@rm -f agp.db agp.db-wal agp.db-shm .agp-crash
 	@rm -rf .agp-artifacts .agp-logs .agp-checkpoints
 	@echo "Local state cleared."
 
@@ -146,6 +146,16 @@ local-serve: ## Start local CP + sweepers (SQLite, no infra)
 	@echo "Local CP running at http://127.0.0.1:$(AGP_PORT)"
 	@echo "Agents self-register — no seeding needed."
 	@echo "Next: make runtime"
+
+local-restart: stop-runtime stop-cp ## Restart CP preserving existing DB + agent state
+	@if [ ! -f agp.db ]; then \
+		echo "ERROR: No existing database found. Run 'make local-up' for a clean start."; \
+		exit 1; \
+	fi
+	@python3 -c "import sqlite3; c=sqlite3.connect('agp.db'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()" 2>/dev/null && echo "WAL checkpointed." || true
+	@mkdir -p .agp-artifacts .agp-logs .agp-checkpoints
+	@rm -f .agp-crash
+	@$(MAKE) local-serve
 
 local-up: stop-runtime local-reset local-initdb local-serve ## Clean start: stop runtimes + reset + init + serve
 
