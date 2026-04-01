@@ -28,3 +28,6 @@ superset/
 .agp-test-verify.db-wal
 .claude/
 prompts/
+
+# roro workspace
+.roro/

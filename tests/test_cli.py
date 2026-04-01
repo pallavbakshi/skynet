@@ -795,6 +795,14 @@ class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
         self.assertTrue(adapter._looks_like_working("Running… (esc to interrupt)"))
         self.assertTrue(adapter._looks_like_working("Working (3s • esc to interrupt)"))
 
+    def test_status_bar_esc_to_interrupt_not_working(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        # Status bar contains "esc to interrupt" but should NOT count as working
+        self.assertFalse(adapter._looks_like_working(
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt   30987 tokens"
+        ))
+
     def test_completed_not_working(self) -> None:
         from agp.plugins.claude_code import ClaudeCodeAdapter
         adapter = ClaudeCodeAdapter()

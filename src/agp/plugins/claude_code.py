@@ -26,6 +26,9 @@ _FEEDBACK_RE = re.compile(r"how is claude doing", re.IGNORECASE)
 _WELCOME_START = "\u256d"  # ╭
 _WELCOME_END = "\u2570"    # ╰
 _STATUS_BAR_RE = re.compile(r"^\s*\u23f5\u23f5\s+")  # ⏵⏵ (any status bar variant)
+# Matches wrapped status-bar continuations: lines that are just
+# whitespace + a token count like "16200 tokens" at the right edge.
+_STATUS_TAIL_RE = re.compile(r"^\s*\d[\d,]*\s+tokens?\s*$", re.IGNORECASE)
 _BOX_CHARS = set("\u2500\u2502\u256d\u256e\u256f\u2570\u2514\u250c\u2510\u2518\u2524\u251c\u252c\u2534\u253c\u2501\u2503")
 
 # Lines matching these are TUI chrome, not content.
@@ -353,12 +356,19 @@ class ClaudeCodeAdapter(AgentAdapter):
         Claude Code shows a status bar (⏵⏵ ...) below the prompt when idle.
         We need to look past noise lines and status bars to find the prompt.
         """
+        saw_status_bar = False
         for raw in reversed(_strip_ansi(text).splitlines()):
             s = raw.strip()
             if not s:
                 continue
             if _STATUS_BAR_RE.match(s):
+                saw_status_bar = True
                 continue  # look past status bar
+            # Wrapped status-bar continuation (e.g. "16200 tokens" on its
+            # own line) — only skip when adjacent to a real status bar line.
+            if saw_status_bar and _STATUS_TAIL_RE.match(s):
+                continue
+            saw_status_bar = False
             if _SEPARATOR_RE.match(s):
                 continue  # look past separators
             if _is_noise_line(raw):
@@ -394,11 +404,15 @@ class ClaudeCodeAdapter(AgentAdapter):
             s = line.strip()
             if not s:
                 continue
+            # Skip status bar and other TUI chrome — they can contain stale
+            # "esc to interrupt" text even after the agent finishes.
+            if _STATUS_BAR_RE.match(s) or _is_noise_line(line):
+                continue
             sl = s.lower()
             for prefix in ClaudeCodeAdapter._THINKING_PREFIXES:
                 if not s.startswith(prefix):
                     continue
-                # New-style: prefix + ellipsis ("✻ Swooping…", "· Germinating…")
+                # New-style: prefix + ellipsis ("✻ Swooping…")
                 if "\u2026" in s or "..." in s:
                     return True
                 # Old-style: prefix + known verb ("∴ Working on changes")
@@ -406,7 +420,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                     return True
             if sl.startswith("thinking...") or sl.startswith("thinking\u2026"):
                 return True
-            # "esc to interrupt" — active tool execution or thinking indicator.
+            # "esc to interrupt" on a non-status-bar line (e.g. tool execution
+            # indicator rendered inline) — but NOT in the ⏵⏵ status bar.
             if "esc to interrupt" in sl:
                 return True
         return False
@@ -421,12 +436,18 @@ class ClaudeCodeAdapter(AgentAdapter):
         """
         lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
         filtered = []
+        prev_was_status = False
         for ln in lines:
             s = ln.strip()
             if not s:
                 continue
             if _STATUS_BAR_RE.match(s):
+                prev_was_status = True
                 continue
+            # Wrapped status-bar continuation — only skip next to a status bar.
+            if prev_was_status and _STATUS_TAIL_RE.match(s):
+                continue
+            prev_was_status = False
             if _SEPARATOR_RE.match(s):
                 continue
             filtered.append(ln.rstrip())
@@ -570,21 +591,10 @@ class ClaudeCodeAdapter(AgentAdapter):
         if not turns:
             return False
 
-        meaningful: list[str] = []
-        for raw in _strip_ansi(text).splitlines():
-            s = raw.strip()
-            if not s:
-                continue
-            if _is_noise_line(raw):
-                continue
-            meaningful.append(s)
-
-        if not meaningful:
-            return False
-
-        # The last meaningful line should be an empty ❯ prompt (idle).
-        last = meaningful[-1]
-        if not last.startswith(_PROMPT_PREFIX):
+        # Use _visible_ends_with_prompt for the idle-prompt check — it
+        # correctly handles wrapped status-bar lines and other TUI chrome
+        # that a naive "last meaningful line" scan would trip over.
+        if not self._visible_ends_with_prompt(text):
             return False
 
         answered = [turn for turn in turns if turn["response"]]
@@ -805,6 +815,20 @@ class ClaudeCodeAdapter(AgentAdapter):
             # few polls of grace then escalate to the caller with a screen
             # snapshot so they can decide what to do.
             indeterminate_polls += 1
+            if indeterminate_polls == 1:
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                turns = _parse_claude_code_turns(screen)
+                answered = [t for t in turns if t["response"]]
+                _log.warning(
+                    "indeterminate state entered: turns=%d answered=%d "
+                    "baseline_turns=%d accumulated_scrollback=%d "
+                    "tui_active=%s visible_prompt=%s tail=%r",
+                    len(turns), len(answered), len(baseline_turns),
+                    accumulated_turns_above_baseline, tui_active,
+                    self._visible_ends_with_prompt(screen),
+                    self._screen_tail(screen)[-100:],
+                )
             # ~10 seconds of grace (5 polls × 2s) before escalating.
             if indeterminate_polls >= 5:
                 raise StableButIndeterminate(
