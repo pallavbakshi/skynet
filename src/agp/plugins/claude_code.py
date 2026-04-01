@@ -651,9 +651,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                     "sticky session_mode is not supported on tmux — falling back to ephemeral"
                 )
             session = host.reset_session(session)
+            session.metadata.pop('restored_cursor', None)
             self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
         elif self.session_mode == "ephemeral":
             session = host.reset_session(session)
+            session.metadata.pop('restored_cursor', None)
             self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
         baseline_screen = _strip_ansi(host.read_visible(session))
