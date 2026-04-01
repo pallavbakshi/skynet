@@ -3226,6 +3226,83 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertEqual(result.artifacts[-1].content, "The answer is 42")
 
+    def test_claude_code_tui_raises_stable_but_indeterminate_for_stuck_dialog(self) -> None:
+        from agp.runtime import OutputReadResult, StableButIndeterminate
+
+        class StableDialogHost(InProcessTerminalHost):
+            def __init__(self, screen: str) -> None:
+                super().__init__()
+                self._screen = screen
+                self._dispatched = False
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                self._dispatched = True
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if not self._dispatched:
+                    return ""
+                return self._screen
+
+            def read_output(self, session, cursor):
+                full_text = self._screen if self._dispatched else ""
+                prior = cursor.checkpoint
+                if full_text.startswith(prior):
+                    delta = full_text[len(prior):]
+                else:
+                    delta = full_text
+                updated = OutputCursor(
+                    session_id=session.session_id,
+                    checkpoint=full_text,
+                    metadata=dict(cursor.metadata),
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=updated,
+                    text=delta,
+                    full_text=full_text,
+                    changed=bool(delta),
+                )
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_indeterminate"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.01,
+            idle_after=2,
+            idle_timeout_seconds=0.2,
+        )
+        stuck_dialog_screen = (
+            "Permission review required\n"
+            "This dialog is stuck and shows content, but there is no prompt.\n"
+        )
+        host = StableDialogHost(stuck_dialog_screen)
+        session = host.get_or_create_session(agent_id="agt_cc_indeterminate")
+        claimed = {
+            "agent_id": "agt_cc_indeterminate",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "test task"},
+        }
+
+        with self.assertRaises(StableButIndeterminate) as ctx:
+            adapter.execute_run(
+                host=host, session=session, claimed=claimed,
+                supervisor=SupervisorStub(),
+            )
+
+        self.assertTrue(ctx.exception.screen)
+
     def test_claude_code_recover_clears_bootstrap_on_exit(self) -> None:
         adapter = ClaudeCodeAdapter(session_mode="sticky")
         host = InProcessTerminalHost()
@@ -3424,3 +3501,80 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         adapter = build_agent_adapter("claude_code")
         self.assertEqual(adapter.kind, "claude_code")
         self.assertIsInstance(adapter, ClaudeCodeAdapter)
+
+    # ── StableButIndeterminate tests ────────────────────────────────────
+
+    def test_claude_code_stable_but_indeterminate_on_stuck_dialog(self) -> None:
+        """Non-empty stable screen with no prompt raises StableButIndeterminate."""
+        from agp.runtime import StableButIndeterminate
+
+        class DialogHost(InProcessTerminalHost):
+            """Host that shows a stuck dialog screen (no ❯ prompt)."""
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                # Simulate a permission dialog appearing
+                self._history.setdefault(session.session_id, []).append(
+                    "Do you trust this folder?\n1) Yes\n2) No\n"
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_sbi"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.01,
+            idle_after=2,
+            idle_timeout_seconds=2.0,
+        )
+        host = DialogHost()
+        session = host.get_or_create_session(agent_id="agt_sbi")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_sbi",
+            "job": {"job_id": "job_sbi"},
+            "run": {"run_id": "run_sbi"},
+            "message": {"text": "test task"},
+        }
+        with self.assertRaises(StableButIndeterminate) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertTrue(ctx.exception.screen.strip(), "screen should be non-empty")
+        self.assertIn("cannot determine", str(ctx.exception))
+
+    def test_claude_code_empty_screen_gets_timeout_not_indeterminate(self) -> None:
+        """Empty screen should raise ExecutionTimeout, not StableButIndeterminate."""
+        class SilentHost(InProcessTerminalHost):
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                pass
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_empty_cc"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.01,
+            idle_after=1,
+            idle_timeout_seconds=0.05,
+        )
+        host = SilentHost()
+        session = host.get_or_create_session(agent_id="agt_empty_cc")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_empty_cc",
+            "job": {"job_id": "job_empty_cc"},
+            "run": {"run_id": "run_empty_cc"},
+            "message": {"text": "silent"},
+        }
+        with self.assertRaises(RecoverableExecutionError) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("no output", str(ctx.exception))
