@@ -202,6 +202,7 @@ class ArtifactUploadRequest(BaseModel):
     content: str
     role: str
     content_type: str = "text/plain"
+    register: bool = False
 
 
 class CapabilitySeedRequest(BaseModel):

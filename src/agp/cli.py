@@ -248,6 +248,106 @@ def _review_fix_attachment_note(*, attachment_name: str, short_output_guidance: 
     )
 
 
+def _build_review_state(
+    *,
+    review_session_id: str,
+    source_job_id: str,
+    reviewer_id: str,
+    dev_id: str,
+    max_rounds: int,
+    current_round: int,
+    phase: str,
+    conversation_id: str,
+    active_job_id: str | None = None,
+    last_verdict: str | None = None,
+) -> dict:
+    from datetime import datetime, timezone
+
+    return {
+        "review_session_id": review_session_id,
+        "source_job_id": source_job_id,
+        "reviewer_id": reviewer_id,
+        "dev_id": dev_id,
+        "max_rounds": max_rounds,
+        "current_round": current_round,
+        "phase": phase,
+        "conversation_id": conversation_id,
+        "active_job_id": active_job_id,
+        "last_verdict": last_verdict,
+        "review_attempt_id": review_session_id,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _save_review_state(client, state: dict) -> None:
+    import json as _json
+
+    client.upload_artifact(
+        namespace=state["conversation_id"],
+        job_id=state["source_job_id"],
+        name="review-state.json",
+        content=_json.dumps(state),
+        role="review-state",
+        content_type="application/json",
+        register=True,
+    )
+
+
+def _load_review_state(client, source_job_id: str) -> dict | None:
+    import json as _json
+
+    data = client.list_job_artifacts(source_job_id, role="review-state")
+    items = data.get("items", [])
+    if not items:
+        return None
+    latest = items[-1]
+    artifact_id = latest["artifact_id"]
+    content_data = client.fetch_artifact(artifact_id, content=True)
+    return _json.loads(content_data["content"])
+
+
+def _parse_reviewer_verdict(client, review_job: dict) -> tuple[str, str, str]:
+    """Extract verdict from a completed reviewer job.
+
+    Returns ``(verdict, summary, review_payload_text)``.
+    """
+    import json as _json
+
+    review_artifact_id = review_job.get("result_artifact_id")
+    if not review_artifact_id:
+        return "changes_requested", "", '{"findings":[],"summary":"","verdict":"changes_requested"}'
+
+    review_artifact = client.fetch_artifact(review_artifact_id, content=True)
+    content = review_artifact.get("content", "")
+
+    verdict = "changes_requested"
+    summary = ""
+    structured: dict | None = None
+    try:
+        structured = _json.loads(content)
+    except _json.JSONDecodeError:
+        structured = _extract_trailing_json_payload(content)
+        if structured is None:
+            summary = content[:500]
+        else:
+            verdict = structured.get("verdict", "changes_requested")
+            summary = structured.get("summary", "")
+    else:
+        verdict = structured.get("verdict", "changes_requested")
+        summary = structured.get("summary", "")
+
+    review_payload_text = (
+        _json.dumps(structured, separators=(",", ":"), sort_keys=True)
+        if isinstance(structured, dict)
+        else _json.dumps(
+            {"verdict": verdict, "summary": summary, "findings": []},
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    return verdict, summary, review_payload_text
+
+
 def _capture_git_diff(*, include_untracked: bool = False) -> tuple[str | None, str | None]:
     """Best-effort capture of ``git diff HEAD`` (staged + unstaged) and stat.
 
@@ -1388,6 +1488,7 @@ def review_cmd(
     server_url: str = typer.Option(None, help="CP URL."),
     timeout_per_round: int = typer.Option(120, "--timeout", help="Seconds to wait per round."),
     attach_diff: bool = typer.Option(False, "--diff/--no-diff", help="Attach local git diff alongside the source artifact (best-effort, opt-in)."),
+    resume: str = typer.Option(None, "--resume", help="Resume a detached review session by source job ID."),
 ) -> None:
     """Run an automated review loop on a job's output artifact.
 
@@ -1401,34 +1502,220 @@ def review_cmd(
 
     Uses conversation threading and output contracts to structure the loop.
     Terminates when the reviewer approves or max_rounds is reached.
+
+    Use --resume <job_id> to resume a previously detached review session.
     """
     import json
     import time
     import httpx as _httpx
 
+    def _print_review_detached(state: dict) -> None:
+        phase_label = "reviewer" if state["phase"] == "poll_reviewer" else "dev"
+        _print_banner("DETACHED", "Review Paused")
+        typer.echo(
+            f"[DETACHED] Review paused at round {state['current_round']}/{state['max_rounds']} "
+            f"(waiting for {phase_label})"
+        )
+        typer.echo(f"  Resume:  agp review --resume {state['source_job_id']}")
+        if state.get("active_job_id"):
+            agent_label = state["reviewer_id"] if phase_label == "reviewer" else state["dev_id"]
+            typer.echo(f"  {phase_label.title()} job: agp wait {state['active_job_id']}")
+            _print_peek_tip(agent_label)
+
+    def _send_to_dev(client, *, dev_agent, round_num, review_payload_text, conversation_id, job_id, review_attempt_id):
+        """Send findings to dev for fixing. Returns (fix_result dict)."""
+        typer.echo(f"[review] Sending findings to dev {dev_agent}...")
+        fix_text = (
+            f"The reviewer found issues that need fixing (round {round_num}):\n\n"
+            f"{review_payload_text}\n\n"
+            "INSTRUCTIONS FOR YOUR RESPONSE:\n"
+            "1. Make the code changes needed to address the findings.\n"
+            "2. Do NOT edit any artifact files or .agp-artifacts/ content.\n"
+            "3. Your final response must be ONLY a short summary:\n"
+            "   - One sentence per change: what file, what you changed, why.\n"
+            "   - Last line: the test command you ran (if any).\n"
+            "4. Do NOT include execution traces, tool output, diff fragments, "
+            "or internal narration in your response.\n"
+            "5. Describe only verification you actually completed; if a run "
+            "failed or did not finish, say that plainly and do not call "
+            "failures existing or unrelated unless you verified that.\n"
+            "6. Do NOT mention background terminals, PIDs, or other local runtime details."
+        )
+        fix_result = client.send(
+            "agent", dev_agent, fix_text,
+            conversation_id=conversation_id,
+            idempotency_key=f"fix-{job_id}-r{round_num}-{review_attempt_id}",
+        )
+        return fix_result
+
     with _cli_client(server_url) as client:
-        try:
-            source_job = client.get_job(job_id)
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
+        # ── Resume path ──────────────────────────────────────────
+        if resume:
+            state = _load_review_state(client, resume)
+            if not state:
+                typer.echo("[review] No review session state found for that job.", err=True)
+                raise typer.Exit(1)
+
+            typer.echo(
+                f"[review] Resuming session {state['review_session_id']} "
+                f"at round {state['current_round']}/{state['max_rounds']} "
+                f"(phase: {state['phase']})"
+            )
+
+            # Restore saved state into local variables
+            original_job_id = state["source_job_id"]
+            job_id = original_job_id
+            reviewer_id = state["reviewer_id"]
+            dev_agent = state["dev_id"]
+            max_rounds = state["max_rounds"]
+            conversation_id = state["conversation_id"]
+            review_session_id = state["review_session_id"]
+            review_attempt_id = state.get("review_attempt_id", review_session_id)
+            current_round = state["current_round"]
+            active_job_id = state["active_job_id"]
+            phase = state["phase"]
+
+            try:
+                source_job = client.get_job(job_id)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
+
+            # Handle send phases — crash happened before dispatch, just re-enter loop
+            if phase in ("send_to_reviewer", "send_to_dev"):
+                source_job = client.get_job(job_id) if phase == "send_to_reviewer" else source_job
+                start_round = current_round
+                # Fall through to the shared review loop below
+
+            else:
+                # poll_reviewer or poll_dev — need to check the pending job
+                try:
+                    active_job = client.get_job(active_job_id)
+                except _httpx.HTTPStatusError as exc:
+                    typer.echo(f"[review] Could not fetch active job {active_job_id}: {_format_http_error(exc)}", err=True)
+                    raise typer.Exit(1)
+
+                active_status = active_job.get("status", "")
+
+                # If still running, re-poll
+                if active_status not in ("completed", "failed", "cancelled"):
+                    typer.echo(f"[review] Active job {active_job_id} still running, re-polling...")
+                    active_job, timed_out = _poll_until_done(client, active_job_id, timeout_per_round)
+                    if timed_out:
+                        from datetime import datetime, timezone
+                        _save_review_state(client, {**state, "updated_at": datetime.now(timezone.utc).isoformat()})
+                        _print_review_detached(state)
+                        return
+                    active_status = active_job.get("status", "")
+
+                if active_status == "failed":
+                    phase_label = "Reviewer" if phase == "poll_reviewer" else "Dev"
+                    typer.echo(f"[review] {phase_label} job failed while detached.")
+                    _print_job_result(active_job, client)
+                    raise typer.Exit(1)
+
+                if active_status == "cancelled":
+                    typer.echo("[review] Active job was cancelled while detached.", err=True)
+                    raise typer.Exit(1)
+
+                # ── Process completed pending job ────────────────────
+                if phase == "poll_reviewer":
+                    verdict, summary, review_payload_text = _parse_reviewer_verdict(client, active_job)
+                    typer.echo(f"[review] Verdict: {verdict}")
+                    typer.echo(f"[review] Summary: {summary[:200]}")
+
+                    if verdict == "approved":
+                        typer.echo(f"[review] Approved after {current_round} round(s).")
+                        return
+
+                    if current_round >= max_rounds:
+                        typer.echo(f"[review] Max rounds ({max_rounds}) reached without approval.")
+                        return
+
+                    # Need to send to dev, poll dev, then continue to next round
+                    try:
+                        fix_result = _send_to_dev(
+                            client, dev_agent=dev_agent, round_num=current_round,
+                            review_payload_text=review_payload_text,
+                            conversation_id=conversation_id, job_id=job_id,
+                            review_attempt_id=review_attempt_id,
+                        )
+                    except _httpx.HTTPStatusError as exc:
+                        typer.echo(_format_http_error(exc), err=True)
+                        raise typer.Exit(1)
+                    fix_job_id = fix_result["job_id"]
+
+                    state_update = _build_review_state(
+                        review_session_id=review_session_id, source_job_id=job_id,
+                        reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                        current_round=current_round, phase="poll_dev",
+                        conversation_id=conversation_id, active_job_id=fix_job_id,
+                        last_verdict=verdict,
+                    )
+                    _save_review_state(client, state_update)
+
+                    fix_job, fix_timed_out = _poll_until_done(client, fix_job_id, timeout_per_round)
+                    if fix_timed_out:
+                        _print_review_detached(state_update)
+                        return
+                    if fix_job["status"] == "failed":
+                        typer.echo("[review] Dev fix job failed.")
+                        _print_job_result(fix_job, client)
+                        raise typer.Exit(1)
+
+                    source_job = fix_job
+                    job_id = fix_job_id
+                    start_round = current_round + 1
+
+                elif phase == "poll_dev":
+                    # Dev completed while detached — continue to next round
+                    source_job = active_job
+                    job_id = active_job_id
+                    start_round = current_round + 1
+
+                else:
+                    typer.echo(f"[review] Unknown phase '{phase}' in saved state.", err=True)
+                    raise typer.Exit(1)
+
+        # ── Fresh start path ─────────────────────────────────────
+        else:
+            try:
+                source_job = client.get_job(job_id)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
+
+            source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
+            dev_agent = dev_id or source_agent
+            if not dev_id and dev_agent == reviewer_id:
+                typer.echo(
+                    "[review] Error: source job's agent is the reviewer itself. "
+                    "Use --dev to specify which agent should apply fixes.",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+            conversation_id = source_job.get("conversation_id")
+            original_job_id = job_id
+            review_session_id = f"rev_{uuid.uuid4().hex[:12]}"
+            review_attempt_id = uuid.uuid4().hex[:12]
+            start_round = 1
+
+            # Save initial review state
+            _save_review_state(client, _build_review_state(
+                review_session_id=review_session_id, source_job_id=job_id,
+                reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                current_round=1, phase="send_to_reviewer",
+                conversation_id=conversation_id,
+            ))
+
+        # ── Shared review loop ───────────────────────────────────
         short_output_guidance = (
             "The attached result may legitimately be short, single-line, or an exact-output-only reply. "
             "Do not infer staging failure or incompleteness from short length alone; review the content that was actually delivered."
         )
-        source_agent = source_job.get("target_agent_id") or source_job.get("target_queue", "")
-        dev_agent = dev_id or source_agent
-        if not dev_id and dev_agent == reviewer_id:
-            typer.echo(
-                "[review] Error: source job's agent is the reviewer itself. "
-                "Use --dev to specify which agent should apply fixes.",
-                err=True,
-            )
-            raise typer.Exit(1)
-        conversation_id = source_job.get("conversation_id")
-        review_attempt_id = uuid.uuid4().hex[:12]
 
-        for round_num in range(1, max_rounds + 1):
+        for round_num in range(start_round, max_rounds + 1):
             typer.echo(f"[review] Round {round_num}/{max_rounds}")
 
             # Build attachments list for the review send
@@ -1508,6 +1795,14 @@ def review_cmd(
                 },
             }
 
+            # Save state: about to send to reviewer
+            _save_review_state(client, _build_review_state(
+                review_session_id=review_session_id, source_job_id=original_job_id,
+                reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                current_round=round_num, phase="send_to_reviewer",
+                conversation_id=conversation_id,
+            ))
+
             typer.echo(f"[review] Sending to reviewer {reviewer_id}...")
             try:
                 review_result = client.send(
@@ -1521,11 +1816,21 @@ def review_cmd(
                 typer.echo(_format_http_error(exc), err=True)
                 raise typer.Exit(1)
             review_job_id = review_result["job_id"]
+
+            # Save state: polling reviewer
+            review_state = _build_review_state(
+                review_session_id=review_session_id, source_job_id=original_job_id,
+                reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                current_round=round_num, phase="poll_reviewer",
+                conversation_id=conversation_id, active_job_id=review_job_id,
+            )
+            _save_review_state(client, review_state)
+
             review_job, timed_out = _poll_until_done(client, review_job_id, timeout_per_round)
 
             if timed_out:
                 typer.echo(f"[review] Round {round_num} timed out waiting for reviewer.")
-                _print_detached(review_job_id, reviewer_id)
+                _print_review_detached(review_state)
                 return
 
             if review_job["status"] == "failed":
@@ -1534,79 +1839,43 @@ def review_cmd(
                 raise typer.Exit(1)
 
             # Parse reviewer output
-            review_artifact_id = review_job.get("result_artifact_id")
-            if not review_artifact_id:
-                typer.echo("[review] No result artifact from reviewer.")
-                raise typer.Exit(1)
-
-            review_artifact = client.fetch_artifact(review_artifact_id, content=True)
-            content = review_artifact.get("content", "")
-
-            # Try to parse structured output
-            verdict = "changes_requested"
-            structured: dict | None = None
-            try:
-                structured = json.loads(content)
-            except json.JSONDecodeError:
-                structured = _extract_trailing_json_payload(content)
-                if structured is None:
-                    summary = content[:500]
-                else:
-                    verdict = structured.get("verdict", "changes_requested")
-                    summary = structured.get("summary", "")
-            else:
-                verdict = structured.get("verdict", "changes_requested")
-                summary = structured.get("summary", "")
-            review_payload_text = (
-                json.dumps(structured, separators=(",", ":"), sort_keys=True)
-                if isinstance(structured, dict)
-                else json.dumps(
-                    {"verdict": verdict, "summary": summary, "findings": []},
-                    separators=(",", ":"),
-                    sort_keys=True,
-                )
-            )
+            verdict, summary, review_payload_text = _parse_reviewer_verdict(client, review_job)
 
             typer.echo(f"[review] Verdict: {verdict}")
             typer.echo(f"[review] Summary: {summary[:200]}")
 
             if verdict == "approved":
-                typer.echo(f"[review] ✅ Approved after {round_num} round(s).")
+                typer.echo(f"[review] Approved after {round_num} round(s).")
                 return
 
             if round_num < max_rounds:
                 # Send findings to dev for fixing
-                typer.echo(f"[review] Sending findings to dev {dev_agent}...")
-                fix_text = (
-                    f"The reviewer found issues that need fixing (round {round_num}):\n\n"
-                    f"{review_payload_text}\n\n"
-                    "INSTRUCTIONS FOR YOUR RESPONSE:\n"
-                    "1. Make the code changes needed to address the findings.\n"
-                    "2. Do NOT edit any artifact files or .agp-artifacts/ content.\n"
-                    "3. Your final response must be ONLY a short summary:\n"
-                    "   - One sentence per change: what file, what you changed, why.\n"
-                    "   - Last line: the test command you ran (if any).\n"
-                    "4. Do NOT include execution traces, tool output, diff fragments, "
-                    "or internal narration in your response.\n"
-                    "5. Describe only verification you actually completed; if a run "
-                    "failed or did not finish, say that plainly and do not call "
-                    "failures existing or unrelated unless you verified that.\n"
-                    "6. Do NOT mention background terminals, PIDs, or other local runtime details."
-                )
                 try:
-                    fix_result = client.send(
-                        "agent", dev_agent, fix_text,
-                        conversation_id=conversation_id,
-                        idempotency_key=f"fix-{job_id}-r{round_num}-{review_attempt_id}",
+                    fix_result = _send_to_dev(
+                        client, dev_agent=dev_agent, round_num=round_num,
+                        review_payload_text=review_payload_text,
+                        conversation_id=conversation_id, job_id=job_id,
+                        review_attempt_id=review_attempt_id,
                     )
                 except _httpx.HTTPStatusError as exc:
                     typer.echo(_format_http_error(exc), err=True)
                     raise typer.Exit(1)
                 fix_job_id = fix_result["job_id"]
+
+                # Save state: polling dev
+                dev_state = _build_review_state(
+                    review_session_id=review_session_id, source_job_id=original_job_id,
+                    reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                    current_round=round_num, phase="poll_dev",
+                    conversation_id=conversation_id, active_job_id=fix_job_id,
+                    last_verdict=verdict,
+                )
+                _save_review_state(client, dev_state)
+
                 fix_job, fix_timed_out = _poll_until_done(client, fix_job_id, timeout_per_round)
                 if fix_timed_out:
                     typer.echo("[review] Dev fix timed out.")
-                    _print_detached(fix_job_id, dev_agent)
+                    _print_review_detached(dev_state)
                     return
                 if fix_job["status"] == "failed":
                     typer.echo("[review] Dev fix job failed.")

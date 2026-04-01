@@ -349,6 +349,206 @@ class ReviewCommandTest(unittest.TestCase):
         self.assertIn("Do NOT mention background terminals, PIDs", fix_text)
 
 
+class ReviewResumeTest(unittest.TestCase):
+    """Tests for resumable review loop state persistence and --resume."""
+
+    @patch("agp.cli._poll_until_done")
+    @patch("agp.cli._make_client")
+    def test_review_state_uploaded_on_session_start(
+        self,
+        mock_make: MagicMock,
+        mock_poll: MagicMock,
+    ) -> None:
+        """Starting a review session should upload a review-state artifact."""
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "conversation_id": "conv_123",
+            "target_agent_id": "dev_agent",
+            "result_artifact_id": "artifact_source",
+        }
+
+        def fetch_artifact(artifact_id: str, *, content: bool = False):
+            if artifact_id == "artifact_source":
+                return {"content": "source result"}
+            if artifact_id == "artifact_review":
+                return {"content": '{"verdict":"approved","summary":"lgtm"}'}
+            raise AssertionError(f"unexpected artifact id: {artifact_id}")
+
+        fake_client.fetch_artifact.side_effect = fetch_artifact
+        fake_client.send.return_value = {"job_id": "job_review"}
+        fake_client.upload_artifact.return_value = {"storage_ref": "ref_1", "role": "review-state"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        # Reviewer approves on round 1
+        mock_poll.return_value = (
+            {"status": "completed", "result_artifact_id": "artifact_review"},
+            False,
+        )
+
+        result = runner.invoke(app, ["review", "job_src", "reviewer_agent"])
+        self.assertEqual(result.exit_code, 0, result.output)
+
+        # upload_artifact should have been called (initial state + transitions)
+        self.assertGreaterEqual(fake_client.upload_artifact.call_count, 1)
+        first_call = fake_client.upload_artifact.call_args_list[0]
+        self.assertEqual(first_call.kwargs["role"], "review-state")
+        self.assertEqual(first_call.kwargs["name"], "review-state.json")
+        self.assertEqual(first_call.kwargs["namespace"], "conv_123")
+        state = json.loads(first_call.kwargs["content"])
+        self.assertEqual(state["source_job_id"], "job_src")
+        self.assertIn("review_session_id", state)
+        self.assertEqual(state["phase"], "send_to_reviewer")
+
+    @patch("agp.cli._poll_until_done")
+    @patch("agp.cli._make_client")
+    def test_resume_fetches_state_and_reenters_loop(
+        self,
+        mock_make: MagicMock,
+        mock_poll: MagicMock,
+    ) -> None:
+        """--resume should load saved state and re-enter the review loop."""
+        saved_state = {
+            "review_session_id": "rev_abc123",
+            "source_job_id": "job_src",
+            "reviewer_id": "reviewer_agent",
+            "dev_id": "dev_agent",
+            "max_rounds": 3,
+            "current_round": 1,
+            "phase": "poll_dev",
+            "conversation_id": "conv_123",
+            "active_job_id": "job_dev_fix",
+            "last_verdict": "changes_requested",
+            "updated_at": "2026-04-01T10:00:00+00:00",
+        }
+
+        fake_client = MagicMock()
+        # get_job: first call for source job, second for active job
+        fake_client.get_job.side_effect = [
+            {
+                "job_id": "job_src",
+                "conversation_id": "conv_123",
+                "target_agent_id": "dev_agent",
+                "result_artifact_id": "artifact_source",
+            },
+            {
+                "job_id": "job_dev_fix",
+                "status": "completed",
+                "result_artifact_id": "artifact_fix",
+            },
+        ]
+        fake_client.list_job_artifacts.return_value = {
+            "items": [
+                {"artifact_id": "art_state_1", "role": "review-state"},
+            ],
+        }
+        fake_client.upload_artifact.return_value = {"storage_ref": "ref_x", "role": "review-state"}
+
+        def fetch_artifact(artifact_id: str, *, content: bool = False):
+            if artifact_id == "art_state_1":
+                return {"content": json.dumps(saved_state)}
+            if artifact_id == "artifact_fix":
+                return {"content": "fix output"}
+            if artifact_id == "artifact_review_r2":
+                return {"content": '{"verdict":"approved","summary":"all good"}'}
+            raise AssertionError(f"unexpected artifact id: {artifact_id}")
+
+        fake_client.fetch_artifact.side_effect = fetch_artifact
+        fake_client.send.return_value = {"job_id": "job_review_r2"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        # Reviewer approves on round 2
+        mock_poll.return_value = (
+            {"status": "completed", "result_artifact_id": "artifact_review_r2"},
+            False,
+        )
+
+        result = runner.invoke(app, [
+            "review", "job_src", "reviewer_agent",
+            "--resume", "job_src",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Resuming session", result.output)
+        self.assertIn("Approved", result.output)
+
+        # Should have loaded state via list_job_artifacts
+        fake_client.list_job_artifacts.assert_called_once_with("job_src", role="review-state")
+
+    @patch("agp.cli._poll_until_done")
+    @patch("agp.cli._make_client")
+    def test_resume_handles_completed_pending_reviewer_job(
+        self,
+        mock_make: MagicMock,
+        mock_poll: MagicMock,
+    ) -> None:
+        """Resume from poll_reviewer where reviewer already completed and approved."""
+        saved_state = {
+            "review_session_id": "rev_xyz789",
+            "source_job_id": "job_src",
+            "reviewer_id": "reviewer_agent",
+            "dev_id": "dev_agent",
+            "max_rounds": 3,
+            "current_round": 2,
+            "phase": "poll_reviewer",
+            "conversation_id": "conv_456",
+            "active_job_id": "job_reviewer_r2",
+            "last_verdict": None,
+            "updated_at": "2026-04-01T10:00:00+00:00",
+        }
+
+        fake_client = MagicMock()
+        fake_client.get_job.side_effect = [
+            {
+                "job_id": "job_src",
+                "conversation_id": "conv_456",
+                "target_agent_id": "dev_agent",
+            },
+            {
+                "job_id": "job_reviewer_r2",
+                "status": "completed",
+                "result_artifact_id": "artifact_rev_result",
+            },
+        ]
+        fake_client.list_job_artifacts.return_value = {
+            "items": [{"artifact_id": "art_state", "role": "review-state"}],
+        }
+        fake_client.upload_artifact.return_value = {"storage_ref": "ref_z", "role": "review-state"}
+
+        def fetch_artifact(artifact_id: str, *, content: bool = False):
+            if artifact_id == "art_state":
+                return {"content": json.dumps(saved_state)}
+            if artifact_id == "artifact_rev_result":
+                return {"content": '{"verdict":"approved","summary":"looks great"}'}
+            raise AssertionError(f"unexpected artifact id: {artifact_id}")
+
+        fake_client.fetch_artifact.side_effect = fetch_artifact
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(app, [
+            "review", "job_src", "reviewer_agent",
+            "--resume", "job_src",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("Approved after 2 round(s)", result.output)
+
+        # Should NOT have re-polled (job was already completed)
+        mock_poll.assert_not_called()
+        # Should NOT have sent any new messages (reviewer already approved)
+        fake_client.send.assert_not_called()
+
+
 class CaptureGitDiffTest(unittest.TestCase):
     """Verify _capture_git_diff handles missing git and real repos gracefully."""
 

@@ -378,6 +378,32 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    def upload_artifact(
+        self,
+        *,
+        namespace: str,
+        job_id: str,
+        name: str,
+        content: str,
+        role: str,
+        content_type: str = "text/plain",
+        register: bool = False,
+    ) -> dict:
+        response = self._client.post(
+            "/artifacts/upload",
+            json={
+                "namespace": namespace,
+                "job_id": job_id,
+                "name": name,
+                "content": content,
+                "role": role,
+                "content_type": content_type,
+                "register": register,
+            },
+        )
+        response.raise_for_status()
+        return response.json()["data"]
+
     # ── Observability ─────────────────────────────────────────────
 
     def observability_summary(self) -> dict:

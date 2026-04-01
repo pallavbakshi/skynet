@@ -94,7 +94,7 @@ def get_artifact_content(
 
 
 @router.post("/artifacts/upload")
-def upload_artifact(request: ArtifactUploadRequest) -> dict:
+def upload_artifact(request: ArtifactUploadRequest, db: Session = Depends(get_db)) -> dict:
     if not request.content_type.strip():
         raise HTTPException(status_code=400, detail="content_type must not be empty")
     store = _artifact_store()
@@ -106,10 +106,28 @@ def upload_artifact(request: ArtifactUploadRequest) -> dict:
         role=request.role,
         content_type=request.content_type,
     )
-    return _ok({
+    result = {
         "storage_ref": stored.storage_ref,
         "checksum": stored.checksum,
         "size_bytes": stored.size_bytes,
         "role": stored.role,
         "content_type": stored.content_type,
-    })
+    }
+    if request.register:
+        from agp.services._helpers import _new_id
+
+        artifact_id = _new_id("art")
+        db.add(Artifact(
+            artifact_id=artifact_id,
+            job_id=request.job_id,
+            run_id=None,
+            kind=request.role,
+            content_type=stored.content_type,
+            storage_ref=stored.storage_ref,
+            checksum=stored.checksum,
+            size_bytes=stored.size_bytes,
+        ))
+        db.add(JobArtifact(job_id=request.job_id, artifact_id=artifact_id, role=request.role))
+        db.commit()
+        result["artifact_id"] = artifact_id
+    return _ok(result)
