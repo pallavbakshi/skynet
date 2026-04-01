@@ -33,6 +33,7 @@ from agp.runtime._types import (
     PaneDied,
     RecoverableExecutionError,
     SessionHealth,
+    StableButIndeterminate,
     TerminalSession,
 )
 
@@ -160,9 +161,13 @@ class RuntimeSupervisor:
         if tui_died is not None and tui_died.is_set():
             reason = getattr(self, "_active_tui_died_reason", "tui exited during execution")
             raise PaneDied(reason)
-        job = self.client.get_job(claimed["job"]["job_id"])
-        if job["status"] == "interrupt_requested":
-            raise InterruptRequested("interrupt requested by control plane")
+        # Check the local interrupt event set by the heartbeat thread
+        # instead of making an HTTP call per poll cycle.  The heartbeat
+        # response already carries interrupt_requested and the thread
+        # sets this event when it detects one.
+        interrupt_event = getattr(self, "_interrupt_event", None)
+        if interrupt_event is not None and interrupt_event.is_set():
+            raise InterruptRequested("interrupt requested via heartbeat")
 
     def _workspace_dir(self, session: TerminalSession) -> Path | None:
         raw = session.workspace_ref
@@ -206,13 +211,27 @@ class RuntimeSupervisor:
             session.metadata["staged_attachment_roots"] = staged_roots
 
     def emit_progress(self, claimed: dict[str, Any], *, message: str, details: dict[str, Any] | None = None) -> dict:
-        return self.client.progress(
-            run_id=claimed["run"]["run_id"],
-            lease_id=claimed["lease"]["lease_id"],
-            fencing_token=claimed["lease"]["fencing_token"],
-            message=message,
-            details=details or {},
-        )
+        try:
+            return self.client.progress(
+                run_id=claimed["run"]["run_id"],
+                lease_id=claimed["lease"]["lease_id"],
+                fencing_token=claimed["lease"]["fencing_token"],
+                message=message,
+                details=details or {},
+            )
+        except httpx.HTTPStatusError as exc:
+            # 409 = lease genuinely lost — must propagate so the adapter stops.
+            if exc.response.status_code == 409:
+                raise
+            # Auth/client errors are likely config issues — log louder.
+            if exc.response.status_code in (401, 403, 422):
+                _logger.warning("progress emission failed (HTTP %s): %s", exc.response.status_code, exc)
+            else:
+                _logger.debug("progress emission failed (non-fatal, HTTP %s): %s", exc.response.status_code, exc)
+            return {}
+        except httpx.TransportError:
+            _logger.debug("progress emission failed (transport error)", exc_info=True)
+            return {}
 
     def _cleanup_workspace(self, session: TerminalSession, claimed: dict[str, Any]) -> None:
         """Best-effort post-run workspace cleanup.
@@ -408,6 +427,8 @@ class RuntimeSupervisor:
 
         max_missed_heartbeats = 6
         lease_lost = Event()  # signals that we lost the lease / fencing
+        interrupt_event = Event()  # set by heartbeat when CP requests interrupt
+        self._interrupt_event = interrupt_event
         thread: Thread | None = None
         _hb_client = None
 
@@ -464,6 +485,7 @@ class RuntimeSupervisor:
                                 {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
                             )
                             claimed["job"]["status"] = "interrupt_requested"
+                            interrupt_event.set()
                             try:
                                 self.host.interrupt(getattr(self, "_active_session", session))
                             except Exception:  # noqa: BLE001
@@ -524,12 +546,15 @@ class RuntimeSupervisor:
                 timeout=10.0,
                 headers=_hb_headers,
             )
-            self.client.heartbeat(
+            initial_hb = self.client.heartbeat(
                 run_id=run["run_id"],
                 lease_id=lease["lease_id"],
                 fencing_token=lease["fencing_token"],
                 extend_seconds=lease_ttl_seconds,
             )
+            # Check the initial heartbeat response for pre-existing interrupts.
+            if isinstance(initial_hb, dict) and initial_hb.get("interrupt_requested"):
+                interrupt_event.set()
             thread = Thread(target=heartbeat_loop, daemon=True)
             thread.start()
             _append_runtime_log(
@@ -567,6 +592,11 @@ class RuntimeSupervisor:
                     if tui_died.is_set():
                         raise PaneDied(self._active_tui_died_reason)
                     break
+                except StableButIndeterminate:
+                    # The screen is stable but the adapter can't tell what
+                    # happened.  Don't retry — surface the screen snapshot
+                    # to the caller so they can decide.
+                    raise
                 except RecoverableExecutionError as exc:
                     if attempts >= max_local_recoveries:
                         raise

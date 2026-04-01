@@ -582,10 +582,21 @@ class CodexAdapter(AgentAdapter):
 
     @staticmethod
     def _screen_tail(text: str, n: int = 10) -> str:
-        """Return the last N non-empty lines of the visible screen."""
+        """Return the last N non-empty, non-noise lines of the visible screen.
+
+        Noise lines (status indicators, token counts) are excluded so that
+        transient display updates do not reset the stability timer.
+        """
         lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        lines = [ln.rstrip() for ln in lines if ln.strip()]
-        return "\n".join(lines[-n:])
+        filtered = []
+        for ln in lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if _is_noise_line(ln):
+                continue
+            filtered.append(ln.rstrip())
+        return "\n".join(filtered[-n:])
 
     def _idle_timeout_window(self) -> float:
         if self.idle_timeout_seconds > 0:

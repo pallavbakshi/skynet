@@ -22,6 +22,7 @@ from agp.runtime._types import (
     PaneDied,
     RecoverableExecutionError,
     SessionHealth,
+    StableButIndeterminate,
     TerminalSession,
 )
 
@@ -98,6 +99,7 @@ __all__ = [
     "ExecutionTimeout",
     "AuthFailure",
     "BootstrapFailure",
+    "StableButIndeterminate",
     "AdapterExecutionFailed",
     # _abc
     "TerminalHost",

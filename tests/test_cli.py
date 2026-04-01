@@ -762,3 +762,96 @@ class PollUntilDoneTest(unittest.TestCase):
         echo_calls = [c.args[0] for c in mock_echo.call_args_list]
         stalled = [c for c in echo_calls if "stalled" in c]
         self.assertTrue(stalled, f"expected (stalled) hint, got: {echo_calls}")
+
+
+class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
+    """Verify _looks_like_working matches old and new Claude Code thinking indicators."""
+
+    def test_old_thinking_prefix(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        self.assertTrue(adapter._looks_like_working("∴ thinking about this..."))
+        self.assertTrue(adapter._looks_like_working("∴ Working on changes"))
+
+    def test_new_thinking_indicators(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        # New-style indicators seen in Claude Code v2.1.89+
+        self.assertTrue(adapter._looks_like_working("✳ Swooping… (51s · ↓ 3.7k tokens)"))
+        self.assertTrue(adapter._looks_like_working("✻ Cogitating… (2m 4s · thinking with high effort)"))
+        self.assertTrue(adapter._looks_like_working("✽ Bloviating… (1m 30s)"))
+        self.assertTrue(adapter._looks_like_working("✻ Ruminating… (5s)"))
+
+    def test_middle_dot_not_false_positive(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        # · (middle dot) appears in regular response content — must NOT match
+        self.assertFalse(adapter._looks_like_working("· next steps..."))
+        self.assertFalse(adapter._looks_like_working("· thinking... through tradeoffs"))
+
+    def test_esc_to_interrupt_working(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        self.assertTrue(adapter._looks_like_working("Running… (esc to interrupt)"))
+        self.assertTrue(adapter._looks_like_working("Working (3s • esc to interrupt)"))
+
+    def test_completed_not_working(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        # Post-thinking lines should NOT match
+        self.assertFalse(adapter._looks_like_working("✻ Cogitated for 4m 4s"))
+        self.assertFalse(adapter._looks_like_working("❯ "))
+        self.assertFalse(adapter._looks_like_working("⏵⏵ bypass permissions on"))
+        self.assertFalse(adapter._looks_like_working("────────────"))
+
+    def test_empty_and_noise(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        self.assertFalse(adapter._looks_like_working(""))
+        self.assertFalse(adapter._looks_like_working("⏺ Read some file"))
+
+
+class ScreenTailStabilityTest(unittest.TestCase):
+    """Verify _screen_tail excludes status bar and separator noise."""
+
+    def test_status_bar_excluded_from_tail(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        screen = (
+            "⏺ Here is my analysis of the code.\n"
+            "  The key issue is in the polling loop.\n"
+            "────────────────────────────────────────\n"
+            "❯ \n"
+            "────────────────────────────────────────\n"
+            "  ⏵⏵ bypass permissions on · 42146 tokens\n"
+        )
+        tail = ClaudeCodeAdapter._screen_tail(screen)
+        # Status bar and separators should be excluded
+        self.assertNotIn("⏵⏵", tail)
+        self.assertNotIn("────", tail)
+        # Content lines should be preserved
+        self.assertIn("analysis", tail)
+        self.assertIn("❯", tail)
+
+    def test_token_count_change_not_in_tail(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        # Simulates two captures where only the token count changed
+        screen1 = "❯ \n  ⏵⏵ bypass permissions on · 42146 tokens\n"
+        screen2 = "❯ \n  ⏵⏵ bypass permissions on · 42200 tokens\n"
+        self.assertEqual(
+            ClaudeCodeAdapter._screen_tail(screen1),
+            ClaudeCodeAdapter._screen_tail(screen2),
+        )
+
+    def test_codex_noise_excluded_from_tail(self) -> None:
+        from agp.plugins.codex import CodexAdapter
+        screen = (
+            "• Here is my response\n"
+            "Working (30s • esc to interrupt)\n"
+            "Token usage: 5000\n"
+            "› \n"
+        )
+        tail = CodexAdapter._screen_tail(screen)
+        self.assertNotIn("Working (", tail)
+        self.assertNotIn("Token usage:", tail)
+        self.assertIn("response", tail)
+        self.assertIn("›", tail)

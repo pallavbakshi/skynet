@@ -77,6 +77,21 @@ class BootstrapFailure(RecoverableExecutionError):
     """Raised when adapter bootstrap fails in a known way."""
 
 
+class StableButIndeterminate(RecoverableExecutionError):
+    """Raised when the screen is stable but the adapter cannot determine the state.
+
+    The screen stopped changing, the agent isn't visibly working, but the adapter
+    can't tell whether the task completed, a permission prompt appeared, or
+    something else happened.  The caller should inspect the screen snapshot and
+    decide what to do.
+    """
+
+    def __init__(self, message: str, *, screen: str = "", last_good_screen: str = "") -> None:
+        super().__init__(message)
+        self.screen = screen
+        self.last_good_screen = last_good_screen
+
+
 class AdapterExecutionFailed(Exception):
     """Raised when an adapter observed a terminal task-level failure."""
 

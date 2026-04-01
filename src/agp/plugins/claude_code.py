@@ -9,8 +9,8 @@ from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     AuthFailure, BootstrapFailure, ExecutionTimeout, PaneDied,
-    RecoverableExecutionError, TerminalHost, TerminalSession,
-    _strip_ansi,
+    RecoverableExecutionError, StableButIndeterminate, TerminalHost,
+    TerminalSession, _strip_ansi,
 )
 
 # ── Claude Code TUI markers ─────────────────────────────────────────
@@ -366,27 +366,71 @@ class ClaudeCodeAdapter(AgentAdapter):
             return s.startswith(_PROMPT_PREFIX)
         return False
 
+    # Unicode prefixes used by Claude Code's thinking/working indicators.
+    # These change across versions (∴, ✳, ✻, ✽) so we match broadly.
+    # Note: · (middle dot, U+00B7) is NOT included because it appears in
+    # regular model output (bullet points like "· next steps...").
+    _THINKING_PREFIXES = (
+        "\u2234",  # ∴ (older)
+        "\u2733",  # ✳
+        "\u273b",  # ✻
+        "\u273d",  # ✽
+    )
+
+    # Verb forms that indicate Claude Code is actively working (case-insensitive).
+    # Use progressive/present forms to avoid matching past-tense completion
+    # summaries like "Cogitated for 4m 4s".
+    _THINKING_VERBS = (
+        "thinking", "working", "analyzing", "planning",
+        "swooping", "cogitating", "bloviating", "germinating",
+        "ruminating", "pondering", "reflecting", "processing",
+        "reasoning", "considering",
+    )
+
     @staticmethod
     def _looks_like_working(text: str) -> bool:
         """Return True when Claude Code still shows an active working state."""
         for line in text.splitlines():
-            s = line.strip().lower()
+            s = line.strip()
             if not s:
                 continue
-            if s.startswith("\u2234 ") and any(
-                word in s for word in ("thinking", "working", "analy", "planning")
-            ):
+            sl = s.lower()
+            for prefix in ClaudeCodeAdapter._THINKING_PREFIXES:
+                if not s.startswith(prefix):
+                    continue
+                # New-style: prefix + ellipsis ("✻ Swooping…", "· Germinating…")
+                if "\u2026" in s or "..." in s:
+                    return True
+                # Old-style: prefix + known verb ("∴ Working on changes")
+                if any(verb in sl for verb in ClaudeCodeAdapter._THINKING_VERBS):
+                    return True
+            if sl.startswith("thinking...") or sl.startswith("thinking\u2026"):
                 return True
-            if s.startswith("thinking...") or s.startswith("thinking…"):
+            # "esc to interrupt" — active tool execution or thinking indicator.
+            if "esc to interrupt" in sl:
                 return True
         return False
 
     @staticmethod
     def _screen_tail(text: str, n: int = 10) -> str:
-        """Return the last N non-empty lines of the visible screen."""
+        """Return the last N non-empty, non-status-bar lines of the visible screen.
+
+        Status bar lines (⏵⏵ ...) and separator lines (────) are excluded so
+        that changes to token counts or status text do not reset the stability
+        timer and falsely extend the idle deadline.
+        """
         lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
-        lines = [ln.rstrip() for ln in lines if ln.strip()]
-        return "\n".join(lines[-n:])
+        filtered = []
+        for ln in lines:
+            s = ln.strip()
+            if not s:
+                continue
+            if _STATUS_BAR_RE.match(s):
+                continue
+            if _SEPARATOR_RE.match(s):
+                continue
+            filtered.append(ln.rstrip())
+        return "\n".join(filtered[-n:])
 
     def _looks_like_shell_returned(self, text: str) -> bool:
         """Return True when the CLI exited and a shell prompt is visible.
@@ -623,6 +667,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         prev_screen = ""
         prev_tail = ""
         unchanged = 0
+        indeterminate_polls = 0
         tui_active = False
         dispatch_time = monotonic()
         accumulated_turns_above_baseline = 0
@@ -714,6 +759,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 unchanged += 1
             else:
                 unchanged = 0
+                indeterminate_polls = 0
                 tui_active = True
                 deadline = monotonic() + timeout
             prev_screen = snap
@@ -737,14 +783,36 @@ class ClaudeCodeAdapter(AgentAdapter):
                 baseline_last_response=baseline_last_response,
             ):
                 break
-            # Fallback: when the response is long enough to scroll the
-            # ❯ marker off the visible screen, _looks_like_completed_turn
-            # fails because it can't find turns.  Use the scrollback-based
-            # turn count instead: if the full accumulated output has new
-            # answered turns and the visible screen ends with a prompt
-            # (possibly behind a status bar), treat as completed.
+            # Fallback 1: scrollback-based turn count.  When the response
+            # is long enough to scroll the ⏺ markers off the visible screen,
+            # _looks_like_completed_turn fails.  Use accumulated scrollback
+            # turns instead.
             if accumulated_turns_above_baseline > 0 and self._visible_ends_with_prompt(screen):
                 break
+            # Fallback 2: idle prompt + observed activity.  The scrollback
+            # turn count can be 0 in the alternate screen buffer (tmux
+            # reports history_size=0, so _capture_from only gets the
+            # bottom of the screen).  If the TUI was active at some point
+            # (we observed screen changes) and now shows an idle ❯ prompt,
+            # the response is complete regardless of whether we can parse
+            # the turn structure.
+            if tui_active and self._visible_ends_with_prompt(screen):
+                break
+
+            # None of the checks could determine the state.  The screen is
+            # stable, the agent isn't visibly working, but we can't tell if
+            # it completed, is waiting for input, or is stuck.  Give it a
+            # few polls of grace then escalate to the caller with a screen
+            # snapshot so they can decide what to do.
+            indeterminate_polls += 1
+            # ~10 seconds of grace (5 polls × 2s) before escalating.
+            if indeterminate_polls >= 5:
+                raise StableButIndeterminate(
+                    "screen is stable but adapter cannot determine if the "
+                    "agent completed, is waiting for input, or is stuck",
+                    screen=screen,
+                    last_good_screen=last_good_screen,
+                )
         else:
             if not prev_screen.strip():
                 raise ExecutionTimeout("claude code tui produced no output after dispatch")
@@ -800,6 +868,25 @@ class ClaudeCodeAdapter(AgentAdapter):
         error: Exception,
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
+        if isinstance(error, StableButIndeterminate):
+            # Surface the screen snapshot so the caller can see exactly
+            # what the TUI was showing when we gave up.
+            screen = error.screen or _strip_ansi(host.read_visible(session))
+            cleaned = _clean_claude_code_output(error.last_good_screen or screen)
+            return ExecutionResult(
+                artifacts=[
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
+                    ArtifactPayload(role="result", name="result.txt", content=cleaned),
+                    ArtifactPayload(role="failure_evidence", name="screen.txt", content=screen),
+                    ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
+                ],
+                summary={
+                    "adapter": self.kind,
+                    "host": host.kind,
+                    "exception_type": "StableButIndeterminate",
+                    "indeterminate": True,
+                },
+            )
         if isinstance(error, AdapterExecutionFailed):
             return ExecutionResult(
                 artifacts=[
