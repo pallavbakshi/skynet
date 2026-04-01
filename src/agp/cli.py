@@ -13,6 +13,7 @@ All server-side imports are deferred to command bodies so that
 
 import json
 import os
+import re as _re
 import sys
 import time
 import uuid
@@ -112,6 +113,71 @@ def _repair_json_string(text: str) -> str:
         if not fixed:
             break
     return repaired
+
+
+def _strip_tui_action_traces(text: str) -> str:
+    """Extract the final summary from a Codex TUI result artifact.
+
+    The Codex TUI can emit streamed progress, shell traces, and footer notices
+    before the delivered summary. Use trace lines and horizontal rules as block
+    boundaries, then keep only the final non-noise block.
+    """
+    lines = text.splitlines()
+    trace_prefixes = (
+        "Explored", "└ ", "Read ", "Search ", "Edited ", "Working (",
+        "Waited for", "Waiting for", "FAILED ", "ERROR ", "› ",
+    )
+    pytest_summary = _re.compile(r"^\d+\s+(?:failed|passed|error|errors)(?:,|\s|$)")
+    background_notice = _re.compile(r"^\d+\s+background terminal running\b")
+    pid_text = _re.compile(r"\bPID\s+\d+\b|\(pid\s+\d+\)")
+    command_trace = _re.compile(r"^Ran (?:(?:python|pytest|pyright|mypy|ruff|git|rg|sed|cat|ls|find|bash|sh|zsh)\b|`)")
+    pytest_noise = (
+        "platform ",
+        "cachedir:",
+        "rootdir:",
+        "configfile:",
+        "plugins:",
+        "asyncio:",
+        "collected ",
+        "=============================",
+    )
+
+    blocks: list[str] = []
+    current: list[str] = []
+
+    def flush_block() -> None:
+        nonlocal current
+        if current:
+            blocks.append("\n".join(current).strip())
+            current = []
+
+    for line in lines:
+        s = line.strip()
+        if not s:
+            flush_block()
+            continue
+        if ((s and all(ch in "─━═—-" for ch in s)) or (s.startswith("─") and len(s) > 20)):
+            flush_block()
+            continue
+        if any(s.startswith(prefix) for prefix in trace_prefixes):
+            flush_block()
+            continue
+        if command_trace.match(s):
+            flush_block()
+            continue
+        if any(s.startswith(prefix) for prefix in pytest_noise):
+            flush_block()
+            continue
+        if background_notice.match(s):
+            flush_block()
+            continue
+        if pytest_summary.match(s) or s.startswith("RuntimeError:"):
+            flush_block()
+            continue
+        current.append(pid_text.sub("pid redacted", line))
+
+    flush_block()
+    return (blocks[-1] if blocks else "").strip()
 
 
 def _extract_trailing_json_payload(text: str) -> dict | None:
@@ -1306,7 +1372,7 @@ def review_cmd(
                 if result_artifact_id:
                     try:
                         artifact = client.fetch_artifact(result_artifact_id, content=True)
-                        artifact_content = artifact.get("content", "")
+                        artifact_content = _strip_tui_action_traces(artifact.get("content", ""))
                         if artifact_content:
                             attachment_name = f"agp-review-{job_id}-source.txt"
                             review_attachments.append({"name": attachment_name, "role": "source-output", "content": artifact_content})
@@ -1330,7 +1396,7 @@ def review_cmd(
                 if fix_artifact_id:
                     try:
                         fix_artifact = client.fetch_artifact(fix_artifact_id, content=True)
-                        fix_content = fix_artifact.get("content", "")
+                        fix_content = _strip_tui_action_traces(fix_artifact.get("content", ""))
                         attachment_note = ""
                         if fix_content:
                             attachment_name = f"agp-review-{job_id}-fix-r{round_num}.txt"
@@ -1445,7 +1511,18 @@ def review_cmd(
                 fix_text = (
                     f"The reviewer found issues that need fixing (round {round_num}):\n\n"
                     f"{review_payload_text}\n\n"
-                    f"Please address all findings and ensure the code is correct."
+                    "INSTRUCTIONS FOR YOUR RESPONSE:\n"
+                    "1. Make the code changes needed to address the findings.\n"
+                    "2. Do NOT edit any artifact files or .agp-artifacts/ content.\n"
+                    "3. Your final response must be ONLY a short summary:\n"
+                    "   - One sentence per change: what file, what you changed, why.\n"
+                    "   - Last line: the test command you ran (if any).\n"
+                    "4. Do NOT include execution traces, tool output, diff fragments, "
+                    "or internal narration in your response.\n"
+                    "5. Describe only verification you actually completed; if a run "
+                    "failed or did not finish, say that plainly and do not call "
+                    "failures existing or unrelated unless you verified that.\n"
+                    "6. Do NOT mention background terminals, PIDs, or other local runtime details."
                 )
                 try:
                     fix_result = client.send(
