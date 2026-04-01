@@ -539,6 +539,7 @@ def runtime_work_loop(
             adapter=build_agent_adapter(actual_adapter_kind),
             artifact_root=artifact_root,
         )
+        import httpx as _httpx
         try:
             batch = worker.run_forever(
                 agent_id=agent_id,

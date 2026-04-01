@@ -162,13 +162,26 @@ class RuntimeSupervisor:
         if tui_died is not None and tui_died.is_set():
             reason = getattr(self, "_active_tui_died_reason", "tui exited during execution")
             raise PaneDied(reason)
-        # Check the local interrupt event set by the heartbeat thread
-        # instead of making an HTTP call per poll cycle.  The heartbeat
-        # response already carries interrupt_requested and the thread
-        # sets this event when it detects one.
+        # Primary path: check the local interrupt event set by the heartbeat
+        # thread.  No HTTP call — instant.
         interrupt_event = getattr(self, "_interrupt_event", None)
         if interrupt_event is not None and interrupt_event.is_set():
             raise InterruptRequested("interrupt requested via heartbeat")
+        # Fallback: periodically poll the CP directly for interrupt status.
+        # This catches interrupts that arrive between heartbeat cycles or
+        # when the heartbeat thread is delayed.  Rate-limited to at most
+        # once every 5 calls (~10s at 2s poll intervals).
+        counter = getattr(self, "_check_interrupt_counter", 0) + 1
+        self._check_interrupt_counter = counter
+        if counter % 5 == 0:
+            try:
+                job = self.client.get_job(claimed["job"]["job_id"])
+                if job["status"] == "interrupt_requested":
+                    raise InterruptRequested("interrupt requested by control plane")
+            except InterruptRequested:
+                raise
+            except Exception:  # noqa: BLE001
+                pass  # transient CP error — rely on heartbeat thread
 
     def _workspace_dir(self, session: TerminalSession) -> Path | None:
         raw = session.workspace_ref
