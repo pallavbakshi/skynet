@@ -648,6 +648,23 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             headers={"Idempotency-Key": "interrupt-flow-1"},
         ).json()
         job_id = sent["data"]["job_id"]
+
+        # Use an adapter that runs long enough for the heartbeat thread to
+        # detect the interrupt.  DefaultAgentAdapter only does 60ms of work,
+        # which under DB load finishes before the interrupt arrives.
+        from agp.runtime import ArtifactPayload, ExecutionResult as _ER
+
+        class SlowAdapter(DefaultAgentAdapter):
+            def execute_run(self, *, host, session, claimed, supervisor):
+                host.send_text(session, claimed["message"]["text"], enter=True)
+                for _ in range(50):
+                    supervisor.check_interrupt(claimed)
+                    sleep(0.02)
+                return _ER(artifacts=[
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=claimed["message"]["text"]),
+                    ArtifactPayload(role="result", name="result.txt", content="done"),
+                ])
+
         runtime_client = RuntimeClient(
             RuntimeIdentity(runtime_id="rtm_interrupt", hostname="localhost", server_url="http://testserver"),
             client=self.client,
@@ -655,7 +672,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         worker = RuntimeSupervisor(
             runtime_client,
             host=InProcessTerminalHost(),
-            adapter=DefaultAgentAdapter(),
+            adapter=SlowAdapter(),
             artifact_root=".agp-artifacts-tests",
         )
         holder: dict[str, object] = {}
@@ -672,7 +689,9 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         thread = Thread(target=run_worker)
         thread.start()
         try:
-            sleep(0.03)
+            # SlowAdapter runs for ~1s; give it time to start before
+            # sending the interrupt.
+            sleep(0.2)
             interrupt = None
             for _ in range(20):
                 try:
@@ -686,7 +705,10 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             assert interrupt is not None
             self.assertEqual(interrupt.status_code, 200)
         finally:
-            thread.join(timeout=2.0)
+            for _ in range(50):
+                thread.join(timeout=0.1)
+                if not thread.is_alive():
+                    break
             runtime_client.close()
 
         self.assertFalse(thread.is_alive())
