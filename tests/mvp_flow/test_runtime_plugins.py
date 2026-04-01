@@ -2045,6 +2045,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             if cmd == "kill-session":
                 state["session_exists"] = False
                 return Result()
+            if cmd == "set-option":
+                return Result()
             raise AssertionError(f"unexpected tmux command: {argv}")
 
         from agp.plugins.tmux import TmuxHost
@@ -2215,6 +2217,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                             return Result(state["text"])
                         if cmd == "kill-session":
                             state["exists"] = False
+                            return Result()
+                        if cmd == "set-option":
                             return Result()
                         raise AssertionError(f"unexpected tmux argv: {argv}")
 
@@ -2421,6 +2425,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                     return Result("baseline\n")
                 return Result(f'baseline\nAGP_RUN_RESULT {state["run_id"]} {{"status":"success","result":"tmux plugin success"}}\n')
             if cmd == "kill-session":
+                return Result()
+            if cmd == "set-option":
                 return Result()
             raise AssertionError(f"unexpected tmux argv: {argv}")
 

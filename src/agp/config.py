@@ -75,9 +75,9 @@ class Settings(BaseSettings):
     claude_code_session_mode: str = "ephemeral"
     claude_code_bootstrap_settle_seconds: float = 0.0
     wezterm_default_cwd: str = ""
-    scrollback_lines: int = 5000
+    scrollback_lines: int = 50000
     wezterm_scrollback_lines: int | None = None
-    tmux_scrollback_lines: int = 5000
+    tmux_scrollback_lines: int = 50000
     tmux_default_cwd: str = ""
     tmux_session_prefix: str = "agp"
     output_checkpoint_dir: Path = Path(".agp-checkpoints")

@@ -115,6 +115,8 @@ class TmuxHost(TerminalHost):
         if cwd:
             args.extend(["-c", cwd])
         self._run(args)
+        # Set explicit history-limit so scrollback does not depend on server defaults.
+        self._run(["set-option", "-t", name, "history-limit", str(self.scrollback_lines)])
         return TerminalSession(
             session_id=name,
             agent_id=agent_id,
