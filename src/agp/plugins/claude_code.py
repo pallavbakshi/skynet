@@ -359,19 +359,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         Claude Code shows a status bar (⏵⏵ ...) below the prompt when idle.
         We need to look past noise lines and status bars to find the prompt.
         """
-        saw_status_bar = False
         for raw in reversed(_strip_ansi(text).splitlines()):
             s = raw.strip()
             if not s:
                 continue
             if _STATUS_BAR_RE.match(s):
-                saw_status_bar = True
                 continue  # look past status bar
-            # Wrapped status-bar continuation (e.g. "16200 tokens" on its
-            # own line) — only skip when adjacent to a real status bar line.
-            if saw_status_bar and _STATUS_TAIL_RE.match(s):
-                continue
-            saw_status_bar = False
+            if _STATUS_TAIL_RE.match(s):
+                continue  # look past wrapped status-bar continuations
             if _SEPARATOR_RE.match(s):
                 continue  # look past separators
             if _is_noise_line(raw):
@@ -446,18 +441,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         """
         lines = text.replace("\r\n", "\n").replace("\r", "\n").splitlines()
         filtered = []
-        prev_was_status = False
         for ln in lines:
             s = ln.strip()
             if not s:
                 continue
             if _STATUS_BAR_RE.match(s):
-                prev_was_status = True
                 continue
-            # Wrapped status-bar continuation — only skip next to a status bar.
-            if prev_was_status and _STATUS_TAIL_RE.match(s):
+            if _STATUS_TAIL_RE.match(s):
                 continue
-            prev_was_status = False
             if _SEPARATOR_RE.match(s):
                 continue
             filtered.append(ln.rstrip())
