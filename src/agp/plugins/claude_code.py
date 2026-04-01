@@ -402,32 +402,37 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     @staticmethod
     def _looks_like_working(text: str) -> bool:
-        """Return True when Claude Code still shows an active working state."""
-        for line in text.splitlines():
+        """Return True when Claude Code still shows an active working state.
+
+        Only scans the BOTTOM of the screen (last ~5 meaningful lines) to avoid
+        false positives from response content that quotes working indicators.
+        """
+        # Collect the last few meaningful lines from the bottom of the screen.
+        # Working indicators always appear at or near the bottom — scanning
+        # the full screen would match quoted code in response content.
+        meaningful = []
+        for line in reversed(text.splitlines()):
             s = line.strip()
             if not s:
                 continue
-            # Skip status bar and other TUI chrome — they can contain stale
-            # "esc to interrupt" text even after the agent finishes.
-            if _STATUS_BAR_RE.match(s) or _is_noise_line(line):
+            if _STATUS_BAR_RE.match(s) or _SEPARATOR_RE.match(s):
                 continue
+            if _is_noise_line(line):
+                continue
+            meaningful.append(s)
+            if len(meaningful) >= 5:
+                break
+
+        for s in meaningful:
             sl = s.lower()
             for prefix in ClaudeCodeAdapter._THINKING_PREFIXES:
                 if not s.startswith(prefix):
                     continue
-                # New-style: prefix + ellipsis ("✻ Swooping…")
                 if "\u2026" in s or "..." in s:
                     return True
-                # Old-style: prefix + known verb ("∴ Working on changes")
                 if any(verb in sl for verb in ClaudeCodeAdapter._THINKING_VERBS):
                     return True
             if sl.startswith("thinking...") or sl.startswith("thinking\u2026"):
-                return True
-            # Inline tool execution indicator: "Running… (esc to interrupt)"
-            # or "Working (3s • esc to interrupt)".  Only match when the
-            # line also has a timing/running indicator — bare mentions of
-            # "esc to interrupt" in response content must not trigger.
-            if "esc to interrupt" in sl and ("\u2026" in s or "..." in s or sl.startswith("working") or sl.startswith("running")):
                 return True
         return False
 

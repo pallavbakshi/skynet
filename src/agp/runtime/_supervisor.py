@@ -6,7 +6,7 @@ import json
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -131,6 +131,7 @@ class RuntimeSupervisor:
             server_url=client.identity.server_url,
         )
         self._registered = False
+        self._session_lock = Lock()
 
     def _write_artifact(self, *, job_id: str, payload: ArtifactPayload) -> dict[str, Any]:
         stored = self.artifact_store.write_text(
@@ -418,7 +419,8 @@ class RuntimeSupervisor:
         run = claimed["run"]
         lease = claimed["lease"]
         session = self.host.get_or_create_session(agent_id=claimed["agent_id"])
-        self._active_session = session
+        with self._session_lock:
+            self._active_session = session
         stop = Event()
         startup_settled = Event()
         tui_died = Event()
@@ -442,7 +444,8 @@ class RuntimeSupervisor:
                         and hasattr(self.host, "is_foreground_tui")
                         and heartbeat_count % 3 == 2
                     ):
-                        active_session = getattr(self, "_active_session", session)
+                        with self._session_lock:
+                            active_session = getattr(self, "_active_session", session)
                         try:
                             if not self.host.is_foreground_tui(active_session):
                                 _append_runtime_log(
@@ -484,10 +487,11 @@ class RuntimeSupervisor:
                                 self.client.identity.runtime_id,
                                 {"kind": "runtime_worker", "action": "interrupt_via_heartbeat", "run_id": run["run_id"]},
                             )
-                            claimed["job"]["status"] = "interrupt_requested"
                             interrupt_event.set()
                             try:
-                                self.host.interrupt(getattr(self, "_active_session", session))
+                                with self._session_lock:
+                                    s = getattr(self, "_active_session", session)
+                                self.host.interrupt(s)
                             except Exception:  # noqa: BLE001
                                 pass
                             stop.set()
@@ -515,7 +519,9 @@ class RuntimeSupervisor:
                             )
                             lease_lost.set()
                             try:
-                                self.host.interrupt(getattr(self, "_active_session", session))
+                                with self._session_lock:
+                                    s = getattr(self, "_active_session", session)
+                                self.host.interrupt(s)
                             except Exception:  # noqa: BLE001
                                 pass
                             stop.set()
@@ -649,12 +655,14 @@ class RuntimeSupervisor:
                         )
                         session.metadata["startup_settled_event"] = startup_settled
                         self._active_startup_settled = startup_settled
-                        self._active_session = session
+                        with self._session_lock:
+                            self._active_session = session
                         self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
                     else:
                         session.metadata["startup_settled_event"] = startup_settled
                         self._active_startup_settled = startup_settled
-                        self._active_session = session
+                        with self._session_lock:
+                            self._active_session = session
                         self.adapter.recover(
                             host=self.host,
                             session=session,
@@ -797,7 +805,8 @@ class RuntimeSupervisor:
                 return {"claimed": True, "claim": claimed, "error": str(exc)}
             return {"claimed": True, "claim": claimed, "error": str(exc), "result": failed}
         finally:
-            self._active_session = None
+            with self._session_lock:
+                self._active_session = None
             self._active_startup_settled = None
             self._active_tui_died = None
             self._active_tui_died_reason = None

@@ -789,20 +789,22 @@ class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
         self.assertFalse(adapter._looks_like_working("· next steps..."))
         self.assertFalse(adapter._looks_like_working("· thinking... through tradeoffs"))
 
-    def test_esc_to_interrupt_working(self) -> None:
+    def test_response_content_not_working(self) -> None:
         from agp.plugins.claude_code import ClaudeCodeAdapter
         adapter = ClaudeCodeAdapter()
-        self.assertTrue(adapter._looks_like_working("Running… (esc to interrupt)"))
-        self.assertTrue(adapter._looks_like_working("Working (3s • esc to interrupt)"))
-        # Response content that mentions "esc to interrupt" must NOT match
+        # Response content that mentions working indicators must NOT match
         self.assertFalse(adapter._looks_like_working(
             '- Then checks "esc to interrupt" on non-noise lines'
         ))
+        # Code quotes containing ellipsis + working keywords must NOT match
+        self.assertFalse(adapter._looks_like_working(
+            'if "esc to interrupt" in sl and ("…" in s or "..." in s'
+        ))
 
-    def test_status_bar_esc_to_interrupt_not_working(self) -> None:
+    def test_status_bar_not_working(self) -> None:
         from agp.plugins.claude_code import ClaudeCodeAdapter
         adapter = ClaudeCodeAdapter()
-        # Status bar contains "esc to interrupt" but should NOT count as working
+        # Status bar is skipped entirely (bottom-scan filters noise)
         self.assertFalse(adapter._looks_like_working(
             "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt   30987 tokens"
         ))
