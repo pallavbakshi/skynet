@@ -617,6 +617,8 @@ class CodexAdapter(AgentAdapter):
         last_heartbeat_at: float,
         heartbeat_interval: float,
         extra: dict[str, Any] | None = None,
+        output_chars: int = 0,
+        output_delta: str = "",
     ) -> float:
         if changed or now - last_heartbeat_at >= heartbeat_interval:
             self._emit_progress_heartbeat(
@@ -627,6 +629,8 @@ class CodexAdapter(AgentAdapter):
                 changed=changed,
                 poll=poll,
                 extra=extra,
+                output_chars=output_chars,
+                output_delta=output_delta,
             )
             return now
         return last_heartbeat_at
@@ -641,6 +645,8 @@ class CodexAdapter(AgentAdapter):
         changed: bool,
         poll: int,
         extra: dict[str, Any] | None = None,
+        output_chars: int = 0,
+        output_delta: str = "",
     ) -> None:
         details = {
             "adapter": self.kind,
@@ -652,6 +658,15 @@ class CodexAdapter(AgentAdapter):
         }
         if extra:
             details.update(extra)
+        details["output_chars"] = output_chars
+        last_line = ""
+        if output_delta:
+            for ln in reversed(output_delta.splitlines()):
+                stripped = _strip_ansi(ln).strip()
+                if stripped:
+                    last_line = stripped[:80]
+                    break
+        details["last_line"] = last_line
         supervisor.emit_progress(
             claimed,
             message="runtime.progress_heartbeat",
@@ -829,6 +844,8 @@ class CodexAdapter(AgentAdapter):
                     "tail_lines": len([ln for ln in tail.splitlines() if ln.strip()]),
                     "idle_seconds_remaining": max(0.0, idle_deadline - now),
                 },
+                output_chars=len(read.full_text),
+                output_delta=read.text,
             )
             # Only check for shell return after the TUI has had time to
             # render.  During the first few seconds the old shell prompt
@@ -1081,6 +1098,8 @@ class CodexAdapter(AgentAdapter):
                     last_heartbeat_at=last_heartbeat_at,
                     heartbeat_interval=heartbeat_interval,
                     extra={"idle_seconds_remaining": max(0.0, idle_deadline - now)},
+                    output_chars=len(read.full_text),
+                    output_delta=read.text,
                 )
                 try:
                     payload = self._extract_terminal_payload(run_id=run_id, output=read.full_text)
@@ -1124,6 +1143,8 @@ class CodexAdapter(AgentAdapter):
                         "idle_polls": idle_count,
                         "idle_seconds_remaining": max(0.0, idle_deadline - now),
                     },
+                    output_chars=len(read.full_text),
+                    output_delta=read.text,
                 )
             sleep(self.poll_interval_seconds)
         raise ExecutionTimeout("codex adapter did not observe completion marker before idle timeout")

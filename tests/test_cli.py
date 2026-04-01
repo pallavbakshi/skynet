@@ -13,6 +13,7 @@ from agp.cli import (
     _cli_client,
     _cli_idempotency_key,
     _extract_trailing_json_payload,
+    _poll_until_done,
     _review_attachment_note,
     _review_fix_attachment_note,
     _strip_tui_action_traces,
@@ -448,3 +449,116 @@ class CaptureGitDiffTest(unittest.TestCase):
             stat, diff = _capture_git_diff(include_untracked=True)
         self.assertIn("new_file.py", stat)
         self.assertIn("Untracked", diff)
+
+
+class PollUntilDoneTest(unittest.TestCase):
+    """Verify _poll_until_done renders activity hints from progress events."""
+
+    def _make_client(self, *, job_sequence, events_data=None, events_error=False):
+        client = MagicMock()
+        client.get_job.side_effect = list(job_sequence)
+        if events_error:
+            client.get_job_events.side_effect = Exception("connection failed")
+        elif events_data is not None:
+            client.get_job_events.return_value = events_data
+        else:
+            client.get_job_events.return_value = {"items": []}
+        return client
+
+    @patch("time.sleep", new=MagicMock())
+    @patch("time.monotonic")
+    def test_renders_last_line_hint(self, mock_monotonic: MagicMock) -> None:
+        from datetime import datetime, timezone
+
+        now_ts = datetime.now(timezone.utc).isoformat()
+        client = self._make_client(
+            job_sequence=[
+                {"status": "running"},
+                {"status": "running"},
+                {"status": "completed", "result": "done"},
+            ],
+            events_data={"items": [
+                {"body": {"message": "runtime.progress_heartbeat", "details": {"last_line": "Running pytest tests/", "output_chars": 4210}}, "created_at": now_ts},
+            ]},
+        )
+        # start=0, while(0), now=0 (skip), while(11), now=11 (fire), while(12), completed
+        mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
+
+        with patch("agp.cli.typer.echo") as mock_echo:
+            job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+
+        self.assertFalse(timed_out)
+        echo_calls = [c.args[0] for c in mock_echo.call_args_list]
+        matching = [c for c in echo_calls if "Running pytest" in c]
+        self.assertTrue(matching, f"expected last_line hint in output, got: {echo_calls}")
+
+    @patch("time.sleep", new=MagicMock())
+    @patch("time.monotonic")
+    def test_renders_output_chars_when_no_last_line(self, mock_monotonic: MagicMock) -> None:
+        from datetime import datetime, timezone
+
+        now_ts = datetime.now(timezone.utc).isoformat()
+        client = self._make_client(
+            job_sequence=[
+                {"status": "running"},
+                {"status": "running"},
+                {"status": "completed"},
+            ],
+            events_data={"items": [
+                {"body": {"message": "runtime.progress_heartbeat", "details": {"last_line": "", "output_chars": 4210}}, "created_at": now_ts},
+            ]},
+        )
+        mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
+
+        with patch("agp.cli.typer.echo") as mock_echo:
+            _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+
+        echo_calls = [c.args[0] for c in mock_echo.call_args_list]
+        matching = [c for c in echo_calls if "4,210 chars output" in c]
+        self.assertTrue(matching, f"expected output_chars hint, got: {echo_calls}")
+
+    @patch("time.sleep", new=MagicMock())
+    @patch("time.monotonic")
+    def test_handles_event_fetch_failure_gracefully(self, mock_monotonic: MagicMock) -> None:
+        client = self._make_client(
+            job_sequence=[
+                {"status": "running"},
+                {"status": "running"},
+                {"status": "completed"},
+            ],
+            events_error=True,
+        )
+        mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
+
+        with patch("agp.cli.typer.echo") as mock_echo:
+            job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+
+        self.assertFalse(timed_out)
+        echo_calls = [c.args[0] for c in mock_echo.call_args_list]
+        matching = [c for c in echo_calls if "Agent working" in c]
+        self.assertTrue(matching, "should still show heartbeat even when events fail")
+
+    @patch("time.sleep", new=MagicMock())
+    @patch("time.monotonic")
+    def test_stall_detection_when_event_is_old(self, mock_monotonic: MagicMock) -> None:
+        from datetime import datetime, timedelta, timezone
+
+        old_ts = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        client = self._make_client(
+            job_sequence=[
+                {"status": "running"},
+                {"status": "running"},
+                {"status": "completed"},
+            ],
+            events_data={"items": [
+                {"body": {"message": "runtime.progress_heartbeat", "details": {"last_line": "Thinking...", "output_chars": 100}}, "created_at": old_ts},
+            ]},
+        )
+        mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
+
+        with patch("agp.cli.typer.echo") as mock_echo:
+            _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+
+        echo_calls = [c.args[0] for c in mock_echo.call_args_list]
+        stalled = [c for c in echo_calls if "stalled" in c]
+        self.assertTrue(stalled, f"expected (stalled) hint, got: {echo_calls}")

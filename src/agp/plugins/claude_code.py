@@ -607,6 +607,8 @@ class ClaudeCodeAdapter(AgentAdapter):
         dispatch_time = monotonic()
         accumulated_turns_above_baseline = 0
         last_good_screen = ""
+        last_heartbeat_at = dispatch_time
+        heartbeat_interval = max(self.idle_poll_seconds, min(10.0, timeout / 4.0))
 
         while monotonic() < deadline:
             sleep(self.idle_poll_seconds)
@@ -621,6 +623,32 @@ class ClaudeCodeAdapter(AgentAdapter):
             )
             snap = self._normalise_visible_screen(screen)
             tail = self._screen_tail(screen)
+            changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
+
+            now = monotonic()
+            if changed or now - last_heartbeat_at >= heartbeat_interval:
+                output_chars = len(read.full_text)
+                last_line = ""
+                if read.text:
+                    for ln in reversed(read.text.splitlines()):
+                        stripped = _strip_ansi(ln).strip()
+                        if stripped:
+                            last_line = stripped[:80]
+                            break
+                supervisor.emit_progress(
+                    claimed,
+                    message="runtime.progress_heartbeat",
+                    details={
+                        "adapter": self.kind,
+                        "session_id": session.session_id,
+                        "run_id": run_id,
+                        "stage": "tui",
+                        "changed": changed,
+                        "output_chars": output_chars,
+                        "last_line": last_line,
+                    },
+                )
+                last_heartbeat_at = now
 
             startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
             if startup_settled_event is not None and startup_settled:

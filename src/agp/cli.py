@@ -731,6 +731,7 @@ def _print_detached(job_id: str, agent_id: str) -> None:
 def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0):
     """Poll job until terminal or timeout.  Returns (job_dict, timed_out)."""
     import time
+    from datetime import datetime, timezone
 
     start = time.monotonic()
     deadline = start + timeout
@@ -744,7 +745,32 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
         now = time.monotonic()
         if now - last_heartbeat >= heartbeat_interval:
             elapsed = int(now - start)
-            typer.echo(f"[..] Agent working... ({elapsed}s elapsed)")
+            hint = ""
+            try:
+                events_data = client.get_job_events(job_id, limit=200)
+                items = events_data.get("items") or []
+                progress_ev = None
+                for ev in reversed(items):
+                    body = ev.get("body") or {}
+                    if body.get("message") == "runtime.progress_heartbeat":
+                        progress_ev = ev
+                        break
+                if progress_ev:
+                    details = (progress_ev.get("body") or {}).get("details") or {}
+                    last_line = (details.get("last_line") or "").strip()
+                    output_chars = details.get("output_chars")
+                    if last_line:
+                        hint = f" \u2014 {last_line[:60]}"
+                    elif output_chars:
+                        hint = f" \u2014 {output_chars:,} chars output"
+                    created_at = progress_ev.get("created_at", "")
+                    if created_at:
+                        ev_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                        if (datetime.now(timezone.utc) - ev_time).total_seconds() > 30:
+                            hint += " (stalled)"
+            except Exception:
+                pass
+            typer.echo(f"[..] Agent working... ({elapsed}s elapsed){hint}")
             last_heartbeat = now
 
         time.sleep(2)
