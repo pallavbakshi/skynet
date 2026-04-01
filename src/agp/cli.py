@@ -521,6 +521,7 @@ def runtime_work_loop(
     ] if capabilities else None
     payload: list[dict] = []
     restart_attempt = 0
+    max_restart_attempts = int(os.environ.get("AGP_MAX_RUNTIME_RESTARTS", "3"))
 
     while True:
         stop_event = Event()
@@ -550,17 +551,41 @@ def runtime_work_loop(
             )
             payload.extend(batch)
             break
-        except Exception as exc:  # noqa: BLE001
+        except _httpx.HTTPStatusError as exc:
+            # 4xx errors are non-retryable (auth failure, bad config, etc.)
+            if 400 <= exc.response.status_code < 500:
+                typer.echo(
+                    f"[runtime] fatal HTTP {exc.response.status_code}: {exc}; exiting",
+                    err=True,
+                )
+                raise typer.Exit(1) from exc
+            # 5xx — transient, fall through to retry
             restart_attempt += 1
-            backoff_seconds = min(30.0, max(idle_sleep_seconds, 0.25) * (2 ** (restart_attempt - 1)))
+        except (ValueError, TypeError) as exc:
+            # Config/setup errors — non-retryable
             typer.echo(
-                f"[runtime] fatal worker error: {type(exc).__name__}: {exc}; reinitializing in {backoff_seconds:.1f}s",
+                f"[runtime] fatal config error: {type(exc).__name__}: {exc}; exiting",
                 err=True,
             )
-            time.sleep(backoff_seconds)
+            raise typer.Exit(1) from exc
+        except Exception as exc:  # noqa: BLE001
+            restart_attempt += 1
         finally:
             stop_event.set()
             client.close()
+        if restart_attempt > max_restart_attempts:
+            typer.echo(
+                f"[runtime] giving up after {restart_attempt} restart attempts; exiting",
+                err=True,
+            )
+            raise typer.Exit(1)
+        backoff_seconds = min(30.0, max(idle_sleep_seconds, 0.25) * (2 ** (restart_attempt - 1)))
+        typer.echo(
+            f"[runtime] worker error (attempt {restart_attempt}/{max_restart_attempts}); "
+            f"reinitializing in {backoff_seconds:.1f}s",
+            err=True,
+        )
+        time.sleep(backoff_seconds)
     typer.echo(payload)
 
 
