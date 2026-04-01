@@ -26,6 +26,7 @@ router = APIRouter()
 
 @router.get("/health")
 def health() -> dict:
+    """Return API and database health status."""
     if os.environ.get("AGP_ENFORCE_SQLITE_RUNTIME_GUARD") == "1":
         ensure_sqlite_runtime_database_available()
     with SessionLocal() as session:

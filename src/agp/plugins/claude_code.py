@@ -269,8 +269,9 @@ class ClaudeCodeAdapter(AgentAdapter):
         if not health.healthy:
             raise BootstrapFailure(f"session unhealthy before bootstrap: {health.reason}")
 
-        # If the TUI is already running in a reused pane, skip launching.
-        if hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
+        # If the TUI is already running in a reused (sticky) pane, skip launching.
+        # In ephemeral mode the session is always fresh — never skip.
+        if self.session_mode == "sticky" and hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
             session.metadata["claude_code_bootstrapped"] = True
             return
 

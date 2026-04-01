@@ -1,4 +1,4 @@
-"""Pydantic schemas for the AGP control plane MVP."""
+"""Pydantic schemas for AGP API requests, responses, and runtime payloads."""
 
 from typing import Any, Generic, Literal, TypeVar
 
@@ -248,6 +248,7 @@ class RuntimeResponse(BaseModel):
     hostname: str
     status: str
     health_status: str
+    capabilities: list[str] = Field(default_factory=list)
     metadata_json: dict[str, Any] = Field(default_factory=dict)
 
 

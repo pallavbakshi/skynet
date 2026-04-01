@@ -15,6 +15,7 @@ from agp.cli import (
     _extract_trailing_json_payload,
     _review_attachment_note,
     _review_fix_attachment_note,
+    _strip_tui_action_traces,
     app,
 )
 
@@ -103,6 +104,56 @@ class CliHelpersTest(unittest.TestCase):
         self.assertIn("fix.txt", note)
         self.assertIn("Short outputs can still be valid.", note)
 
+    def test_strip_tui_action_traces_keeps_only_final_summary_block(self) -> None:
+        raw = (
+            "The schema change is in place. I’m running pytest across the repo now.\n"
+            "pytest is still running; initial collection and early tests are passing.\n"
+            "Waited for background terminal · pytest\n"
+            "The original pytest run appears to have terminated after reporting failures.\n"
+            "FAILED tests/mvp_flow/test_observability.py::test_case\n"
+            "3 failed, 26 passed in 4.07s\n"
+            "─ Worked for 1m 31s ─────────────────────────────────────\n"
+            "Updated src/agp/schemas.py so RuntimeResponse includes capabilities.\n"
+            "pytest did not pass cleanly in this workspace.\n"
+            "RuntimeError: local control plane is still running (pid 36702).\n"
+            "1 background terminal running · /ps to view · /stop to close\n"
+        )
+
+        cleaned = _strip_tui_action_traces(raw)
+
+        self.assertEqual(
+            cleaned,
+            "Updated src/agp/schemas.py so RuntimeResponse includes capabilities.\n"
+            "pytest did not pass cleanly in this workspace.",
+        )
+        self.assertNotIn("36702", cleaned)
+
+    def test_strip_tui_action_traces_redacts_pid_in_final_summary(self) -> None:
+        cleaned = _strip_tui_action_traces("Completed validation against live service (PID 4242).\n")
+        self.assertEqual(cleaned, "Completed validation against live service (pid redacted).")
+
+    def test_strip_tui_action_traces_drops_pytest_session_banner(self) -> None:
+        raw = (
+            "platform darwin -- Python 3.12.11, pytest-8.4.1, pluggy-1.6.0\n"
+            "rootdir: /Users/pb/projects/skynet\n"
+            "plugins: anyio-4.10.0\n"
+            "collected 23 items\n"
+            "\n"
+            "Updated src/agp/cli.py to strip review attachment noise.\n"
+            "Ran targeted CLI tests covering review artifact sanitization.\n"
+            "23 passed in 0.17s\n"
+        )
+
+        cleaned = _strip_tui_action_traces(raw)
+
+        self.assertEqual(
+            cleaned,
+            "Updated src/agp/cli.py to strip review attachment noise.\n"
+            "Ran targeted CLI tests covering review artifact sanitization.",
+        )
+        self.assertNotIn("platform darwin", cleaned)
+        self.assertNotIn("23 passed", cleaned)
+
 
 class CliClientTransportErrorTest(unittest.TestCase):
     """Verify _cli_client catches transport errors and exits cleanly."""
@@ -174,6 +225,48 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[:3], ("agent", "agt_reply", "follow-up from stdin"))
+
+    @patch("agp.cli._make_client")
+    def test_reply_accepts_unquoted_multi_word_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        # Simulate unquoted: reply job_src Three findings need fixes --detach
+        result = runner.invoke(app, ["reply", "job_src", "Three", "findings", "need", "fixes", "--detach"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        sent_task = fake_client.send.call_args.args[2]
+        self.assertIn("Three findings need fixes", sent_task)
+
+    @patch("agp.cli._make_client")
+    def test_send_accepts_unquoted_multi_word_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        # Simulate unquoted: send agent_x Analyze the code --detach
+        result = runner.invoke(app, ["send", "agent_x", "Analyze", "the", "code", "--detach"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        sent_task = fake_client.send.call_args.args[2]
+        self.assertIn("Analyze the code", sent_task)
 
     @patch("agp.cli._make_client")
     @patch("agp.cli.sys.stdin.read", side_effect=AssertionError("stdin should not be read"))
@@ -251,6 +344,8 @@ class ReviewCommandTest(unittest.TestCase):
             fix_text,
         )
         self.assertNotIn('returns str(exc) in "line" path', fix_text)
+        self.assertIn("Describe only verification you actually completed", fix_text)
+        self.assertIn("Do NOT mention background terminals, PIDs", fix_text)
 
 
 class CaptureGitDiffTest(unittest.TestCase):

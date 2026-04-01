@@ -241,7 +241,7 @@ def main() -> int:
             server.send_signal(signal.SIGTERM)
             server.wait(timeout=5)
         else:
-            print(f"\nControl plane still running (PID {server.pid})")
+            print("\nControl plane still running")
 
 
 if __name__ == "__main__":

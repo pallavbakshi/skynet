@@ -1449,6 +1449,21 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         store = get_artifact_store(settings.artifact_backend, settings.artifact_root)
         self.assertEqual(store.read_text(storage_ref=payload["storage_ref"]), "hello upload\n")
 
+    def test_artifacts_upload_endpoint_rejects_empty_content_type(self) -> None:
+        upload = self.client.post(
+            "/artifacts/upload",
+            json={
+                "namespace": "tests",
+                "job_id": "job_upload",
+                "name": "note.txt",
+                "content": "hello upload\n",
+                "role": "transcript_log",
+                "content_type": "",
+            },
+        )
+        self.assertEqual(upload.status_code, 400)
+        self.assertEqual(upload.json()["error"]["message"], "content_type must not be empty")
+
     def test_runtime_worker_can_claim_and_complete(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_runtime", "capabilities": ["python"]})
         self.client.post(

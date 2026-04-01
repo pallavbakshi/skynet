@@ -47,6 +47,10 @@ def result_file_path_for_run(run_id: str) -> str:
     import os
     private_dir = f"/tmp/agp-results-{os.getuid()}"
     os.makedirs(private_dir, mode=0o700, exist_ok=True)
+    # Verify we own the directory (defends against pre-creation by another user)
+    dir_stat = os.stat(private_dir)
+    if dir_stat.st_uid != os.getuid():
+        raise RuntimeError(f"result directory {private_dir} is owned by uid {dir_stat.st_uid}, not us")
     return f"{private_dir}/agp-result-{run_id}.json"
 
 

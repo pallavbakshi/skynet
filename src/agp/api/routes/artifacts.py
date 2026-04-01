@@ -95,6 +95,8 @@ def get_artifact_content(
 
 @router.post("/artifacts/upload")
 def upload_artifact(request: ArtifactUploadRequest) -> dict:
+    if not request.content_type.strip():
+        raise HTTPException(status_code=400, detail="content_type must not be empty")
     store = _artifact_store()
     stored = store.write_text(
         namespace=request.namespace,

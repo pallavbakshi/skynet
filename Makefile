@@ -64,6 +64,7 @@ ifneq ($(CODEX_PROFILE),)
 _PROVIDER_ENV         := OPENAI_API_KEY="$(_RUNTIME_API_KEY)" OPENAI_BASE_URL="$(_RUNTIME_BASE_URL)" OPENROUTER_API_KEY="$(OPENROUTER_API_KEY)"
 endif
 AGP_CODEX_CLI_COMMAND  ?= codex$(if $(CODEX_PROFILE), -p $(CODEX_PROFILE)) --dangerously-bypass-approvals-and-sandbox
+AGP_CLAUDE_CODE_CLI_COMMAND ?= $(shell command -v claude 2>/dev/null || echo claude)
 
 # ── Validation helpers ────────────────────────────────────────────────
 define require_env
@@ -317,16 +318,23 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 		fi; \
 		sleep 1; \
 	done
-	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), caps=$(AGP_RUNTIME_CAPS))"
+	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), adapter=$(ADAPTER_KIND), caps=$(AGP_RUNTIME_CAPS))"
 	$(_PROVIDER_ENV) \
 	AGP_ARTIFACT_BACKEND=http \
-	AGP_CODEX_TUI_MODE=true \
-	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
-	AGP_CODEX_MAX_POLLS=240 \
-	AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
-	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
-	AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
-	AGP_CODEX_IDLE_AFTER=5 \
+	$(if $(filter codex,$(ADAPTER_KIND)), \
+		AGP_CODEX_TUI_MODE=true \
+		AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
+		AGP_CODEX_MAX_POLLS=240 \
+		AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
+		AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
+		AGP_CODEX_IDLE_POLL_SECONDS=2.0 \
+		AGP_CODEX_IDLE_AFTER=5) \
+	$(if $(filter claude_code,$(ADAPTER_KIND)), \
+		AGP_CLAUDE_CODE_CLI_COMMAND="$(AGP_CLAUDE_CODE_CLI_COMMAND)" \
+		AGP_CLAUDE_CODE_IDLE_POLL_SECONDS=2.0 \
+		AGP_CLAUDE_CODE_IDLE_AFTER=3 \
+		AGP_CLAUDE_CODE_IDLE_TIMEOUT_SECONDS=180.0 \
+		AGP_CLAUDE_CODE_SESSION_MODE=ephemeral) \
 	$(RUN) agp runtime-work-loop $(AGP_RUNTIME_ID) \
 		--server-url http://127.0.0.1:$(AGP_PORT) \
 		--host-kind tmux \

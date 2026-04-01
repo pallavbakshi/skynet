@@ -605,7 +605,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         adapter = CodexAdapter(
             poll_interval_seconds=0.02,
-            idle_timeout_seconds=0.03,
+            idle_timeout_seconds=0.2,
         )
         host = StreamingHost()
         session = host.get_or_create_session(agent_id="agt_stream")

@@ -112,7 +112,12 @@ def _repair_json_string(text: str) -> str:
             break
         if not fixed:
             break
-    return repaired
+    # Only return repaired text if it's actually valid JSON now.
+    try:
+        json.loads(repaired)
+        return repaired
+    except json.JSONDecodeError:
+        return text  # return original — don't return half-repaired garbage
 
 
 def _strip_tui_action_traces(text: str) -> str:
@@ -1110,8 +1115,9 @@ def _interrupt_job(client, job_id: str) -> None:
 # ── 1. send ──────────────────────────────────────────────────────────
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": True})
 def send(
+    ctx: typer.Context,
     agent_id: str = typer.Argument(..., help="Target agent ID."),
     task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted)."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
@@ -1128,7 +1134,13 @@ def send(
     Default: waits up to 90s for completion, then auto-detaches.
     Use --detach for fire-and-forget.  Use --timeout to adjust the sync window.
     Use --nudge <orc_id> to get a push notification when the task finishes.
+    Task text can be passed as unquoted words after the agent ID.
     """
+    # Absorb extra positional tokens into task (unquoted multi-word support)
+    if ctx.args:
+        parts = [task] if task else []
+        parts.extend(ctx.args)
+        task = " ".join(parts)
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
@@ -1193,8 +1205,9 @@ def send(
         _print_detached(job_id, agent_id)
 
 
-@app.command()
+@app.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": True})
 def reply(
+    ctx: typer.Context,
     job_id: str = typer.Argument(..., help="Source job ID to reply to."),
     task: str | None = typer.Argument(None, help="Reply text to send; if omitted, read from stdin."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
@@ -1203,7 +1216,15 @@ def reply(
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
 ) -> None:
-    """Reply to an existing job, preserving its conversation context."""
+    """Reply to an existing job, preserving its conversation context.
+
+    Reply text can be passed as unquoted words after the job ID.
+    """
+    # Absorb extra positional tokens into task (unquoted multi-word support)
+    if ctx.args:
+        parts = [task] if task else []
+        parts.extend(ctx.args)
+        task = " ".join(parts)
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
