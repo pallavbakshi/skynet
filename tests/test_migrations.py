@@ -265,5 +265,5 @@ class ServeSchemaValidationTest(unittest.TestCase):
                 else:
                     os.environ["AGP_ENFORCE_SQLITE_RUNTIME_GUARD"] = old_flag
         self.assertEqual(response.status_code, 500)
-        self.assertIn("configured SQLite database file is missing", response.text)
+        self.assertIn("internal server error", response.text)
         mock_shutdown.assert_called_once()

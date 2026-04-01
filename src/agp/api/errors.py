@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from agp.api.helpers import _error_response
+
+_logger = logging.getLogger(__name__)
+_INTERNAL_ERROR_MESSAGE = "internal server error"
 
 
 async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
@@ -31,8 +36,14 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError) 
     return _error_response(400, "invalid_request", str(exc), False)
 
 
-async def generic_exception_handler(_: Request, exc: Exception) -> JSONResponse:
-    return _error_response(500, "internal_error", str(exc), False)
+async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    _logger.exception(
+        "Unhandled exception while serving %s %s",
+        request.method,
+        request.url.path,
+        exc_info=exc,
+    )
+    return _error_response(500, "internal_error", _INTERNAL_ERROR_MESSAGE, False)
 
 
 from agp.services.exceptions import DomainError

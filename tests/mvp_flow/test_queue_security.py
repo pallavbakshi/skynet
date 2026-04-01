@@ -507,6 +507,12 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             self.assertIn("system.operator_tokens_rotated", types)
             self.assertIn("system.runtime_tokens_rotated", types)
 
+            audit = protected_client.get("/ops/audit", headers=new_admin_headers)
+            self.assertEqual(audit.status_code, 200)
+            audit_types = {item["event_type"] for item in audit.json()["data"]["items"]}
+            self.assertIn("system.operator_tokens_rotated", audit_types)
+            self.assertIn("system.runtime_tokens_rotated", audit_types)
+
             restarted_client = TestClient(build_app())
             try:
                 restarted_status = restarted_client.get("/system/auth-status", headers=new_admin_headers)

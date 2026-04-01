@@ -235,7 +235,7 @@ class AgentResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     agent_id: str
     capabilities: list[str] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
     queue_id: str
     status: str
     workspace_ref: str | None = None

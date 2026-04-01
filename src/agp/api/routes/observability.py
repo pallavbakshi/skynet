@@ -206,9 +206,9 @@ def observability_runtime_logs(runtime_id: str, limit: int = Query(default=100, 
 _AUDIT_EVENT_TYPES = frozenset({
     "agent.registered", "agent.idle", "agent.deleted", "agent.draining",
     "job.interrupt_requested", "job.cancelled",
-    "runtime.registered", "runtime.offline",
+    "runtime.registered", "runtime.offline", "runtime.draining", "runtime.restarted",
     "handoff.created",
-    "token.operator_rotated", "token.runtime_rotated",
+    "system.operator_tokens_rotated", "system.runtime_tokens_rotated",
 })
 
 

@@ -916,6 +916,15 @@ class CodexAdapter(AgentAdapter):
         if isinstance(contract, dict) and contract.get("format", "json") == "json":
             # Try extracting JSON from the primary result first.
             json_text = _extract_trailing_json_text(cleaned)
+            # Also probe the full scrollback: if the visible pane only shows the
+            # tail of a long response, the beginning may have scrolled off but is
+            # still present in raw_output.  Prefer whichever candidate produces
+            # the larger (more complete) JSON object.
+            if raw_output:
+                _raw_cleaned = _clean_codex_tui_output(raw_output)
+                _raw_json = _extract_trailing_json_text(_raw_cleaned) if _raw_cleaned else None
+                if _raw_json and (not json_text or len(_raw_json) > len(json_text)):
+                    json_text = _raw_json
             if not json_text:
                 # The primary candidate may have lost the JSON (e.g. the
                 # TUI exited between loop break and read_visible, or the

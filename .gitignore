@@ -26,3 +26,4 @@ superset/
 .agp-test-verify.db-shm
 .agp-test-verify.db-wal
 .claude/
+prompts/

@@ -1371,6 +1371,84 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(runtimes.status_code, 200)
         self.assertGreaterEqual(len(runtimes.json()["data"]["items"]), 1)
 
+    def test_agent_endpoints_return_metadata_json(self) -> None:
+        up = self.client.post(
+            "/agents/up",
+            json={
+                "agent_id": "agt_meta",
+                "capabilities": ["python"],
+                "metadata": {"team": "control-plane"},
+            },
+        )
+        self.assertEqual(up.status_code, 200)
+        payload = up.json()["data"]
+        self.assertEqual(payload["metadata_json"], {"team": "control-plane"})
+        self.assertNotIn("metadata", payload)
+
+        detail = self.client.get("/agents/agt_meta")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["data"]["metadata_json"], {"team": "control-plane"})
+
+    def test_ops_runtime_drain_and_restart_endpoints_update_runtime_state(self) -> None:
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_ops", "hostname": "localhost"})
+
+        drain = self.client.post("/ops/runtimes/rtm_ops/drain")
+        self.assertEqual(drain.status_code, 200)
+        self.assertEqual(drain.json()["data"], {"runtime_id": "rtm_ops", "status": "draining"})
+
+        runtime = self.client.get("/ops/runtimes/rtm_ops")
+        self.assertEqual(runtime.status_code, 200)
+        runtime_data = runtime.json()["data"]
+        self.assertEqual(runtime_data["status"], "draining")
+        self.assertEqual(runtime_data["health_status"], "draining")
+
+        restart = self.client.post("/ops/runtimes/rtm_ops/restart")
+        self.assertEqual(restart.status_code, 200)
+        self.assertEqual(restart.json()["data"], {"runtime_id": "rtm_ops", "status": "idle"})
+
+        runtime = self.client.get("/ops/runtimes/rtm_ops")
+        self.assertEqual(runtime.status_code, 200)
+        runtime_data = runtime.json()["data"]
+        self.assertEqual(runtime_data["status"], "idle")
+        self.assertEqual(runtime_data["health_status"], "healthy")
+
+        session = SessionLocal()
+        try:
+            event_types = [
+                row[0]
+                for row in session.execute(
+                    select(Event.event_type)
+                    .where(Event.runtime_id == "rtm_ops")
+                    .where(Event.event_type.in_(("runtime.draining", "runtime.restarted")))
+                    .order_by(Event.event_seq.asc())
+                ).all()
+            ]
+        finally:
+            session.close()
+        self.assertEqual(event_types, ["runtime.draining", "runtime.restarted"])
+
+    def test_artifacts_upload_endpoint_writes_content(self) -> None:
+        upload = self.client.post(
+            "/artifacts/upload",
+            json={
+                "namespace": "tests",
+                "job_id": "job_upload",
+                "name": "note.txt",
+                "content": "hello upload\n",
+                "role": "transcript_log",
+                "content_type": "text/plain",
+            },
+        )
+        self.assertEqual(upload.status_code, 200)
+        payload = upload.json()["data"]
+        self.assertEqual(payload["role"], "transcript_log")
+        self.assertEqual(payload["content_type"], "text/plain")
+        self.assertGreater(payload["size_bytes"], 0)
+        self.assertTrue(payload["checksum"])
+
+        store = get_artifact_store(settings.artifact_backend, settings.artifact_root)
+        self.assertEqual(store.read_text(storage_ref=payload["storage_ref"]), "hello upload\n")
+
     def test_runtime_worker_can_claim_and_complete(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_runtime", "capabilities": ["python"]})
         self.client.post(

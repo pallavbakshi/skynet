@@ -66,6 +66,54 @@ def _cli_idempotency_key(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
 
 
+def _repair_json_string(text: str) -> str:
+    """Best-effort repair for unescaped quotes inside JSON strings."""
+    try:
+        json.loads(text)
+        return text
+    except json.JSONDecodeError:
+        pass
+
+    repaired = text
+    for _ in range(32):
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError:
+            pass
+
+        in_string = False
+        escape = False
+        fixed = False
+        for idx, char in enumerate(repaired):
+            if not in_string:
+                if char == '"':
+                    in_string = True
+                continue
+            if escape:
+                escape = False
+                continue
+            if char == "\\":
+                escape = True
+                continue
+            if char != '"':
+                continue
+
+            next_non_ws = idx + 1
+            while next_non_ws < len(repaired) and repaired[next_non_ws] in " \t\r\n":
+                next_non_ws += 1
+            if next_non_ws >= len(repaired) or repaired[next_non_ws] in ",}]:":
+                in_string = False
+                continue
+
+            repaired = repaired[:idx] + '\\"' + repaired[idx + 1 :]
+            fixed = True
+            break
+        if not fixed:
+            break
+    return repaired
+
+
 def _extract_trailing_json_payload(text: str) -> dict | None:
     def _candidate_attempts(raw: str) -> list[str]:
         attempts = [
@@ -99,14 +147,15 @@ def _extract_trailing_json_payload(text: str) -> dict | None:
         if fence_start != -1 and stripped.find("\n", fence_start, idx) != -1:
             suffix = stripped[fence_start:]
         for attempt in _candidate_attempts(suffix):
-            try:
-                payload, end = decoder.raw_decode(attempt)
-            except json.JSONDecodeError:
-                continue
-            if attempt[end:].strip():
-                continue
-            if isinstance(payload, dict):
-                return payload
+            for text_to_parse in (attempt, _repair_json_string(attempt)):
+                try:
+                    payload, end = decoder.raw_decode(text_to_parse)
+                except json.JSONDecodeError:
+                    continue
+                if text_to_parse[end:].strip():
+                    continue
+                if isinstance(payload, dict):
+                    return payload
     return None
 
 
@@ -1348,6 +1397,7 @@ def review_cmd(
 
             # Try to parse structured output
             verdict = "changes_requested"
+            structured: dict | None = None
             try:
                 structured = json.loads(content)
             except json.JSONDecodeError:
@@ -1360,6 +1410,15 @@ def review_cmd(
             else:
                 verdict = structured.get("verdict", "changes_requested")
                 summary = structured.get("summary", "")
+            review_payload_text = (
+                json.dumps(structured, separators=(",", ":"), sort_keys=True)
+                if isinstance(structured, dict)
+                else json.dumps(
+                    {"verdict": verdict, "summary": summary, "findings": []},
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
 
             typer.echo(f"[review] Verdict: {verdict}")
             typer.echo(f"[review] Summary: {summary[:200]}")
@@ -1373,7 +1432,7 @@ def review_cmd(
                 typer.echo(f"[review] Sending findings to dev {dev_agent}...")
                 fix_text = (
                     f"The reviewer found issues that need fixing (round {round_num}):\n\n"
-                    f"{content}\n\n"
+                    f"{review_payload_text}\n\n"
                     f"Please address all findings and ensure the code is correct."
                 )
                 try:

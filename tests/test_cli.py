@@ -63,6 +63,27 @@ class CliHelpersTest(unittest.TestCase):
         )
         self.assertEqual(payload, {"verdict": "approved", "summary": "wrapped review"})
 
+    def test_extract_trailing_json_payload_repairs_unescaped_quotes(self) -> None:
+        payload = _extract_trailing_json_payload(
+            "review notes here\n"
+            '{"verdict":"changes_requested","summary":"broken","findings":'
+            '[{"severity":"medium","description":"returns str(exc) in "line" path","line":34}]}'
+        )
+        self.assertEqual(
+            payload,
+            {
+                "verdict": "changes_requested",
+                "summary": "broken",
+                "findings": [
+                    {
+                        "severity": "medium",
+                        "description": 'returns str(exc) in "line" path',
+                        "line": 34,
+                    }
+                ],
+            },
+        )
+
     def test_extract_trailing_json_payload_returns_none_when_missing(self) -> None:
         self.assertIsNone(_extract_trailing_json_payload("plain text only"))
 
@@ -174,6 +195,62 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("task is required", result.output)
         mock_make.assert_not_called()
+
+
+class ReviewCommandTest(unittest.TestCase):
+    @patch("agp.cli._poll_until_done")
+    @patch("agp.cli._make_client")
+    def test_review_forwards_normalized_json_findings_to_dev(
+        self,
+        mock_make: MagicMock,
+        mock_poll_until_done: MagicMock,
+    ) -> None:
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "conversation_id": "conv_123",
+            "target_agent_id": "dev_agent",
+            "result_artifact_id": "artifact_source",
+        }
+
+        malformed_review = (
+            "notes first\n"
+            '{"verdict":"changes_requested","summary":"broken","findings":'
+            '[{"severity":"medium","description":"returns str(exc) in "line" path","line":34}]}'
+        )
+
+        def fetch_artifact(artifact_id: str, *, content: bool = False):
+            self.assertTrue(content)
+            if artifact_id == "artifact_source":
+                return {"content": "source result"}
+            if artifact_id == "artifact_review":
+                return {"content": malformed_review}
+            raise AssertionError(f"unexpected artifact id: {artifact_id}")
+
+        fake_client.fetch_artifact.side_effect = fetch_artifact
+        fake_client.send.side_effect = [{"job_id": "job_review"}, {"job_id": "job_fix"}]
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        mock_poll_until_done.side_effect = [
+            ({"status": "completed", "result_artifact_id": "artifact_review"}, False),
+            ({"status": "completed"}, True),
+        ]
+
+        result = runner.invoke(app, ["review", "job_src", "reviewer_agent", "--max-rounds", "2"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(fake_client.send.call_count, 2)
+        fix_text = fake_client.send.call_args_list[1].args[2]
+        self.assertIn(
+            '{"findings":[{"description":"returns str(exc) in \\"line\\" path","line":34,"severity":"medium"}],'
+            '"summary":"broken","verdict":"changes_requested"}',
+            fix_text,
+        )
+        self.assertNotIn('returns str(exc) in "line" path', fix_text)
 
 
 class CaptureGitDiffTest(unittest.TestCase):
