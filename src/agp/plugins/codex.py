@@ -16,7 +16,7 @@ from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
-    TerminalHost, TerminalSession,
+    StableButIndeterminate, TerminalHost, TerminalSession,
     _strip_ansi,
 )
 
@@ -543,19 +543,13 @@ class CodexAdapter(AgentAdapter):
         turns = _parse_codex_turns(text)
         if not turns:
             return False
-        meaningful: list[str] = []
-        for raw in _strip_ansi(text).splitlines():
-            s = raw.strip()
-            if not s:
-                continue
-            if _is_noise_line(raw):
-                continue
-            meaningful.append(s)
-        if not meaningful:
+
+        # Use _visible_ends_with_prompt for the idle-prompt check — it
+        # correctly handles noise lines and other TUI chrome that a naive
+        # "last meaningful line" scan would trip over.
+        if not self._visible_ends_with_prompt(text):
             return False
-        last = meaningful[-1]
-        if not last.startswith(_PROMPT_MARKER):
-            return False
+
         answered = [turn for turn in turns if turn["response"]]
         if len(answered) > baseline_answered_turns:
             return True
@@ -566,9 +560,26 @@ class CodexAdapter(AgentAdapter):
             return True
         return False
 
-    def _looks_like_working(self, text: str) -> bool:
+    @staticmethod
+    def _looks_like_working(text: str) -> bool:
         """Return True when Codex shows an active Working indicator."""
-        return any(ln.strip().startswith("Working (") for ln in text.splitlines())
+        for line in text.splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            # "Working (3s • esc to interrupt)" is the genuine active-work
+            # indicator — check it before the noise-skip guard (it IS in
+            # _NOISE_PREFIXES for stability purposes, but here we want it).
+            if s.startswith("Working ("):
+                return True
+            # Skip other noise/status lines so that stale "esc to interrupt"
+            # text in transient status lines does not falsely report the
+            # agent as still working.
+            if _is_noise_line(line):
+                continue
+            if "esc to interrupt" in s.lower():
+                return True
+        return False
 
     @staticmethod
     def _visible_ends_with_prompt(text: str) -> bool:
@@ -819,6 +830,7 @@ class CodexAdapter(AgentAdapter):
         prev_screen = ""
         prev_tail = ""
         unchanged = 0
+        indeterminate_polls = 0
         tui_active = False  # True once the TUI has drawn at least one frame
         dispatch_time = monotonic()
         last_heartbeat_at = dispatch_time
@@ -900,6 +912,7 @@ class CodexAdapter(AgentAdapter):
                 unchanged += 1
             else:
                 unchanged = 0
+                indeterminate_polls = 0
                 tui_active = True
                 # Only extend idle deadline on actual content progress
                 # (tail changes), not on full-screen diffs from TUI
@@ -929,14 +942,51 @@ class CodexAdapter(AgentAdapter):
                 baseline_last_response=baseline_last_response,
             ):
                 break
-            # Fallback: when the response is long enough to scroll the
-            # • markers off the visible screen, _looks_like_completed_turn
-            # fails because _parse_codex_turns finds no turns.  Use the
-            # scrollback-based turn count instead: if the full accumulated
-            # output has new answered turns and the visible screen ends
-            # with a prompt marker, treat as completed.
+            # Fallback 1: scrollback-based turn count.  When the response is
+            # long enough to scroll the • markers off the visible screen,
+            # _looks_like_completed_turn fails because _parse_codex_turns
+            # finds no turns.  Use accumulated scrollback turns instead.
             if accumulated_turns_above_baseline > 0 and self._visible_ends_with_prompt(screen):
                 break
+            # Fallback 2: idle prompt + observed activity.  The scrollback
+            # turn count can be 0 in the alternate screen buffer (tmux
+            # reports history_size=0).  If the TUI was active at some point
+            # and now shows an idle › prompt, the response is complete
+            # regardless of whether we can parse the turn structure.
+            if tui_active and self._visible_ends_with_prompt(screen):
+                break
+
+            # None of the checks could determine the state.  The screen is
+            # stable, the agent isn't visibly working, but we can't tell if
+            # it completed, is waiting for input, or is stuck.  Give it a
+            # few polls of grace then escalate to the caller.
+            # Only escalate when there is meaningful content on screen —
+            # an empty pane should fall through to ExecutionTimeout instead.
+            if not screen.strip():
+                continue
+            indeterminate_polls += 1
+            if indeterminate_polls == 1:
+                import logging as _logging
+                _log = _logging.getLogger(__name__)
+                turns = _parse_codex_turns(screen)
+                answered = [t for t in turns if t["response"]]
+                _log.warning(
+                    "indeterminate state entered: turns=%d answered=%d "
+                    "baseline_turns=%d accumulated_scrollback=%d "
+                    "tui_active=%s visible_prompt=%s tail=%r",
+                    len(turns), len(answered), len(baseline_turns),
+                    accumulated_turns_above_baseline, tui_active,
+                    self._visible_ends_with_prompt(screen),
+                    self._screen_tail(screen)[-100:],
+                )
+            # ~10 seconds of grace (5 polls × 2s) before escalating.
+            if indeterminate_polls >= 5:
+                raise StableButIndeterminate(
+                    "screen is stable but adapter cannot determine if the "
+                    "agent completed, is waiting for input, or is stuck",
+                    screen=screen,
+                    last_good_screen=last_good_screen,
+                )
         else:
             if not prev_screen.strip():
                 raise ExecutionTimeout("codex tui produced no output after dispatch")
