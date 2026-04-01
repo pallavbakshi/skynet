@@ -1688,6 +1688,8 @@ def ls(
     from datetime import datetime, timezone
     import httpx as _httpx
 
+    warning_items: list[str] = []
+
     with _cli_client(server_url) as client:
         try:
             agents_data = client.list_agents()
@@ -1710,12 +1712,17 @@ def ls(
 
         # Build agent → runtime lookup (1:1 binding)
         agent_runtime: dict[str, str] = {}
+        runtime_health: dict[str, tuple[str, str]] = {}
         try:
             runtimes_data = client.ops_list_runtimes(limit=200)
             for rt in runtimes_data.get("items", []):
+                runtime_id = rt["runtime_id"]
+                runtime_status = str(rt.get("status") or "-").lower()
+                health_status = str(rt.get("health_status") or "-").lower()
+                runtime_health[runtime_id] = (runtime_status, health_status)
                 aid = rt.get("agent_id")
                 if aid:
-                    agent_runtime[aid] = rt["runtime_id"]
+                    agent_runtime[aid] = runtime_id
         except Exception:
             pass  # ops endpoint may not be available
 
@@ -1758,8 +1765,10 @@ def ls(
                 runtime_id = agent_runtime.get(agent_id, "-")
                 workspace = a.get("workspace_ref") or "-"
                 pending = str(a.get("queue_depth", 0))
+                queue_depth = int(a.get("queue_depth", 0) or 0)
                 queue_age_seconds = a.get("oldest_queue_age_seconds")
                 queue_age = _format_duration(queue_age_seconds) if isinstance(queue_age_seconds, (int, float)) else "-"
+                runtime_status, health_status = runtime_health.get(runtime_id, ("-", "-"))
 
                 job = agent_jobs.get(agent_id)
                 if job:
@@ -1780,7 +1789,26 @@ def ls(
                     f"{job_id:<14s} {time_on_job:<12s} {pending:<7s} {queue_age:<10s} {workspace}"
                 )
 
+                if queue_depth <= 0:
+                    continue
+                if runtime_id == "-":
+                    warning_items.append(
+                        f"- {agent_id}: {queue_depth} queued, no runtime bound. Start or re-register its runtime."
+                    )
+                    continue
+                if runtime_status in {"degraded", "offline"} or health_status in {"degraded", "unreachable"}:
+                    warning_items.append(
+                        f"- {agent_id}: {queue_depth} queued, runtime {runtime_id} heartbeat stale ({health_status if health_status != '-' else runtime_status}). Restart that runtime."
+                    )
+
         typer.echo("")
+
+        if warning_items:
+            typer.echo("[WARNINGS]")
+            for item in warning_items:
+                typer.echo(item)
+            typer.echo("Action: stop stale local runtimes, run `make local-up`, then start fresh runtimes.")
+            typer.echo("")
 
         # ── Available Capabilities section
         typer.echo("[AVAILABLE CAPABILITIES (On-Demand)]")

@@ -146,7 +146,7 @@ local-serve: ## Start local CP + sweepers (SQLite, no infra)
 	@echo "Agents self-register — no seeding needed."
 	@echo "Next: make runtime"
 
-local-up: local-reset local-initdb local-serve ## Clean start: reset + init + serve (one command)
+local-up: stop-runtime local-reset local-initdb local-serve ## Clean start: stop runtimes + reset + init + serve
 
 local-down: stop-cp stop-runtime ## Stop local CP + any running runtimes
 	@echo "Local stack stopped."

@@ -2490,6 +2490,31 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("QUEUE_AGE", result.output)
         self.assertRegex(result.output, r"agt_pending.*\b1\b.*02m:[0-5][0-9]s")
 
+    def test_agp_ls_warns_when_queued_agent_has_no_runtime_bound(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_warn", "capabilities": ["python"]})
+        self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_warn"},
+                "message": {"text": "blocked work", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "ls-warn-1"},
+        )
+
+        session = SessionLocal()
+        try:
+            runtime = session.scalar(select(Runtime).where(Runtime.agent_id == "agt_warn"))
+            assert runtime is not None
+            runtime.agent_id = None
+            session.commit()
+        finally:
+            session.close()
+
+        result = self._cli_invoke(["ls"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("[WARNINGS]", result.output)
+        self.assertIn("agt_warn: 1 queued, no runtime bound.", result.output)
+
     def test_agp_status_shows_queue_summary(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_status_queue", "capabilities": ["python"]})
         self.client.post(
