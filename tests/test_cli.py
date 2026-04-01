@@ -794,6 +794,10 @@ class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
         adapter = ClaudeCodeAdapter()
         self.assertTrue(adapter._looks_like_working("Running… (esc to interrupt)"))
         self.assertTrue(adapter._looks_like_working("Working (3s • esc to interrupt)"))
+        # Response content that mentions "esc to interrupt" must NOT match
+        self.assertFalse(adapter._looks_like_working(
+            '- Then checks "esc to interrupt" on non-noise lines'
+        ))
 
     def test_status_bar_esc_to_interrupt_not_working(self) -> None:
         from agp.plugins.claude_code import ClaudeCodeAdapter

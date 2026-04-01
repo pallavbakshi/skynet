@@ -1,8 +1,11 @@
 """Claude Code CLI agent adapter plugin."""
 from __future__ import annotations
+import logging
 import re
 from time import monotonic, sleep
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 from agp.plugins._output_contracts import apply_output_contract_instruction, prompt_for_claim
 from agp.plugins._provider_env import collect_provider_env
@@ -420,9 +423,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                     return True
             if sl.startswith("thinking...") or sl.startswith("thinking\u2026"):
                 return True
-            # "esc to interrupt" on a non-status-bar line (e.g. tool execution
-            # indicator rendered inline) — but NOT in the ⏵⏵ status bar.
-            if "esc to interrupt" in sl:
+            # Inline tool execution indicator: "Running… (esc to interrupt)"
+            # or "Working (3s • esc to interrupt)".  Only match when the
+            # line also has a timing/running indicator — bare mentions of
+            # "esc to interrupt" in response content must not trigger.
+            if "esc to interrupt" in sl and ("\u2026" in s or "..." in s or sl.startswith("working") or sl.startswith("running")):
                 return True
         return False
 
@@ -814,13 +819,15 @@ class ClaudeCodeAdapter(AgentAdapter):
             # it completed, is waiting for input, or is stuck.  Give it a
             # few polls of grace then escalate to the caller with a screen
             # snapshot so they can decide what to do.
+            # Only escalate when there is meaningful content on screen —
+            # an empty pane should fall through to ExecutionTimeout instead.
+            if not screen.strip():
+                continue
             indeterminate_polls += 1
             if indeterminate_polls == 1:
-                import logging as _logging
-                _log = _logging.getLogger(__name__)
                 turns = _parse_claude_code_turns(screen)
                 answered = [t for t in turns if t["response"]]
-                _log.warning(
+                _logger.warning(
                     "indeterminate state entered: turns=%d answered=%d "
                     "baseline_turns=%d accumulated_scrollback=%d "
                     "tui_active=%s visible_prompt=%s tail=%r",
