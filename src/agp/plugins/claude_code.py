@@ -347,6 +347,26 @@ class ClaudeCodeAdapter(AgentAdapter):
         return False
 
     @staticmethod
+    def _visible_ends_with_prompt(text: str) -> bool:
+        """Return True when the last meaningful line is an idle ❯ prompt or status bar.
+
+        Claude Code shows a status bar (⏵⏵ ...) below the prompt when idle.
+        We need to look past noise lines and status bars to find the prompt.
+        """
+        for raw in reversed(_strip_ansi(text).splitlines()):
+            s = raw.strip()
+            if not s:
+                continue
+            if _STATUS_BAR_RE.match(s):
+                continue  # look past status bar
+            if _SEPARATOR_RE.match(s):
+                continue  # look past separators
+            if _is_noise_line(raw):
+                continue
+            return s.startswith(_PROMPT_PREFIX)
+        return False
+
+    @staticmethod
     def _looks_like_working(text: str) -> bool:
         """Return True when Claude Code still shows an active working state."""
         for line in text.splitlines():
@@ -716,6 +736,14 @@ class ClaudeCodeAdapter(AgentAdapter):
                 baseline_answered_turns=len(baseline_turns),
                 baseline_last_response=baseline_last_response,
             ):
+                break
+            # Fallback: when the response is long enough to scroll the
+            # ❯ marker off the visible screen, _looks_like_completed_turn
+            # fails because it can't find turns.  Use the scrollback-based
+            # turn count instead: if the full accumulated output has new
+            # answered turns and the visible screen ends with a prompt
+            # (possibly behind a status bar), treat as completed.
+            if accumulated_turns_above_baseline > 0 and self._visible_ends_with_prompt(screen):
                 break
         else:
             if not prev_screen.strip():
