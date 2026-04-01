@@ -311,7 +311,7 @@ class CaptureGitDiffTest(unittest.TestCase):
         self.assertIsNone(diff)
 
     @patch("shutil.which", return_value="git")
-    def test_includes_untracked_files(self, mock_which: MagicMock) -> None:
+    def test_excludes_untracked_files_by_default(self, mock_which: MagicMock) -> None:
         from unittest.mock import MagicMock as _Mag
 
         def fake_run(cmd: list[str], **kwargs):
@@ -329,5 +329,27 @@ class CaptureGitDiffTest(unittest.TestCase):
 
         with patch("subprocess.run", side_effect=fake_run):
             stat, diff = _capture_git_diff()
+        self.assertIsNone(stat)
+        self.assertIsNone(diff)
+
+    @patch("shutil.which", return_value="git")
+    def test_includes_untracked_files_when_requested(self, mock_which: MagicMock) -> None:
+        from unittest.mock import MagicMock as _Mag
+
+        def fake_run(cmd: list[str], **kwargs):
+            result = _Mag()
+            result.returncode = 0
+            if "rev-parse" in cmd:
+                result.stdout = "true\n"
+            elif "ls-files" in cmd:
+                result.stdout = "new_file.py\n"
+            elif "--stat" in cmd:
+                result.stdout = ""
+            elif "diff" in cmd and "HEAD" in cmd:
+                result.stdout = ""
+            return result
+
+        with patch("subprocess.run", side_effect=fake_run):
+            stat, diff = _capture_git_diff(include_untracked=True)
         self.assertIn("new_file.py", stat)
         self.assertIn("Untracked", diff)
