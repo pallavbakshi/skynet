@@ -781,6 +781,37 @@ class RedisBackendContractTest(AgpTestCase):
         finally:
             session.close()
 
+    def test_phase3_recovery_does_not_resurrect_cancelled_job(self) -> None:
+        backend = self._make_backend()
+        session = SessionLocal()
+        try:
+            _seed_agent(session)
+            job = _seed_job(session)
+            session.commit()
+            backend.enqueue_job(session, job=job)
+            session.commit()
+
+            backend.client.lpop(backend._queue_key("agent:agt_q"))
+            backend.client.srem(backend._pending_set_key("agent:agt_q"), job.job_id)
+            job.status = JobStatus.CANCELLED.value
+            session.commit()
+
+            result = backend.redrive_stale_deliveries(
+                session, visibility_timeout_seconds=0, max_delivery_attempts=3
+            )
+            session.commit()
+
+            self.assertEqual(result["redriven_deliveries"], 0)
+            self.assertIsNone(backend.dequeue_candidate(session, target_queues=["agent:agt_q"]))
+
+            record = session.scalars(
+                select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job.job_id)
+            ).one()
+            self.assertEqual(record.state, "acked")
+            self.assertIsNotNone(record.acked_at)
+        finally:
+            session.close()
+
     def test_phase2_dead_letters_after_max_attempts(self) -> None:
         """Phase 2 recovery dead-letters if delivery_attempt >= max."""
         from datetime import datetime, timezone

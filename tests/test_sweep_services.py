@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from agp.db import SessionLocal
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
-from agp.models import Agent, Job, Lease, Message, Run, Runtime, utc_now
+from agp.models import Agent, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.queue_backend import reset_queue_backend_state
 from agp.services.sweep import (
     sweep_draining_runtimes,
@@ -132,6 +132,59 @@ class SweepDrainingTest(AgpTestCase):
             result = sweep_stale_agents(session)
             self.assertEqual(result["deleted_drained"], 1)
             self.assertIsNone(session.get(Agent, "agt_dr"))
+        finally:
+            session.close()
+
+    def test_draining_agent_cleanup_acks_stranded_delivery_records(self) -> None:
+        session = SessionLocal()
+        try:
+            now = utc_now()
+            agent = Agent(
+                agent_id="agt_dr_queue",
+                capabilities=["python"],
+                metadata_json={},
+                queue_id="agent:agt_dr_queue",
+                status=AgentStatus.DRAINING.value,
+                last_heartbeat_at=now,
+                created_at=now,
+                updated_at=now,
+            )
+            message = Message(
+                message_id="msg_dr_queue",
+                target_type="agent",
+                target_id="agt_dr_queue",
+                text="stuck queued work",
+                created_at=now,
+            )
+            job = Job(
+                job_id="job_dr_queue",
+                message_id=message.message_id,
+                target_agent_id="agt_dr_queue",
+                target_queue="agent:agt_dr_queue",
+                status=JobStatus.QUEUED.value,
+                created_at=now,
+                updated_at=now,
+            )
+            delivery = QueueDeliveryRecord(
+                delivery_id="del_dr_queue",
+                target_queue="agent:agt_dr_queue",
+                job_id="job_dr_queue",
+                state="pending",
+                created_at=now,
+                updated_at=now,
+            )
+            session.add_all([agent, message, job, delivery])
+            session.commit()
+
+            result = sweep_stale_agents(session)
+
+            self.assertEqual(result["deleted_drained"], 1)
+            self.assertEqual(result["stranded_jobs_cancelled"], 1)
+            session.refresh(job)
+            session.refresh(delivery)
+            self.assertEqual(job.status, JobStatus.FAILED.value)
+            self.assertEqual(delivery.state, "acked")
+            self.assertIsNotNone(delivery.acked_at)
         finally:
             session.close()
 

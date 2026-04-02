@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import PlainTextResponse
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agp.db import get_db
@@ -85,11 +86,21 @@ def ops_restart_runtime(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     """
     from agp.api.helpers import _ok
     from agp.enums import HealthStatus, RuntimeStatus
-    from agp.models import utc_now
+    from agp.models import Lease, utc_now
     from agp.services._helpers import _record_health_transition, _require_runtime
     from agp.services.events import _create_event
+    from agp.services.exceptions import ConflictError
+    from agp.enums import LeaseStatus
 
     runtime = _require_runtime(db, runtime_id)
+    active_leases = db.scalar(
+        select(func.count()).select_from(Lease).where(
+            Lease.runtime_id == runtime.runtime_id,
+            Lease.status == LeaseStatus.ACTIVE.value,
+        )
+    ) or 0
+    if active_leases:
+        raise ConflictError(f"runtime has active leases: {runtime.runtime_id}")
     runtime.status = RuntimeStatus.IDLE.value
     runtime.health_status = HealthStatus.HEALTHY.value
     runtime.updated_at = utc_now()

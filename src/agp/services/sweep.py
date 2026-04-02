@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from agp.config import settings
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
-from agp.models import Agent, Job, Lease, Run, Runtime, utc_now
+from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.queue_backend import get_queue_backend
 from agp.services._helpers import (
     _record_health_transition,
@@ -27,6 +27,21 @@ def _nullify_agent_references(db: Session, agent_id: str) -> None:
     """
     db.execute(text("UPDATE events SET agent_id = NULL WHERE agent_id = :aid"), {"aid": agent_id})
     db.execute(text("UPDATE runtimes SET agent_id = NULL WHERE agent_id = :aid"), {"aid": agent_id})
+
+
+def _ack_queue_deliveries(db: Session, *, job_ids: list[str], now: datetime) -> None:
+    if not job_ids:
+        return
+    rows = db.scalars(
+        select(QueueDeliveryRecord).where(
+            QueueDeliveryRecord.job_id.in_(job_ids),
+            QueueDeliveryRecord.state.in_(("pending", "delivered")),
+        )
+    ).all()
+    for row in rows:
+        row.state = "acked"
+        row.acked_at = now
+        row.updated_at = now
 
 
 def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[str, int]:
@@ -196,14 +211,23 @@ def sweep_stale_agents(
                 Job.status == JobStatus.QUEUED.value,
             )
         ).all()
+        stranded_job_ids: list[str] = []
         for job in stranded_jobs:
             job.status = JobStatus.FAILED.value
             job.updated_at = now
+            stranded_job_ids.append(job.job_id)
             _create_event(
                 db, job_id=job.job_id, event_type="job.failed",
                 body={"reason": "agent_drain_complete", "agent_id": agent.agent_id},
             )
             stranded_cancelled += 1
+        if stranded_job_ids:
+            _ack_queue_deliveries(db, job_ids=stranded_job_ids, now=now)
+            get_queue_backend(settings.queue_backend).remove_jobs(
+                db,
+                target_queue=f"agent:{agent.agent_id}",
+                job_ids=stranded_job_ids,
+            )
 
         _create_event(
             db, agent_id=agent.agent_id, event_type="agent.deleted",

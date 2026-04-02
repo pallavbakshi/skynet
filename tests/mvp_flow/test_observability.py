@@ -548,7 +548,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         missing = self.client.get(f"/jobs/{inline_sent['job_id']}")
         self.assertEqual(missing.status_code, 404)
 
-        restore_backup_snapshot(backup_dir=backup_dir)
+        restore_backup_snapshot(backup_dir=backup_dir, require_stopped_local_cp=False)
 
         restored_job = self.client.get(f"/jobs/{inline_sent['job_id']}")
         self.assertEqual(restored_job.status_code, 200)
@@ -574,7 +574,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
         backup_dir = Path(mkdtemp(prefix="agp-backup-validate-"))
         create_backup_snapshot(backup_dir=backup_dir)
 
-        restore_backup_snapshot(backup_dir=backup_dir)
+        restore_backup_snapshot(backup_dir=backup_dir, require_stopped_local_cp=False)
         shutil.rmtree(settings.artifact_root)
         settings.artifact_root.mkdir(parents=True, exist_ok=True)
 
@@ -670,7 +670,10 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             shutil.rmtree(settings.artifact_root)
         init_db()
 
-        recovered = restore_and_recover_snapshot(backup_dir=backup_dir)
+        recovered = restore_and_recover_snapshot(
+            backup_dir=backup_dir,
+            require_stopped_local_cp=False,
+        )
         self.assertTrue(recovered["ok"])
         self.assertGreaterEqual(recovered["validation"]["checked_artifacts"], 1)
         self.assertEqual(recovered["validation"]["missing_artifacts"], 0)

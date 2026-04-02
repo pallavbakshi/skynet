@@ -5,7 +5,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agp.enums import HealthStatus, LeaseStatus
+from agp.enums import HealthStatus, LeaseStatus, RuntimeStatus
 from agp.models import Lease, Runtime, utc_now
 from agp.services._helpers import _assert_supported_runtime_skew, _new_id, _record_health_transition
 from agp.services.events import _create_event
@@ -47,6 +47,7 @@ def register_runtime_service(
         )
     else:
         previous_health = runtime.health_status
+        previous_status = runtime.status
         runtime.hostname = hostname
         runtime.release_version = release_version
         runtime.metadata_json = metadata
@@ -58,14 +59,18 @@ def register_runtime_service(
                 Lease.status == LeaseStatus.ACTIVE.value,
             )
         )
-        if active_leases:
-            runtime.status = "busy"
+        if previous_status == RuntimeStatus.DRAINING.value:
+            runtime.status = RuntimeStatus.DRAINING.value
+            runtime.health_status = HealthStatus.DRAINING.value
         else:
-            runtime.status = "idle"
-        runtime.health_status = HealthStatus.HEALTHY.value
+            runtime.status = RuntimeStatus.BUSY.value if active_leases else RuntimeStatus.IDLE.value
+            runtime.health_status = HealthStatus.HEALTHY.value
         runtime.last_seen_at = utc_now()
         runtime.last_heartbeat_at = utc_now()
-        if previous_health != HealthStatus.HEALTHY.value:
+        if (
+            previous_health != runtime.health_status
+            and runtime.health_status == HealthStatus.HEALTHY.value
+        ):
             _record_health_transition(
                 db, entity_type="runtime", entity_id=resolved_id,
                 health_status=HealthStatus.HEALTHY.value, reason="re_registered",

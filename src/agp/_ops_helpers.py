@@ -72,7 +72,11 @@ def create_backup_snapshot(*, backup_dir: str | Path) -> dict:
     return manifest
 
 
-def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
+def restore_backup_snapshot(
+    *,
+    backup_dir: str | Path,
+    require_stopped_local_cp: bool = True,
+) -> dict:
     backup_path = Path(backup_dir)
     manifest_path = backup_path / "manifest.json"
     if not manifest_path.exists():
@@ -83,7 +87,8 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
     db_backup_path = Path(manifest["db_snapshot"])
     artifact_backup_path = Path(manifest["artifact_snapshot"])
 
-    ensure_local_control_plane_stopped(root=Path.cwd())
+    if require_stopped_local_cp:
+        ensure_local_control_plane_stopped(root=Path.cwd())
     engine.dispose()
     for suffix in ("", "-wal", "-shm"):
         candidate = Path(f"{db_path}{suffix}")
@@ -111,9 +116,15 @@ def restore_backup_snapshot(*, backup_dir: str | Path) -> dict:
 
 
 def restore_and_recover_snapshot(
-    *, backup_dir: str | Path, validate_limit: int | None = None
+    *,
+    backup_dir: str | Path,
+    validate_limit: int | None = None,
+    require_stopped_local_cp: bool = True,
 ) -> dict:
-    restored = restore_backup_snapshot(backup_dir=backup_dir)
+    restored = restore_backup_snapshot(
+        backup_dir=backup_dir,
+        require_stopped_local_cp=require_stopped_local_cp,
+    )
     validation = validate_restored_state(limit=validate_limit)
     reconstructed = reconstruct_queue_from_state()
     return {

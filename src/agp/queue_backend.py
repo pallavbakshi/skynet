@@ -851,12 +851,22 @@ class RedisQueueBackend:
             # Job was removed from Redis but SQL still says pending — re-enqueue
             job = db.get(Job, record.job_id)
             now = utc_now()
-            if job is not None and job.status == JobStatus.QUEUED.value:
+            if job is not None and job.status == JobStatus.QUEUED.value and job.retry_count < job.max_retries:
                 job.updated_at = now
-            self.client.rpush(self._queue_key(record.target_queue), record.job_id)
-            self.client.sadd(pending_set, record.job_id)
+                self.client.rpush(self._queue_key(record.target_queue), record.job_id)
+                self.client.sadd(pending_set, record.job_id)
+                record.updated_at = now
+                redriven += 1
+                continue
+            if job is not None and job.retry_count >= job.max_retries:
+                record.state = "dead_lettered"
+                record.dead_lettered_at = now
+                dead_lettered += 1
+                self.client.sadd(self._dead_lettered_jobs_key(), record.job_id)
+            else:
+                record.state = "acked"
+                record.acked_at = now
             record.updated_at = now
-            redriven += 1
 
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}
 

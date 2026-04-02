@@ -1427,6 +1427,56 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             session.close()
         self.assertEqual(event_types, ["runtime.draining", "runtime.restarted"])
 
+    def test_ops_runtime_restart_rejects_runtime_with_active_lease(self) -> None:
+        self.client.post("/agents/up", json={"agent_id": "agt_ops_busy", "capabilities": ["python"]})
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_ops_busy", "hostname": "localhost"})
+        sent = self.client.post(
+            "/messages/send",
+            json={
+                "target": {"type": "agent", "id": "agt_ops_busy"},
+                "message": {"text": "keep runtime leased", "metadata": {}},
+            },
+            headers={"Idempotency-Key": "ops-restart-busy-1"},
+        ).json()["data"]
+
+        claim = self.client.post(
+            "/runs/claim",
+            json={"runtime_id": "rtm_ops_busy", "agent_id": "agt_ops_busy"},
+        )
+        self.assertEqual(claim.status_code, 200)
+        self.assertTrue(claim.json()["data"]["claimed"])
+        self.assertEqual(claim.json()["data"]["job"]["job_id"], sent["job_id"])
+
+        restart = self.client.post("/ops/runtimes/rtm_ops_busy/restart")
+        self.assertEqual(restart.status_code, 409)
+        self.assertIn("active leases", restart.json()["error"]["message"])
+
+        runtime = self.client.get("/ops/runtimes/rtm_ops_busy")
+        self.assertEqual(runtime.status_code, 200)
+        self.assertEqual(runtime.json()["data"]["status"], "busy")
+
+    def test_runtime_re_register_preserves_draining_state(self) -> None:
+        self.client.post("/runtimes/register", json={"runtime_id": "rtm_reup", "hostname": "localhost"})
+
+        drain = self.client.post("/ops/runtimes/rtm_reup/drain")
+        self.assertEqual(drain.status_code, 200)
+
+        reup = self.client.post(
+            "/runtimes/register",
+            json={"runtime_id": "rtm_reup", "hostname": "localhost-2", "metadata": {"rev": "2"}},
+        )
+        self.assertEqual(reup.status_code, 200)
+        payload = reup.json()["data"]
+        self.assertEqual(payload["status"], "draining")
+        self.assertEqual(payload["health_status"], "draining")
+
+        runtime = self.client.get("/ops/runtimes/rtm_reup")
+        self.assertEqual(runtime.status_code, 200)
+        runtime_data = runtime.json()["data"]
+        self.assertEqual(runtime_data["status"], "draining")
+        self.assertEqual(runtime_data["health_status"], "draining")
+        self.assertEqual(runtime_data["metadata_json"], {"rev": "2"})
+
     def test_artifacts_upload_endpoint_writes_content(self) -> None:
         upload = self.client.post(
             "/artifacts/upload",
