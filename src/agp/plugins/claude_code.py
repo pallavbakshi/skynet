@@ -291,6 +291,8 @@ class ClaudeCodeAdapter(AgentAdapter):
         )
 
         deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
+        gate_dismissals = 0
+        max_gate_dismissals = 10
         while monotonic() < deadline:
             sleep(self.idle_poll_seconds)
             screen = _strip_ansi(host.read_visible(session))
@@ -301,6 +303,9 @@ class ClaudeCodeAdapter(AgentAdapter):
                         "setup in the container and re-commit the image"
                     )
                 host.send_text(session, self._gate_response(screen), enter=True)
+                gate_dismissals += 1
+                if gate_dismissals <= max_gate_dismissals:
+                    deadline = max(deadline, monotonic() + 30.0)
                 continue
             if self._looks_like_ready(screen):
                 break
@@ -663,7 +668,12 @@ class ClaudeCodeAdapter(AgentAdapter):
         startup_settled_event = session.metadata.get("startup_settled_event") or getattr(
             supervisor, "_active_startup_settled", None,
         )
-        setattr(supervisor, "_active_session", session)
+        lock = getattr(supervisor, "_session_lock", None)
+        if lock is not None:
+            with lock:
+                supervisor._active_session = session
+        else:
+            supervisor._active_session = session
         supervisor.emit_progress(
             claimed,
             message="runtime.tui_dispatch",
@@ -728,7 +738,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 )
                 last_heartbeat_at = now
 
-            startup_settled = tui_active or (monotonic() - dispatch_time > 5.0)
+            startup_settled = tui_active
             if startup_settled_event is not None and startup_settled:
                 startup_settled_event.set()
             if startup_settled and self._looks_like_shell_returned(screen):
@@ -853,7 +863,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         # Try the live visible screen first; fall back to last_good_screen
         # if the TUI exited between the loop break and read_visible.
         cleaned = _clean_claude_code_output(raw_output)
-        if not cleaned.strip() and last_good_screen:
+        if (not cleaned.strip() or self._looks_like_shell_returned(raw_output)) and last_good_screen:
             cleaned = _clean_claude_code_output(last_good_screen)
 
         if not cleaned.strip():
@@ -886,7 +896,10 @@ class ClaudeCodeAdapter(AgentAdapter):
             session.metadata.pop("claude_code_bootstrapped", None)
             return
         host.interrupt(session)
-        sleep(0.1)
+        for _ in range(5):
+            sleep(0.2)
+            if host.shell_idle(session):
+                break
 
     def build_failure_result(
         self,

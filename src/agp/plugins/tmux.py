@@ -237,7 +237,7 @@ class TmuxHost(TerminalHost):
         try:
             self.terminate_session(session)
         except Exception:  # noqa: BLE001
-            pass
+            _logger.warning("terminate_session failed during reset, orphaned session possible", exc_info=True)
         return self.get_or_create_session(
             agent_id=session.agent_id, workspace_ref=session.workspace_ref
         )
