@@ -2611,8 +2611,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertTrue(session.metadata.get("codex_bootstrapped"))
 
-    def test_codex_sticky_tmux_falls_back_to_ephemeral(self) -> None:
-        """sticky + tmux should log a warning and still reset the session."""
+    def test_codex_sticky_tmux_preserves_session(self) -> None:
+        """sticky + tmux should NOT reset the session — TUI stays alive."""
 
         class TmuxLikeHost(InProcessTerminalHost):
             def __init__(self):
@@ -2636,6 +2636,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         host = TmuxLikeHost()
         session = host.get_or_create_session(agent_id="agt_tmux_sticky")
+        session.metadata["codex_bootstrapped"] = True
 
         class SupervisorStub:
             def __init__(self):
@@ -2663,7 +2664,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             )
         except RecoverableExecutionError:
             pass
-        self.assertTrue(host.reset_called, "tmux should always reset even in sticky mode")
+        self.assertFalse(host.reset_called, "sticky mode should preserve tmux session")
 
     def test_codex_ephemeral_resets_on_wezterm(self) -> None:
         """ephemeral + wezterm should reset session before each run."""
@@ -3288,6 +3289,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         host = StableDialogHost(stuck_dialog_screen)
         session = host.get_or_create_session(agent_id="agt_cc_indeterminate")
+        session.metadata["claude_code_bootstrapped"] = True
         claimed = {
             "agent_id": "agt_cc_indeterminate",
             "job": {"job_id": "j1"},
@@ -3483,18 +3485,57 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             self.assertTrue(host.is_foreground_tui(session))
         self.assertTrue(any("capture-pane failed" in line for line in logs.output))
 
-    def test_tmux_is_foreground_tui_defaults_true_when_capture_pane_is_empty(self) -> None:
+    def test_tmux_is_foreground_tui_empty_screen_shell_idle_returns_false(self) -> None:
+        """Empty screen + shell is idle → TUI is not running."""
         from agp.plugins.tmux import TmuxHost
         from agp.runtime import TerminalSession
 
         def runner(argv: list[str], **_: object):
             if argv[1:] == ["capture-pane", "-t", "agp-empty", "-p", "-S", "-50"]:
                 return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+            if "display-message" in argv:
+                return type("R", (), {"stdout": "/dev/ttys099\n", "stderr": "", "returncode": 0})()
             raise AssertionError(f"unexpected: {argv}")
 
-        host = TmuxHost(runner=runner)
-        session = TerminalSession(session_id="agp-empty", agent_id="agt_empty")
-        self.assertTrue(host.is_foreground_tui(session))
+        import subprocess as _sp
+        orig_run = _sp.run
+        def patched_run(cmd, **kw):
+            # ps query for shell_idle — simulate idle shell
+            if cmd and cmd[0] == "ps":
+                return type("R", (), {"stdout": "Ss+  -zsh\n", "stderr": "", "returncode": 0})()
+            return orig_run(cmd, **kw)
+
+        from unittest.mock import patch
+        with patch("subprocess.run", side_effect=patched_run):
+            host = TmuxHost(runner=runner)
+            session = TerminalSession(session_id="agp-empty", agent_id="agt_empty")
+            self.assertFalse(host.is_foreground_tui(session))
+
+    def test_tmux_is_foreground_tui_empty_screen_tui_process_returns_true(self) -> None:
+        """Empty screen + known TUI process (claude) running → TUI alive."""
+        from agp.plugins.tmux import TmuxHost
+        from agp.runtime import TerminalSession
+
+        def runner(argv: list[str], **_: object):
+            if argv[1:] == ["capture-pane", "-t", "agp-redraw", "-p", "-S", "-50"]:
+                return type("R", (), {"stdout": "", "stderr": "", "returncode": 0})()
+            if "display-message" in argv:
+                return type("R", (), {"stdout": "/dev/ttys099\n", "stderr": "", "returncode": 0})()
+            raise AssertionError(f"unexpected: {argv}")
+
+        import subprocess as _sp
+        orig_run = _sp.run
+        def patched_run(cmd, **kw):
+            # ps query — simulate claude as foreground process
+            if cmd and cmd[0] == "ps":
+                return type("R", (), {"stdout": "Ss+  -zsh\nS+   claude\n", "stderr": "", "returncode": 0})()
+            return orig_run(cmd, **kw)
+
+        from unittest.mock import patch
+        with patch("subprocess.run", side_effect=patched_run):
+            host = TmuxHost(runner=runner)
+            session = TerminalSession(session_id="agp-redraw", agent_id="agt_redraw")
+            self.assertTrue(host.is_foreground_tui(session))
 
     def test_build_agent_adapter_claude_code(self) -> None:
         """build_agent_adapter should return ClaudeCodeAdapter for kind='claude_code'."""

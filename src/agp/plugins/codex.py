@@ -333,11 +333,10 @@ class CodexAdapter(AgentAdapter):
         if not health.healthy:
             raise BootstrapFailure(f"session unhealthy before bootstrap: {health.reason}")
         if self.tui_mode:
-            # On this Linux host, interactive Codex launched inside tmux accepts the
-            # prompt visually but does not progress when the prompt is injected later
-            # with send-keys.  We therefore use a per-run launch path for tmux TUI
-            # execution and skip persistent bootstrap here.
-            if host.kind == "tmux":
+            # In ephemeral mode on tmux, skip persistent bootstrap — each
+            # execute_run invokes codex as a one-shot process via launch_command.
+            # In sticky mode, fall through to launch a persistent TUI.
+            if host.kind == "tmux" and self.session_mode != "sticky":
                 session.metadata["codex_bootstrapped"] = True
                 return
             # If the TUI is already running in this pane (e.g. reused session
@@ -782,22 +781,13 @@ class CodexAdapter(AgentAdapter):
             result_file_path=result_file,
         )
 
-        # Session reset logic depends on host kind and session_mode:
-        # - tmux always resets (send-keys unreliable with running TUI)
-        # - wezterm resets only in ephemeral mode; sticky keeps the session
-        if host.kind == "tmux":
-            if self.session_mode == "sticky":
-                import logging
-                logging.getLogger(__name__).warning(
-                    "sticky session_mode is not supported on tmux — falling back to ephemeral"
-                )
+        # Session reset depends on session_mode:
+        # - ephemeral: always reset (fresh TUI per job)
+        # - sticky: keep the TUI alive across jobs (history preserved)
+        if self.session_mode == "ephemeral":
             session = host.reset_session(session)
             session.metadata.pop('restored_cursor', None)
-            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
-        elif self.session_mode == "ephemeral":
-            session = host.reset_session(session)
-            session.metadata.pop('restored_cursor', None)
-            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
         # Capture baseline AFTER reset/bootstrap so it reflects the fresh pane.
         baseline_screen = _strip_ansi(host.read_visible(session))
@@ -820,7 +810,8 @@ class CodexAdapter(AgentAdapter):
             message="runtime.tui_dispatch",
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
-        if host.kind == "tmux":
+        if host.kind == "tmux" and self.session_mode != "sticky":
+            # Ephemeral on tmux: one-shot codex invocation per job.
             host.launch_command(
                 session,
                 command=f"{self.cli_command} {shlex.quote(prompt)}",
@@ -828,6 +819,7 @@ class CodexAdapter(AgentAdapter):
                 cwd=session.workspace_ref,
             )
         else:
+            # Sticky (any host) or non-tmux: send prompt to persistent TUI.
             host.send_text(session, prompt, enter=True)
 
         def _poll_hook() -> None:

@@ -298,7 +298,17 @@ class TmuxHost(TerminalHost):
             return True
         screen = _strip_ansi(completed.stdout or "")
         if not screen.strip():
-            return True
+            # Empty screen: use process-based detection as tiebreaker.
+            # Only return True if the foreground process is a known TUI
+            # CLI (claude, codex).  Shell init commands (git, sw_vers)
+            # and unrecognised processes are not evidence of a live TUI.
+            cmd = self._foreground_command(session)
+            if not cmd:
+                return False
+            from os.path import basename as _basename
+            name = _basename(cmd).lower().lstrip("-")
+            _TUI_PROCESS_NAMES = {"claude", "codex"}
+            return name in _TUI_PROCESS_NAMES
         lines = screen.strip().splitlines()
         tail = [ln.strip() for ln in lines[-5:] if ln.strip()]
         has_codex_tui = any("\u203a" in ln for ln in tail)

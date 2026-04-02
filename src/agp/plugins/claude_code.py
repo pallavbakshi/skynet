@@ -637,22 +637,13 @@ class ClaudeCodeAdapter(AgentAdapter):
         prompt = apply_output_contract_instruction(prompt=claimed["message"]["text"], claimed=claimed)
         run_id = claimed["run"]["run_id"]
 
-        # Session reset depends on host kind and session_mode:
-        # - tmux always resets (send-keys unreliable with running TUI)
-        # - wezterm resets only in ephemeral mode; sticky keeps the session
-        if host.kind == "tmux":
-            if self.session_mode == "sticky":
-                import logging
-                logging.getLogger(__name__).warning(
-                    "sticky session_mode is not supported on tmux — falling back to ephemeral"
-                )
+        # Session reset depends on session_mode:
+        # - ephemeral: always reset (fresh TUI per job)
+        # - sticky: keep the TUI alive across jobs (history preserved)
+        if self.session_mode == "ephemeral":
             session = host.reset_session(session)
             session.metadata.pop('restored_cursor', None)
-            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
-        elif self.session_mode == "ephemeral":
-            session = host.reset_session(session)
-            session.metadata.pop('restored_cursor', None)
-            self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
         baseline_screen = _strip_ansi(host.read_visible(session))
         baseline_turns = [t for t in _parse_claude_code_turns(baseline_screen) if t["response"]]
