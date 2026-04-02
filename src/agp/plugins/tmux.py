@@ -73,6 +73,28 @@ class TmuxHost(TerminalHost):
             raise RuntimeError(f"tmux command failed: {' '.join(args)} :: {stderr}")
         return completed.stdout or ""
 
+    def _run_retry_missing_pane(
+        self,
+        args: list[str],
+        *,
+        attempts: int = 5,
+        sleep_seconds: float = 0.1,
+    ) -> str:
+        last_error: RuntimeError | None = None
+        for attempt in range(attempts):
+            try:
+                return self._run(args)
+            except RuntimeError as exc:
+                message = str(exc).lower()
+                if "can't find pane" not in message and "can't find session" not in message:
+                    raise
+                last_error = exc
+                if attempt == attempts - 1:
+                    break
+                sleep(sleep_seconds)
+        assert last_error is not None
+        raise last_error
+
     def _get_pane_tty(self, session: TerminalSession) -> str | None:
         tty = self._run(
             ["display-message", "-t", session.session_id, "-p", "#{pane_tty}"],
@@ -163,14 +185,14 @@ class TmuxHost(TerminalHost):
             ["display-message", "-t", session.session_id, "-p", "#{history_size}"],
         ).strip())
         start_offset = absolute_start - hist
-        return self._run([
+        return self._run_retry_missing_pane([
             "capture-pane", "-t", session.session_id, "-p", "-J",
             "-S", str(start_offset),
         ])
 
     def _capture_full(self, session: TerminalSession) -> str:
         """Capture full pane content including scrollback."""
-        return self._run([
+        return self._run_retry_missing_pane([
             "capture-pane", "-t", session.session_id, "-p",
             "-S", str(-self.scrollback_lines),
         ])
@@ -232,6 +254,14 @@ class TmuxHost(TerminalHost):
 
     def interrupt(self, session: TerminalSession) -> None:
         self._run(["send-keys", "-t", session.session_id, "C-c"])
+        # tmux can deliver Ctrl-C before the pane state has visibly settled.
+        # Give the shell a brief chance to return to an idle prompt so callers
+        # do not have to guess at a fixed sleep window.
+        deadline = monotonic() + 1.0
+        while monotonic() < deadline:
+            if self.shell_idle(session):
+                return
+            sleep(0.05)
 
     def reset_session(self, session: TerminalSession) -> TerminalSession:
         try:
@@ -332,7 +362,7 @@ class TmuxHost(TerminalHost):
 
     def read_visible(self, session: TerminalSession) -> str:
         """Read the currently visible screen (no scrollback)."""
-        return self._run([
+        return self._run_retry_missing_pane([
             "capture-pane", "-t", session.session_id, "-p",
         ])
 

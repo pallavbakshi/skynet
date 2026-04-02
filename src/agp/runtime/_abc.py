@@ -112,15 +112,35 @@ class TerminalHost(ABC):
     def _foreground_command(self, session: TerminalSession) -> str | None:
         """Return the foreground process command via ps, or None.
 
-        On BSD/macOS ``+`` marks all members of the foreground process
-        group, so both the shell and its child can have ``+``.  We take
-        the *last* matching entry because ``ps`` lists parent before child,
-        and the deepest child is the actual foreground process.
+        Prefer ``pgid == tpgid`` when available because it survives shells that
+        temporarily lose the ``+`` state marker during fast job-control
+        transitions. On BSD/macOS ``+`` marks all members of the foreground
+        process group, so both the shell and its child can have ``+``. We take
+        the *last* matching entry because ``ps`` lists parent before child, and
+        the deepest child is the actual foreground process.
         """
         tty = self._get_pane_tty(session)
         if not tty:
             return None
         tty_name = tty.removeprefix("/dev/")
+        try:
+            completed = subprocess.run(
+                ["ps", "-o", "pid=", "-o", "pgid=", "-o", "tpgid=", "-o", "comm=", "-t", tty_name],
+                capture_output=True, text=True, check=False,
+            )
+        except (FileNotFoundError, OSError):
+            completed = None
+        if completed is not None and completed.returncode == 0:
+            fg_cmd = None
+            for line in completed.stdout.splitlines():
+                parts = line.split(None, 3)
+                if len(parts) != 4:
+                    continue
+                _pid, pgid, tpgid, comm = parts
+                if pgid == tpgid:
+                    fg_cmd = comm.strip()
+            if fg_cmd:
+                return fg_cmd
         try:
             completed = subprocess.run(
                 ["ps", "-o", "state=", "-o", "comm=", "-t", tty_name],
