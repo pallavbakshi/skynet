@@ -856,6 +856,32 @@ class ScreenTailStabilityTest(unittest.TestCase):
             ClaudeCodeAdapter._screen_tail(screen2),
         )
 
+    def test_wrapped_status_bar_continuation_excluded_from_tail_and_prompt_check(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+
+        screen1 = (
+            "❯ hello\n"
+            "● 你好！\n"
+            "────────────────────────────────────────\n"
+            "❯ \n"
+            "  ⏵⏵ bypass permissions on\n"
+            "  · esc to interrupt   42146 tokens\n"
+        )
+        screen2 = (
+            "❯ hello\n"
+            "● 你好！\n"
+            "────────────────────────────────────────\n"
+            "❯ \n"
+            "  ⏵⏵ bypass permissions on\n"
+            "  · esc to interrupt   42200 tokens\n"
+        )
+
+        self.assertEqual(
+            ClaudeCodeAdapter._screen_tail(screen1),
+            ClaudeCodeAdapter._screen_tail(screen2),
+        )
+        self.assertTrue(ClaudeCodeAdapter._visible_ends_with_prompt(screen1))
+
     def test_codex_noise_excluded_from_tail(self) -> None:
         from agp.plugins.codex import CodexAdapter
         screen = (

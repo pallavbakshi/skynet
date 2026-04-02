@@ -32,6 +32,10 @@ _STATUS_BAR_RE = re.compile(r"^\s*\u23f5\u23f5\s+")  # ⏵⏵ (any status bar va
 # Matches wrapped status-bar continuations: lines that are just
 # whitespace + a token count like "16200 tokens" at the right edge.
 _STATUS_TAIL_RE = re.compile(r"^\s*\d[\d,]*\s+tokens?\s*$", re.IGNORECASE)
+_STATUS_CONTINUATION_RE = re.compile(
+    r"^(?:\u00b7\s+.*|.*(?:esc to interrupt|shift\+tab to cycle|bypass permissions on).*)$",
+    re.IGNORECASE,
+)
 _BOX_CHARS = set("\u2500\u2502\u256d\u256e\u256f\u2570\u2514\u250c\u2510\u2518\u2524\u251c\u252c\u2534\u253c\u2501\u2503")
 
 # Lines matching these are TUI chrome, not content.
@@ -66,6 +70,16 @@ def _is_noise_line(line: str) -> bool:
     if all(ch in _BOX_CHARS or ch in " \t" for ch in s):
         return True
     return False
+
+
+def _is_status_continuation_line(line: str) -> bool:
+    """Return True for wrapped Claude Code status-bar continuation lines."""
+    s = line.strip()
+    if not s:
+        return False
+    if _STATUS_TAIL_RE.match(s):
+        return True
+    return bool(_STATUS_CONTINUATION_RE.match(s))
 
 
 def _is_response_line(line: str) -> bool:
@@ -370,7 +384,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 continue
             if _STATUS_BAR_RE.match(s):
                 continue  # look past status bar
-            if _STATUS_TAIL_RE.match(s):
+            if _is_status_continuation_line(raw):
                 continue  # look past wrapped status-bar continuations
             if _SEPARATOR_RE.match(s):
                 continue  # look past separators
@@ -452,7 +466,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 continue
             if _STATUS_BAR_RE.match(s):
                 continue
-            if _STATUS_TAIL_RE.match(s):
+            if _is_status_continuation_line(ln):
                 continue
             if _SEPARATOR_RE.match(s):
                 continue
