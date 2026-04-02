@@ -296,7 +296,9 @@ class TerminalHost(ABC):
         except Exception:
             self._cleanup_launch_artifacts(script_path, script_dir)
             raise
-        return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc.wait()
+        return proc
 
 
 class AgentAdapter(ABC):

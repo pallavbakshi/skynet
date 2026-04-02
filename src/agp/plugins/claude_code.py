@@ -272,18 +272,29 @@ class ClaudeCodeAdapter(AgentAdapter):
             "supported": True,
         }
 
-    def ensure_bootstrapped(self, *, host: TerminalHost, session: TerminalSession, claimed: dict[str, Any]) -> None:  # noqa: ARG002
+    def ensure_bootstrapped(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],
+    ) -> bool:  # noqa: ARG002
+        """Ensure the Claude Code TUI is ready.
+
+        Returns True when the adapter reused an already-running foreground TUI.
+        Returns False when it had to launch or re-bootstrap the session.
+        """
         if session.metadata.get("claude_code_bootstrapped"):
             # In sticky mode, verify the TUI is still alive before skipping.
             if hasattr(host, "is_foreground_tui"):
                 if not host.is_foreground_tui(session):
                     session.metadata.pop("claude_code_bootstrapped", None)
                 else:
-                    return
+                    return True
             elif host.kind == "tmux":
                 session.metadata.pop("claude_code_bootstrapped", None)
             else:
-                return
+                return True
 
         health = host.health(session)
         if not health.healthy:
@@ -293,7 +304,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         # In ephemeral mode the session is always fresh — never skip.
         if self.session_mode == "sticky" and hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
             session.metadata["claude_code_bootstrapped"] = True
-            return
+            return True
 
         # Launch Claude Code interactively with permissions bypassed
         # so tool-use prompts don't block autonomous execution.
@@ -333,6 +344,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 raise BootstrapFailure(f"session unhealthy after bootstrap: {health.reason}")
 
         session.metadata["claude_code_bootstrapped"] = True
+        return False
 
     # ── TUI detection helpers ────────────────────────────────────────
 
@@ -666,13 +678,15 @@ class ClaudeCodeAdapter(AgentAdapter):
         if self.session_mode == "ephemeral":
             session = host.reset_session(session)
             session.metadata.pop('restored_cursor', None)
-        self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+        reused_existing_tui = self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
-        baseline_screen = _strip_ansi(host.read_visible(session))
-        baseline_turns = [t for t in _parse_claude_code_turns(baseline_screen) if t["response"]]
+        baseline_turns: list[dict[str, Any]] = []
         baseline_last_response = None
-        if baseline_turns:
-            baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
+        if reused_existing_tui:
+            baseline_screen = _strip_ansi(host.read_visible(session))
+            baseline_turns = [t for t in _parse_claude_code_turns(baseline_screen) if t["response"]]
+            if baseline_turns:
+                baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
 
         health = host.health(session)
         if not health.healthy:
@@ -801,9 +815,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                 deadline = monotonic() + timeout
             prev_screen = snap
             prev_tail = tail
-            # Preserve the last screen with TUI content for extraction,
-            # because the TUI may exit between loop break and read_visible.
-            if _PROMPT_PREFIX in screen:
+            # Preserve the last non-trivial screen with TUI content for
+            # extraction, because the TUI may exit between loop break and
+            # read_visible. Avoid overwriting it with a prompt-only screen.
+            non_empty_lines = [ln for ln in screen.splitlines() if ln.strip()]
+            if _PROMPT_PREFIX in screen and len(non_empty_lines) > 1:
                 last_good_screen = screen
 
             stable_after = max(1, self.idle_after - 1)
@@ -825,14 +841,21 @@ class ClaudeCodeAdapter(AgentAdapter):
             # turns instead.
             if accumulated_turns_above_baseline > 0 and self._visible_ends_with_prompt(screen):
                 break
-            # Fallback 2: idle prompt + observed activity.  The scrollback
-            # turn count can be 0 in the alternate screen buffer (tmux
-            # reports history_size=0, so _capture_from only gets the
-            # bottom of the screen).  If the TUI was active at some point
-            # (we observed screen changes) and now shows an idle ❯ prompt,
-            # the response is complete regardless of whether we can parse
-            # the turn structure.
-            if tui_active and self._visible_ends_with_prompt(screen):
+            # Fallback 2: preserve-and-check the best prior screen. In tmux's
+            # alternate screen buffer, the visible pane can momentarily settle
+            # back to a bare prompt before read_output captures enough
+            # scrollback to parse a turn. Only complete from the idle prompt
+            # when we have already seen a completed turn on a richer screen.
+            if (
+                tui_active
+                and self._visible_ends_with_prompt(screen)
+                and last_good_screen
+                and self._looks_like_completed_turn(
+                    last_good_screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                )
+            ):
                 break
 
             # None of the checks could determine the state.  The screen is

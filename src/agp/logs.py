@@ -15,8 +15,18 @@ def _rotated_log_path(path: Path, *, now: datetime | None = None) -> Path:
 
 def append_jsonl_log(path: Path, entry: dict[str, Any], *, rotation_bytes: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    if rotation_bytes > 0 and path.exists() and path.stat().st_size >= rotation_bytes:
-        path.rename(_rotated_log_path(path))
+    if rotation_bytes > 0:
+        try:
+            needs_rotation = path.stat().st_size >= rotation_bytes
+        except FileNotFoundError:
+            needs_rotation = False
+        if needs_rotation:
+            try:
+                path.rename(_rotated_log_path(path))
+            except FileNotFoundError:
+                # Another thread/process rotated or removed the active file
+                # after our size check. Treat that as already handled.
+                pass
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(entry, default=str, sort_keys=True) + "\n")
 

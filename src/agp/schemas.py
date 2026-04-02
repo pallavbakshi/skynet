@@ -196,13 +196,18 @@ class HandoffRequest(BaseModel):
 
 
 class ArtifactUploadRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
     namespace: str
     job_id: str
     name: str
     content: str
     role: str
     content_type: str = "text/plain"
-    register: bool = False
+    register_artifact: bool = Field(
+        default=False,
+        alias="register",
+        serialization_alias="register",
+    )
 
 
 class CapabilitySeedRequest(BaseModel):

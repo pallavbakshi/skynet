@@ -3058,6 +3058,66 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         result_log = next(a for a in result.artifacts if a.name == "result.txt")
         self.assertIn("Race condition result", result_log.content)
 
+    def test_claude_code_does_not_complete_on_prompt_only_screen_before_answer(self) -> None:
+        class ClaudePromptRaceHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._phase = "bootstrap"
+                self._prompt_only_reads = 0
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if self._phase == "bootstrap" and "task prompt" in text:
+                    self._phase = "prompt_only"
+
+            def read_visible(self, session):
+                if self._phase == "bootstrap":
+                    return "\u276f \n\u2500\u2500\u2500\u2500\n"
+                if self._phase == "prompt_only":
+                    self._prompt_only_reads += 1
+                    if self._prompt_only_reads > 3:
+                        self._phase = "response"
+                    return "\u276f task prompt\n"
+                return (
+                    "\u276f task prompt\n"
+                    "\u23fa The real answer is 4.\n"
+                    "\u2500\u2500\u2500\u2500\n"
+                    "\u276f \n"
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_prompt_race"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = ClaudePromptRaceHost()
+        session = host.get_or_create_session(agent_id="agt_cc_prompt_race")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_cc_prompt_race",
+            "job": {"job_id": "job_cc_prompt_race"},
+            "run": {"run_id": "run_cc_prompt_race"},
+            "message": {"text": "task prompt"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(a for a in result.artifacts if a.name == "result.txt")
+        self.assertIn("The real answer is 4", result_log.content)
+
     def test_claude_code_bootstrap_verifies_health(self) -> None:
         from agp.runtime import SessionHealth
 

@@ -113,7 +113,7 @@ def upload_artifact(request: ArtifactUploadRequest, db: Session = Depends(get_db
         "role": stored.role,
         "content_type": stored.content_type,
     }
-    if request.register:
+    if request.register_artifact:
         from agp.services._helpers import _new_id
 
         artifact_id = _new_id("art")
