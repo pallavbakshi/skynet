@@ -818,6 +818,24 @@ class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
         self.assertFalse(adapter._looks_like_working("⏵⏵ bypass permissions on"))
         self.assertFalse(adapter._looks_like_working("────────────"))
 
+    def test_completed_turn_with_stale_thinking_line_not_working(self) -> None:
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+        adapter = ClaudeCodeAdapter()
+        screen = (
+            "❯ Reply with exactly: claude-dev-ok\n"
+            "∴ Thinking…\n"
+            "  The user is asking me to reply with exactly \"claude-dev-ok\".\n"
+            "● claude-dev-ok\n"
+            "────────────────────────────────────────\n"
+            "❯ \n"
+            "────────────────────────────────────────\n"
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)   22466 tokens\n"
+        )
+        self.assertTrue(adapter._looks_like_completed_turn(
+            screen, baseline_answered_turns=0, baseline_last_response=None,
+        ))
+        self.assertFalse(adapter._looks_like_working(screen))
+
     def test_empty_and_noise(self) -> None:
         from agp.plugins.claude_code import ClaudeCodeAdapter
         adapter = ClaudeCodeAdapter()

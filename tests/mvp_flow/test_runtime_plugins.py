@@ -3227,6 +3227,61 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         self.assertEqual(result.artifacts[-1].content, "The answer is 42")
 
+    def test_claude_code_tui_completes_when_stale_thinking_line_remains_visible(self) -> None:
+        class SequencedVisibleHost(InProcessTerminalHost):
+            def __init__(self, screens: list[str]) -> None:
+                super().__init__()
+                self._screens = list(screens)
+                self._last_screen = screens[-1] if screens else ""
+
+            def read_visible(self, session) -> str:  # noqa: ARG002
+                if self._screens:
+                    self._last_screen = self._screens.pop(0)
+                return self._last_screen
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_cc_stale"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.2,
+        )
+        completed_screen = (
+            "\u276f Reply with exactly: claude-dev-ok\n"
+            "\u2234 Thinking\u2026\n"
+            "  The user is asking me to reply with exactly \"claude-dev-ok\".\n"
+            "\u25cf claude-dev-ok\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+            "  \u23f5\u23f5 bypass permissions on (shift+tab to cycle)   22466 tokens\n"
+        )
+        host = SequencedVisibleHost(["", completed_screen, completed_screen, completed_screen])
+        session = host.get_or_create_session(agent_id="agt_cc_stale")
+
+        claimed = {
+            "agent_id": "agt_cc_stale",
+            "job": {"job_id": "j1"},
+            "run": {"run_id": "r1"},
+            "message": {"text": "Reply with exactly: claude-dev-ok"},
+        }
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed,
+            supervisor=SupervisorStub(),
+        )
+        self.assertEqual(result.artifacts[-1].content, "claude-dev-ok")
+
     def test_claude_code_tui_raises_stable_but_indeterminate_for_stuck_dialog(self) -> None:
         from agp.runtime import OutputReadResult, StableButIndeterminate
 

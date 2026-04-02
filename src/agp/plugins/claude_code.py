@@ -421,6 +421,15 @@ class ClaudeCodeAdapter(AgentAdapter):
         Only scans the BOTTOM of the screen (last ~5 meaningful lines) to avoid
         false positives from response content that quotes working indicators.
         """
+        # If Claude has already returned to an idle prompt with a completed
+        # response visible, stale "Thinking…" lines higher up on screen are not
+        # evidence of active work.
+        turns = _parse_claude_code_turns(text)
+        if turns and ClaudeCodeAdapter._visible_ends_with_prompt(text):
+            answered = [turn for turn in turns if turn["response"]]
+            if answered:
+                return False
+
         # Collect the last few meaningful lines from the bottom of the screen.
         # Working indicators always appear at or near the bottom — scanning
         # the full screen would match quoted code in response content.
@@ -801,16 +810,15 @@ class ClaudeCodeAdapter(AgentAdapter):
             if unchanged < stable_after:
                 continue
 
-            if self._looks_like_working(screen):
-                unchanged = 0
-                continue
-
             if self._looks_like_completed_turn(
                 screen,
                 baseline_answered_turns=len(baseline_turns),
                 baseline_last_response=baseline_last_response,
             ):
                 break
+            if self._looks_like_working(screen):
+                unchanged = 0
+                continue
             # Fallback 1: scrollback-based turn count.  When the response
             # is long enough to scroll the ⏺ markers off the visible screen,
             # _looks_like_completed_turn fails.  Use accumulated scrollback
