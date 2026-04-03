@@ -1249,7 +1249,8 @@ class CodexAdapter(AgentAdapter):
             return ExecutionResult(
                 artifacts=[
                     ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
-                    ArtifactPayload(role="result", name="result.txt", content=cleaned),
+                    ArtifactPayload(role="transcript_log", name="transcript.txt", content=cleaned),
+                    ArtifactPayload(role="exec_log", name="exec.txt", content=screen),
                     ArtifactPayload(role="failure_evidence", name="screen.txt", content=screen),
                     ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
                 ],

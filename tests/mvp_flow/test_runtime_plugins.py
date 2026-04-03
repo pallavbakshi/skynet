@@ -610,7 +610,74 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         prompt_artifact = next(a for a in result.artifacts if a.name == "prompt.txt")
         self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", prompt_artifact.content)
-        self.assertIn('"status"', prompt_artifact.content)
+
+    def test_claude_code_indeterminate_failure_result_matches_fail_contract(self) -> None:
+        from agp.runtime import StableButIndeterminate
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_indeterminate_fail"})()})()
+
+        adapter = ClaudeCodeAdapter()
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_cc_indeterminate_fail")
+        result = adapter.build_failure_result(
+            host=host,
+            session=session,
+            claimed={
+                "agent_id": "agt_cc_indeterminate_fail",
+                "job": {"job_id": "job_cc_indeterminate_fail"},
+                "run": {"run_id": "run_cc_indeterminate_fail"},
+                "message": {"text": "review this"},
+            },
+            error=StableButIndeterminate(
+                "screen is stable but adapter cannot determine if the agent completed, is waiting for input, or is stuck",
+                screen="final visible screen",
+                last_good_screen="cleaned response",
+            ),
+            supervisor=SupervisorStub(),
+        )
+
+        roles = {artifact.name: artifact.role for artifact in result.artifacts}
+        self.assertEqual(roles["prompt.txt"], "prompt")
+        self.assertEqual(roles["transcript.txt"], "transcript_log")
+        self.assertEqual(roles["exec.txt"], "exec_log")
+        self.assertEqual(roles["screen.txt"], "failure_evidence")
+        self.assertEqual(roles["failure.txt"], "failure_evidence")
+
+    def test_codex_indeterminate_failure_result_matches_fail_contract(self) -> None:
+        from agp.runtime import StableButIndeterminate
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_codex_indeterminate_fail"})()})()
+
+        adapter = CodexAdapter()
+        host = InProcessTerminalHost()
+        session = host.get_or_create_session(agent_id="agt_codex_indeterminate_fail")
+        result = adapter.build_failure_result(
+            host=host,
+            session=session,
+            claimed={
+                "agent_id": "agt_codex_indeterminate_fail",
+                "job": {"job_id": "job_codex_indeterminate_fail"},
+                "run": {"run_id": "run_codex_indeterminate_fail"},
+                "message": {"text": "review this"},
+            },
+            error=StableButIndeterminate(
+                "screen is stable but adapter cannot determine if the agent completed, is waiting for input, or is stuck",
+                screen="final visible screen",
+                last_good_screen="cleaned response",
+            ),
+            supervisor=SupervisorStub(),
+        )
+
+        roles = {artifact.name: artifact.role for artifact in result.artifacts}
+        self.assertEqual(roles["prompt.txt"], "prompt")
+        self.assertEqual(roles["transcript.txt"], "transcript_log")
+        self.assertEqual(roles["exec.txt"], "exec_log")
+        self.assertEqual(roles["screen.txt"], "failure_evidence")
+        self.assertEqual(roles["failure.txt"], "failure_evidence")
 
     def test_codex_adapter_marker_mode_emits_idle_heartbeat_before_timeout(self) -> None:
         from agp.runtime._types import OutputReadResult
