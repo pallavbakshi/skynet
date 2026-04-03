@@ -411,6 +411,7 @@ class RuntimeSupervisor:
         max_local_recoveries: int = 1,
         max_local_recovery_seconds: float = 30.0,
     ) -> dict[str, Any]:
+        self._check_interrupt_counter = 0
         if not self._registered:
             self.client.register()
             self._registered = True
@@ -537,11 +538,34 @@ class RuntimeSupervisor:
                                 pass
                             stop.set()
                             break
-                    except Exception:  # noqa: BLE001
+                    except Exception as hb_exc:  # noqa: BLE001
                         # If stop is already set, the main thread is shutting
                         # down and may have closed _hb_client underneath us.
                         # Don't count this as a real missed heartbeat.
                         if stop.is_set():
+                            break
+                        # A 409 means the lease/run is irrecoverably lost
+                        # (expired, fenced, or cancelled).  Treat it as
+                        # immediate lease loss instead of counting misses.
+                        status_code = getattr(getattr(hb_exc, "response", None), "status_code", None)
+                        if status_code == 409:
+                            _append_runtime_log(
+                                self.client.identity.runtime_id,
+                                {
+                                    "kind": "runtime_worker",
+                                    "action": "heartbeat_rejected_409",
+                                    "run_id": run["run_id"],
+                                    "error": str(hb_exc),
+                                },
+                            )
+                            lease_lost.set()
+                            try:
+                                with self._session_lock:
+                                    s = getattr(self, "_active_session", session)
+                                self.host.interrupt(s)
+                            except Exception:  # noqa: BLE001
+                                pass
+                            stop.set()
                             break
                         consecutive_misses += 1
                         _append_runtime_log(
@@ -551,6 +575,7 @@ class RuntimeSupervisor:
                                 "action": "heartbeat_missed",
                                 "run_id": run["run_id"],
                                 "consecutive_misses": consecutive_misses,
+                                "error": str(hb_exc),
                             },
                         )
                         if consecutive_misses >= max_missed_heartbeats:
