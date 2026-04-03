@@ -1,0 +1,50 @@
+/opt/homebrew/bin/claude --dangerously-skip-permissions
+
+~/projects/skynet master at 22:08:43
+❯ /opt/homebrew/bin/claude --dangerously-skip-permissions
+ ▐▛███▜▌   Claude Code v2.1.91
+▝▜█████▛▘  Opus 4.6 (1M context) with medium effort · Claude Max
+  ▘▘ ▝▝    ~/projects/skynet
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ /exit%
+
+34s
+~/projects/skynet master at 22:09:18
+❯
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

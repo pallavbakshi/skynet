@@ -1,0 +1,13 @@
+ ▐▛███▜▌   Claude Code v2.1.91
+▝▜█████▛▘  Opus 4.6 (1M context) with medium effort · Claude Max
+  ▘▘ ▝▝    ~/projects/skynet
+
+❯ What is 2+2?
+
+⏺ 4
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│  How is Claude doing?                                                    │
+│                                                                          │
+│  1: Bad    2: Fine   3: Good   0: Dismiss                                │
+╰──────────────────────────────────────────────────────────────────────────╯

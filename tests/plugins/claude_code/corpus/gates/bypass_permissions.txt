@@ -1,0 +1,13 @@
+ ▐▛███▜▌   Claude Code v2.1.91
+▝▜█████▛▘  Opus 4.6 (1M context) with medium effort · Claude Max
+  ▘▘ ▝▝    ~/projects/skynet
+
+╭──────────────────────────────────────────────────────────────────────────╮
+│  Bypass permissions mode                                                 │
+│                                                                          │
+│  This will allow Claude to run all tools without asking for permission.   │
+│  Do you accept all responsibility for Claude's actions?                   │
+│                                                                          │
+│  1. No, keep asking                                                      │
+│  2. Yes, I accept                                                        │
+╰──────────────────────────────────────────────────────────────────────────╯

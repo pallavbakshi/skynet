@@ -1,0 +1,8 @@
+{
+  "classify": {
+    "is_ready": false,
+    "is_working": false,
+    "is_shell_returned": true,
+    "gate_kind": "NONE"
+  }
+}

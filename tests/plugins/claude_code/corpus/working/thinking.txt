@@ -1,0 +1,50 @@
+ ▐▛███▜▌   Claude Code v2.1.91
+▝▜█████▛▘  Opus 4.6 (1M context) with medium effort · Claude Max
+  ▘▘ ▝▝    ~/projects/skynet
+
+❯ What are the three primary colors? Answer in one sentence.
+
+⏺ The three primary colors are red, blue, and yellow.
+
+❯ Read the first 5 lines of src/agp/cli.py and tell me what the module does
+
+⏺ Read(/Users/pb/projects/skynet/src/agp/cli.py · lines 1-5)
+  ⎿  Read 5 lines
+
+✶ Contemplating… (7s · ↑ 17 tokens)
+  ⎿  Tip: Send messages to Claude while it works to steer Claude in real-time
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sTAT | Opus 4.6 (1M context) | medium | 3881f8c1-0c84-4417-96cf-c0ee39899cc5 | 2%                                                                                                       16453 tokens
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

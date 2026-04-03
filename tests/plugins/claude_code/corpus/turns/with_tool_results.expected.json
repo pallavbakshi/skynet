@@ -1,0 +1,21 @@
+{
+  "classify": {
+    "is_ready": true,
+    "is_working": false,
+    "ends_with_prompt": true,
+    "is_shell_returned": false,
+    "gate_kind": "NONE"
+  },
+  "turns": [
+    {
+      "prompt_contains": "three primary colors",
+      "response_contains": "red"
+    },
+    {
+      "prompt_contains": "first 5 lines",
+      "response_contains": "CLI entrypoint"
+    }
+  ],
+  "turn_count": 2,
+  "last_response_contains": "CLI"
+}
