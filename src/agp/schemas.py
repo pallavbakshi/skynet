@@ -57,7 +57,7 @@ class SendMessagePayload(BaseModel):
     output_contract: OutputContract | None = None
     conversation_id: str | None = None
     reply_to_message_id: str | None = None
-    timeout_seconds: int | None = None
+    timeout_seconds: int | None = Field(default=None, gt=0)
     attachments: list[AttachmentRef] = Field(default_factory=list)
 
 
@@ -92,7 +92,7 @@ class AgentPatchRequest(BaseModel):
 
 class CreateNudgeRequest(BaseModel):
     target_agent_id: str
-    priority: int = 2  # 1=human, 2=job_completion, 3=agenda_setter, 4=system
+    priority: int = Field(default=2, ge=1, le=10)  # 1=human, 2=job_completion, 3=agenda_setter, 4=system
     source: str = "human"
     payload: str
     job_id: str | None = None
@@ -127,14 +127,14 @@ class ClaimRunRequest(BaseModel):
     runtime_id: str
     agent_id: str | None = None
     capability: str | None = None
-    lease_ttl_seconds: int = 30
+    lease_ttl_seconds: int = Field(default=30, gt=0)
 
 
 class HeartbeatRequest(BaseModel):
     runtime_id: str
     lease_id: str
     fencing_token: int
-    extend_seconds: int = 30
+    extend_seconds: int = Field(default=30, gt=0)
 
 
 class ProgressRequest(BaseModel):
@@ -271,7 +271,7 @@ class JobResponse(BaseModel):
     result_artifact_id: str | None = None
     output_contract_json: dict[str, Any] | None = None
     conversation_id: str | None = None
-    timeout_seconds: int | None = None
+    timeout_seconds: int | None = Field(default=None, gt=0)
     deadline_at: Any = None
 
 

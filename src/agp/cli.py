@@ -968,7 +968,6 @@ def up(
     capability_name: str = typer.Argument(..., help="Capability name (must match agp ls output)."),
     server_url: str = typer.Option(None, help="CP URL."),
     agent_id: str = typer.Option(None, "--agent-id", help="Explicit agent ID (default: auto-generated)."),
-    runtime_id: str = typer.Option(None, "--runtime-id", help="Pin to a specific runtime."),
     workspace_ref: str = typer.Option(None, "--workspace", help="Working directory for the agent."),
     timeout: int = typer.Option(120, help="Max seconds to wait for agent to become idle."),
     max_retries: int = typer.Option(3, help="Provisioning retry attempts on server error."),
@@ -2443,7 +2442,6 @@ def _format_duration(seconds: float) -> str:
 @app.command()
 def ls(
     server_url: str = typer.Option(None, help="CP URL."),
-    all_agents: bool = typer.Option(False, "--all", help="Include terminated/offline agents."),
 ) -> None:
     """List logical agents and available capabilities."""
     from datetime import datetime, timezone

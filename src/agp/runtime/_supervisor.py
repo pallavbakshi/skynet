@@ -647,9 +647,9 @@ class RuntimeSupervisor:
                         raise PaneDied(self._active_tui_died_reason)
                     break
                 except StableButIndeterminate:
-                    # The screen is stable but the adapter can't tell what
-                    # happened.  Don't retry — surface the screen snapshot
-                    # to the caller so they can decide.
+                    # ORDERING: This must come BEFORE RecoverableExecutionError
+                    # because StableButIndeterminate inherits from it.  If
+                    # reordered, indeterminate states silently enter recovery.
                     raise
                 except RecoverableExecutionError as exc:
                     if attempts >= max_local_recoveries:
