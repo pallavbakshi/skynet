@@ -316,6 +316,7 @@ def _parse_reviewer_verdict(client, review_job: dict) -> tuple[str, str, str]:
 
     review_artifact_id = review_job.get("result_artifact_id")
     if not review_artifact_id:
+        typer.echo("[warn] Reviewer job produced no result artifact — treating as changes_requested", err=True)
         return "changes_requested", "", '{"findings":[],"summary":"","verdict":"changes_requested"}'
 
     review_artifact = client.fetch_artifact(review_artifact_id, content=True)
@@ -329,6 +330,7 @@ def _parse_reviewer_verdict(client, review_job: dict) -> tuple[str, str, str]:
     except _json.JSONDecodeError:
         structured = _extract_trailing_json_payload(content)
         if structured is None:
+            typer.echo("[warn] Could not parse reviewer output as JSON — treating as changes_requested", err=True)
             summary = content[:500]
         else:
             verdict = structured.get("verdict", "changes_requested")
@@ -1999,9 +2001,10 @@ def review_diagnose_cmd(
                     if items:
                         art = client.fetch_artifact(items[-1]["artifact_id"], content=True)
                         diagnosis["extraction_diagnostics"][label] = json.loads(art.get("content", "{}"))
-                except Exception:
-                    pass
-            except Exception:
+                except Exception as diag_exc:
+                    typer.echo(f"[warn] Failed to fetch extraction diagnostics for {label}: {diag_exc}", err=True)
+            except Exception as job_exc:
+                typer.echo(f"[warn] Failed to fetch job {jid}: {job_exc}", err=True)
                 diagnosis["jobs"][label] = {"job_id": jid, "status": "unreachable"}
 
         # Check reviewer runtime health
@@ -2025,8 +2028,8 @@ def review_diagnose_cmd(
                         rt = bound_rts[0]
                         diagnosis["reviewer_runtime"]["heartbeat_age"] = rt.get("heartbeat_age_seconds")
                         diagnosis["reviewer_runtime"]["runtime_status"] = rt.get("status")
-            except Exception:
-                pass
+            except Exception as rt_exc:
+                typer.echo(f"[warn] Failed to fetch reviewer runtime health: {rt_exc}", err=True)
 
         if output_json:
             typer.echo(json.dumps(diagnosis, indent=2, default=str))
@@ -2104,15 +2107,15 @@ def diagnose_cmd(
                 }
                 for a in bound
             ]
-        except Exception:
-            pass
+        except Exception as agents_exc:
+            typer.echo(f"[warn] Failed to fetch bound agents: {agents_exc}", err=True)
 
         # Recent runtime logs
         try:
             logs = client.logs_runtime(entity_id, limit=20)
             diagnosis["recent_logs"] = logs.get("entries", logs) if isinstance(logs, dict) else logs
-        except Exception:
-            pass
+        except Exception as logs_exc:
+            typer.echo(f"[warn] Failed to fetch runtime logs: {logs_exc}", err=True)
 
         if output_json:
             typer.echo(json.dumps(diagnosis, indent=2, default=str))
