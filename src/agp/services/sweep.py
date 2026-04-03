@@ -231,11 +231,6 @@ def sweep_stale_agents(
                 job_ids=stranded_job_ids,
             )
 
-        _create_event(
-            db, agent_id=agent.agent_id, event_type="agent.deleted",
-            body={"reason": "drain_complete"},
-        )
-        _nullify_agent_references(db, agent.agent_id)
         # M2: conditional DELETE for race safety (mirrors Phase 1 pattern)
         result = db.execute(
             text(
@@ -245,6 +240,11 @@ def sweep_stale_agents(
             {"aid": agent.agent_id},
         )
         if result.rowcount:
+            _create_event(
+                db, agent_id=agent.agent_id, event_type="agent.deleted",
+                body={"reason": "drain_complete"},
+            )
+            _nullify_agent_references(db, agent.agent_id)
             db.expire(agent)
             drained += 1
 
