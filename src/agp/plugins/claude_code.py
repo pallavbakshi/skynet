@@ -1,5 +1,6 @@
 """Claude Code CLI agent adapter plugin."""
 from __future__ import annotations
+import json
 import logging
 import re
 from time import monotonic, sleep
@@ -7,7 +8,12 @@ from typing import Any
 
 _logger = logging.getLogger(__name__)
 
-from agp.plugins._output_contracts import apply_output_contract_instruction, prompt_for_claim
+from agp.plugins._output_contracts import (
+    apply_output_contract_instruction,
+    prompt_for_claim,
+    result_file_path_for_run,
+    validate_json_against_contract,
+)
 from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
@@ -187,6 +193,66 @@ def _clean_claude_code_output(text: str) -> str:
             if content:
                 response_lines.append(content)
     return "\n".join(response_lines)
+
+
+def _repair_json_string(text: str) -> str:
+    repaired = text
+    while True:
+        try:
+            json.loads(repaired)
+            return repaired
+        except json.JSONDecodeError as exc:
+            pos = exc.pos
+            fixed = False
+            for j in range(pos - 1, 0, -1):
+                if repaired[j] != '"':
+                    continue
+                num_bs = 0
+                while j - 1 - num_bs >= 0 and repaired[j - 1 - num_bs] == '\\':
+                    num_bs += 1
+                if num_bs % 2 != 0:
+                    continue
+                repaired = repaired[:j] + '\\"' + repaired[j + 1:]
+                fixed = True
+                break
+            if not fixed:
+                return text
+
+
+def _extract_trailing_json_text(text: str) -> str | None:
+    stripped = text.strip()
+    if not stripped:
+        return None
+    decoder = json.JSONDecoder()
+    best_object: str | None = None
+    best_other: str | None = None
+    for idx in range(len(stripped) - 1, -1, -1):
+        if stripped[idx] not in "[{":
+            continue
+        suffix = stripped[idx:]
+        attempts = [
+            suffix,
+            "".join(line.strip() for line in suffix.splitlines()),
+            " ".join(line.strip() for line in suffix.splitlines()),
+        ]
+        for attempt in attempts:
+            for candidate in (attempt, _repair_json_string(attempt)):
+                try:
+                    payload, end = decoder.raw_decode(candidate)
+                except json.JSONDecodeError:
+                    continue
+                rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                if isinstance(payload, dict):
+                    if not candidate[end:].strip():
+                        return rendered
+                    if best_object is None:
+                        best_object = rendered
+                    continue
+                if not candidate[end:].strip():
+                    return rendered
+                if best_other is None:
+                    best_other = rendered
+    return best_object or best_other
 
 
 def _parse_claude_code_turns(text: str) -> list[dict[str, Any]]:
@@ -669,7 +735,19 @@ class ClaudeCodeAdapter(AgentAdapter):
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
         """TUI mode: send prompt at ❯ -> wait for idle -> parse output."""
-        prompt = apply_output_contract_instruction(prompt=claimed["message"]["text"], claimed=claimed)
+        contract = (claimed.get("job") or {}).get("output_contract_json") or {}
+        json_contract = isinstance(contract, dict) and contract.get("format", "json") == "json"
+        result_file = result_file_path_for_run(claimed["run"]["run_id"]) if json_contract else None
+        if result_file:
+            try:
+                __import__("pathlib").Path(result_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+        prompt = apply_output_contract_instruction(
+            prompt=claimed["message"]["text"],
+            claimed=claimed,
+            result_file_path=result_file,
+        )
         run_id = claimed["run"]["run_id"]
 
         # Session reset depends on session_mode:
@@ -901,6 +979,41 @@ class ClaudeCodeAdapter(AgentAdapter):
         cleaned = _clean_claude_code_output(raw_output)
         if (not cleaned.strip() or self._looks_like_shell_returned(raw_output)) and last_good_screen:
             cleaned = _clean_claude_code_output(last_good_screen)
+        if json_contract:
+            file_json = None
+            if result_file:
+                try:
+                    _fpath = __import__("pathlib").Path(result_file)
+                    if _fpath.exists() and _fpath.is_file() and not _fpath.is_symlink():
+                        _raw = _fpath.read_text(encoding="utf-8").strip()
+                        if _raw:
+                            valid, reason = validate_json_against_contract(_raw, claimed)
+                            if valid:
+                                file_json = _raw
+                            else:
+                                _logger.warning(
+                                    "file-based Claude result at %s failed validation: %s",
+                                    result_file,
+                                    reason,
+                                )
+                        _fpath.unlink(missing_ok=True)
+                    elif _fpath.is_symlink():
+                        _fpath.unlink(missing_ok=True)
+                except Exception as exc:
+                    _logger.warning("file-based Claude result at %s unreadable: %s", result_file, exc)
+            json_text = file_json or _extract_trailing_json_text(cleaned)
+            if not json_text:
+                for source in (raw_output, last_good_screen):
+                    if not source:
+                        continue
+                    json_text = _extract_trailing_json_text(_clean_claude_code_output(source))
+                    if json_text:
+                        break
+                    json_text = _extract_trailing_json_text(source)
+                    if json_text:
+                        break
+            if json_text:
+                cleaned = json_text
 
         if not cleaned.strip():
             raise ExecutionTimeout("claude code tui produced no output after idle")

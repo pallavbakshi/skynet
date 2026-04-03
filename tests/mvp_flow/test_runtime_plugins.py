@@ -443,6 +443,92 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         self.assertIn("Do not include markdown fences, prose, or any text outside the JSON object.", sent)
         self.assertEqual(result.artifacts[-1].content, '{"status":"ok"}')
 
+    def test_claude_code_contract_falls_back_to_terminal_json_when_result_file_is_invalid(self) -> None:
+        from pathlib import Path
+
+        from agp.plugins._output_contracts import result_file_path_for_run
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class InvalidFileHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self, *, run_id: str) -> None:
+                super().__init__()
+                self._visible_reads = 0
+                self._result_path = Path(result_file_path_for_run(run_id))
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                self._result_path.write_text('{"verdict":"changes_requested"', encoding="utf-8")
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u276f old prompt\n\u23fa OLD_OK\n"
+                return (
+                    "\u276f Review output\n"
+                    "\u25cf I found two issues.\n"
+                    '{"verdict":"changes_requested","summary":"needs fixes"}\n'
+                    "\n"
+                    "\u276f \n"
+                )
+
+            def read_output(self, session, cursor):
+                full_text = (
+                    "\u276f Review output\n"
+                    "\u25cf I found two issues.\n"
+                    '{"verdict":"changes_requested","summary":"needs fixes"}\n'
+                    "\n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": 1}),
+                    text=full_text,
+                    full_text=full_text,
+                    changed=True,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_cc_json_fallback"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        run_id = "run_cc_invalid_file"
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = InvalidFileHost(run_id=run_id)
+        session = host.get_or_create_session(agent_id="agt_cc_invalid_file")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_cc_invalid_file",
+            "job": {
+                "job_id": "job_cc_invalid_file",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["verdict", "summary"],
+                    },
+                },
+            },
+            "run": {"run_id": run_id},
+            "message": {"text": "Review output"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertEqual(result_log.content, '{"verdict":"changes_requested","summary":"needs fixes"}')
+
     def test_codex_timeout_failure_result_salvages_tmux_pane_artifact(self) -> None:
         from agp.runtime import ExecutionTimeout
 
@@ -2794,6 +2880,88 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         cleaned = _clean_claude_code_output(raw)
         self.assertEqual(cleaned, "new answer here")
+
+    def test_claude_code_output_cleaning_extracts_trailing_json_for_output_contract_jobs(self) -> None:
+        from agp.runtime._types import OutputCursor, OutputReadResult
+
+        class JsonContractHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._visible_reads = 0
+
+            def read_visible(self, session):
+                self._visible_reads += 1
+                if self._visible_reads == 1:
+                    return "\u276f old prompt\n\u23fa OLD_OK\n"
+                return (
+                    "● Search(pattern: \"dead_lettered_jobs\", path: \"/home/user/projects/skynet/src/agp/queue_backend.py\")\n"
+                    "● {\"verdict\": \"approved\", \"summary\": \"looks good\", \"findings\": []}\n"
+                    "\n"
+                    "\u273b Churned for 1m 40s\n"
+                    "\n"
+                    "\u276f \n"
+                    "\u2500\u2500\u2500\u2500\n"
+                )
+
+            def read_output(self, session, cursor):
+                full_text = (
+                    "\u276f Review the fix\n"
+                    "● Search(pattern: \"dead_lettered_jobs\", path: \"/home/user/projects/skynet/src/agp/queue_backend.py\")\n"
+                    "● {\"verdict\": \"approved\", \"summary\": \"looks good\", \"findings\": []}\n"
+                    "\n"
+                    "\u273b Churned for 1m 40s\n"
+                    "\n"
+                )
+                return OutputReadResult(
+                    session_id=session.session_id,
+                    cursor=OutputCursor(session_id=session.session_id, metadata={"read": 1}),
+                    text=full_text,
+                    full_text=full_text,
+                    changed=True,
+                )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_claude_json_contract"})()})()
+
+            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
+                return None
+
+            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            session_mode="sticky",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.1,
+        )
+        host = JsonContractHost()
+        session = host.get_or_create_session(agent_id="agt_claude_json_contract")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_claude_json_contract",
+            "job": {
+                "job_id": "job_claude_json_contract",
+                "output_contract_json": {
+                    "format": "json",
+                    "json_schema": {
+                        "type": "object",
+                        "required": ["verdict", "summary"],
+                    },
+                },
+            },
+            "run": {"run_id": "run_claude_json_contract"},
+            "message": {"text": "Review the fix"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_log = next(artifact for artifact in result.artifacts if artifact.name == "result.txt")
+        self.assertEqual(result_log.content, '{"verdict":"approved","summary":"looks good","findings":[]}')
 
     def test_claude_code_ready_detection(self) -> None:
         adapter = ClaudeCodeAdapter()

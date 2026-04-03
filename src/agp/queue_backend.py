@@ -858,7 +858,7 @@ class RedisQueueBackend:
                 record.updated_at = now
                 redriven += 1
                 continue
-            if job is not None and job.retry_count >= job.max_retries:
+            if job is not None and job.status == JobStatus.QUEUED.value and job.retry_count >= job.max_retries:
                 record.state = "dead_lettered"
                 record.dead_lettered_at = now
                 dead_lettered += 1
