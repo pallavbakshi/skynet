@@ -90,6 +90,15 @@ class TerminalHost(ABC):
         """
         return ""
 
+    def read_scrollback(self, session: TerminalSession) -> str:
+        """Read the full pane including scrollback history.
+
+        Returns as much content as the host can provide.  Tmux hosts
+        capture up to ``scrollback_lines`` of history; other hosts fall
+        back to :meth:`read_visible`.
+        """
+        return self.read_visible(session)
+
     @abstractmethod
     def health(self, session: TerminalSession) -> SessionHealth:
         raise NotImplementedError

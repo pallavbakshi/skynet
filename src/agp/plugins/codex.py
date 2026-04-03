@@ -1050,7 +1050,11 @@ class CodexAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
-                ArtifactPayload(role="transcript_log", name="transcript.txt", content=transcript_output),
+                ArtifactPayload(role="transcript_log", name="transcript.txt", content=_select_codex_tui_transcript(
+                    _strip_ansi(host.read_scrollback(session)),
+                    visible_output, last_good_screen, raw_output,
+                    baseline_last_response=baseline_last_response,
+                )),
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],

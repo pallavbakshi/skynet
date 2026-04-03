@@ -1008,7 +1008,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
-                ArtifactPayload(role="transcript_log", name="transcript.txt", content=raw_output),
+                ArtifactPayload(role="transcript_log", name="transcript.txt", content=_strip_ansi(host.read_scrollback(session))),
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],

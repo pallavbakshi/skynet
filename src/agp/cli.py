@@ -1301,7 +1301,7 @@ def send(
     task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted)."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
-    timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
+    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="How long the CLI waits before auto-detaching (seconds). The agent keeps running after detach."),
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
@@ -1311,7 +1311,7 @@ def send(
     """Send a task to an agent with smart detach.
 
     Default: waits up to 90s for completion, then auto-detaches.
-    Use --detach for fire-and-forget.  Use --timeout to adjust the sync window.
+    Use --detach for fire-and-forget.  Use --poll-timeout to adjust the sync window.
     Use --nudge <orc_id> to get a push notification when the task finishes.
     Task text can be passed as unquoted words after the agent ID.
     """
@@ -2232,6 +2232,9 @@ def health(
         except Exception:
             pass
 
+        # Filter synthetic rtm_ runtimes (created by agent_up, no backing process)
+        runtimes = [rt for rt in runtimes if not rt.get("runtime_id", "").startswith("rtm_")]
+
         if output_json:
             typer.echo(json.dumps({
                 "control_plane": cp_health,
@@ -2439,6 +2442,51 @@ def _format_duration(seconds: float) -> str:
     if hours > 0:
         return f"{hours}h:{minutes:02d}m"
     return f"{minutes:02d}m:{secs:02d}s"
+
+
+@app.command()
+def result(
+    job_id: str = typer.Argument(..., help="Job ID to fetch output for."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    role: str = typer.Option(None, "--role", help="Artifact role to fetch (default: transcript_log, falls back to result)."),
+) -> None:
+    """Dump the clean output of a completed job.
+
+    Fetches the transcript (or result artifact) and prints it to stdout
+    with no envelope or plumbing.  Useful for piping agent output into
+    other tools.
+    """
+    import httpx as _httpx
+
+    with _cli_client(server_url) as client:
+        try:
+            arts = client.list_job_artifacts(job_id)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
+        items = arts.get("items", [])
+        # Preference order: explicit role > transcript_log > result > exec_log
+        if role:
+            candidates = [a for a in items if a.get("role") == role]
+        else:
+            candidates = (
+                [a for a in items if a.get("role") == "transcript_log"]
+                or [a for a in items if a.get("role") == "result"]
+                or [a for a in items if a.get("role") == "exec_log"]
+            )
+        if not candidates:
+            typer.echo(f"No output artifact found for job {job_id}", err=True)
+            available = [a.get("role") for a in items]
+            if available:
+                typer.echo(f"Available roles: {', '.join(available)}", err=True)
+            raise typer.Exit(1)
+        art = candidates[-1]  # latest
+        try:
+            data = client.fetch_artifact(art["artifact_id"], content=True)
+            typer.echo(data.get("content", ""))
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
 
 
 @app.command()
