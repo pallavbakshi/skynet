@@ -633,6 +633,11 @@ class ClaudeCodeAdapter(AgentAdapter):
         "allow edit",
         "allow write",
         "(y/n)",
+        # Upgrade / update notifications (dismiss with Enter)
+        "claude install",
+        "native installer",
+        "switched from npm",
+        "update available",
     )
 
     _FATAL_GATE_PATTERNS = (
@@ -659,6 +664,10 @@ class ClaudeCodeAdapter(AgentAdapter):
         "i trust this project": "1",
         "trust the contents": "1",
         "quick safety check": "1",        # trust workspace intro
+        "claude install": "",             # dismiss upgrade notification
+        "native installer": "",           # dismiss upgrade notification
+        "switched from npm": "",          # dismiss upgrade notification
+        "update available": "",           # dismiss upgrade notification
     }
 
     def _looks_like_gate_prompt(self, text: str) -> bool:
@@ -936,6 +945,21 @@ class ClaudeCodeAdapter(AgentAdapter):
                 )
             ):
                 break
+
+            # Paste-not-submitted recovery: if the screen shows the prompt
+            # with a "[Pasted text" indicator and 0 tokens, the paste
+            # landed but Enter was consumed (e.g. by an upgrade toast).
+            # Re-send Enter to submit the prompt.
+            if (
+                self._visible_ends_with_prompt(screen)
+                and "[pasted text" in screen.lower()
+                and "0 tokens" in screen.lower()
+            ):
+                _logger.warning("paste-not-submitted detected, re-sending Enter")
+                host.send_text(session, "", enter=True)
+                unchanged = 0
+                indeterminate_polls = 0
+                continue
 
             # None of the checks could determine the state.  The screen is
             # stable, the agent isn't visibly working, but we can't tell if

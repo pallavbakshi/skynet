@@ -1098,13 +1098,10 @@ def down(
             typer.echo(f"  agp down {agent_id} --force")
             raise typer.Exit(1)
 
-        # Determine mode
+        # Determine mode — force for active-work agents, drain for idle
         if agent_status in _HAS_ACTIVE_WORK:
             typer.echo(f"[..] WARNING: Agent is {agent_status.upper()}.")
             typer.echo("[..] Aborting active jobs and clearing queue...")
-            mode = "force"
-        elif agent_status == "idle":
-            typer.echo("[..] Agent is IDLE. Proceeding with teardown...")
             mode = "force"
         else:
             typer.echo(f"[..] Agent is {agent_status.upper()}. Proceeding with teardown...")
@@ -1335,7 +1332,15 @@ def send(
             raise typer.BadParameter("--output-contract must decode to a JSON object")
     for item in attach or []:
         path, role = _parse_attachment_option(item)
-        attachments.append({"name": path.name, "role": role, "content": path.read_text(encoding="utf-8")})
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise typer.BadParameter(f"attachment not found: {path}") from None
+        except (PermissionError, OSError) as exc:
+            raise typer.BadParameter(f"cannot read attachment {path}: {exc}") from None
+        except UnicodeDecodeError:
+            raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
+        attachments.append({"name": path.name, "role": role, "content": content})
     if task is None:
         task = sys.stdin.read().strip()
     if not task:
@@ -2327,8 +2332,9 @@ def _status_health(server_url: str | None) -> None:
                 agents = _list_all_agents(client)
             except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
                 pass
-        typer.echo(f"status: {data.get('status', 'ok')}")
-        for k, v in data.get("components", {}).items():
+        cp_data = data.get("data", data)
+        typer.echo(f"status: {cp_data.get('status', 'ok')}")
+        for k, v in cp_data.get("components", {}).items():
             typer.echo(f"  {k}: {v}")
         if summary is not None:
             total_pending = int(((summary.get("queue") or {}).get("depth")) or 0)
@@ -2513,11 +2519,6 @@ def ls(
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
         caps = caps_data.get("items", [])
-
-        # Build capability name lookup
-        cap_names: dict[str, str] = {}
-        for c in caps:
-            cap_names[c["capability_id"]] = c.get("name", c["capability_id"])
 
         # Build agent → runtime lookup (1:1 binding)
         agent_runtime: dict[str, str] = {}
@@ -2705,7 +2706,6 @@ def _info_agent(agent: dict, client) -> None:
     from datetime import datetime, timezone
 
     agent_id = agent["agent_id"]
-    cap_id = ", ".join(agent.get("capabilities", [])) or "-"
 
     typer.echo(_SEPARATOR)
     typer.echo(f"      AGENT INFO: {agent_id}")
@@ -2751,12 +2751,19 @@ def _info_agent(agent: dict, client) -> None:
 
 
 def _info_capability(target: str, client) -> None:
+    import httpx as _httpx
+
     # Try by ID first, then search by name
     cap = None
     try:
         cap = client.get_capability(target)
-    except Exception:
-        pass
+    except _httpx.HTTPStatusError as exc:
+        if exc.response.status_code != 404:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
+    except _httpx.RequestError as exc:
+        typer.echo(f"unreachable: {exc}", err=True)
+        raise typer.Exit(1)
 
     if cap is None:
         try:
@@ -2764,8 +2771,12 @@ def _info_capability(target: str, client) -> None:
             items = results.get("items", [])
             if items:
                 cap = items[0]
-        except Exception:
-            pass
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
+        except _httpx.RequestError as exc:
+            typer.echo(f"unreachable: {exc}", err=True)
+            raise typer.Exit(1)
 
     if cap is None:
         typer.echo(f"Not found: {target} (not an agent ID or capability name)", err=True)

@@ -118,7 +118,8 @@ def _set_system_metadata_value(db: Session, key: str, value: str | None) -> None
 def _load_persisted_auth_settings() -> None:
     from sqlalchemy.exc import OperationalError
 
-    db = next(get_db())
+    gen = get_db()
+    db = next(gen)
     try:
         try:
             operator_legacy = _system_metadata_value(db, "operator_bearer_token")
@@ -136,7 +137,7 @@ def _load_persisted_auth_settings() -> None:
         if runtime_active is not None:
             settings.runtime_active_tokens_json = list(json.loads(runtime_active))
     finally:
-        db.close()
+        gen.close()
 
 
 def _get_upgrade_status(db: Session) -> dict:

@@ -156,7 +156,7 @@ class TmuxHost(TerminalHost):
             self._run(["send-keys", "-t", session.session_id, "-l", text])
         if enter:
             if text:
-                sleep(0.15 if "\n" in text else 0.05)
+                sleep(0.50 if "\n" in text else 0.05)
             self._run(["send-keys", "-t", session.session_id, "Enter"])
 
     # ── Absolute line tracking via tmux format variables ────────────

@@ -107,6 +107,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if count:
             import logging
             logging.getLogger("agp.control_plane").info("Refreshed %d active leases on startup", count)
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
     yield

@@ -131,6 +131,8 @@ def agent_patch_service(
 ) -> Agent:
     agent = _require_agent(db, agent_id)
     if clear_workspace_ref:
+        agent.workspace_ref = None
+    elif workspace_ref is not None:
         agent.workspace_ref = workspace_ref
     db.commit()
     return agent

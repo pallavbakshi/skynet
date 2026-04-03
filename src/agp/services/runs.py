@@ -242,6 +242,7 @@ def resolve_claim_agent(
         agent = _require_agent(db, agent_id)
         if not _atomic_reserve_agent(db, agent.agent_id):
             return None, None
+        db.refresh(agent)
         return agent, None
 
     if capability is not None:
@@ -278,6 +279,7 @@ def resolve_claim_agent(
         # Try atomic reservation for each candidate in order
         for candidate in candidates:
             if _atomic_reserve_agent(db, candidate.agent_id):
+                db.refresh(candidate)
                 routing_decision = {
                     "policy": "least_recent",
                     "capability": capability,

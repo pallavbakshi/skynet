@@ -166,7 +166,7 @@ class WezTermHost(TerminalHost):
 
         if enter:
             # Give the TUI time to process the text before Enter.
-            sleep(0.15 if is_multiline else 0.05)
+            sleep(0.50 if is_multiline else 0.05)
             self._run([*pane_args, "--no-paste", "\r"])
 
     _MAX_CHUNKS = 1000

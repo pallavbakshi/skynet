@@ -61,7 +61,9 @@ def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[st
         run = db.get(Run, lease.run_id)
         if run is None:
             continue
-        job = _require_job(db, run.job_id)
+        job = db.get(Job, run.job_id)
+        if job is None:
+            continue
         runtime = db.get(Runtime, lease.runtime_id)
 
         lease.status = LeaseStatus.EXPIRED.value
@@ -169,11 +171,6 @@ def sweep_stale_agents(
         if has_active_lease:
             continue
 
-        _create_event(
-            db, agent_id=agent.agent_id, event_type="agent.deleted",
-            body={"reason": "heartbeat_timeout", "grace_seconds": grace},
-        )
-        _nullify_agent_references(db, agent.agent_id)
         result = db.execute(
             text(
                 "DELETE FROM agents "
@@ -182,6 +179,11 @@ def sweep_stale_agents(
             {"aid": agent.agent_id, "cutoff": cutoff},
         )
         if result.rowcount:
+            _create_event(
+                db, agent_id=agent.agent_id, event_type="agent.deleted",
+                body={"reason": "heartbeat_timeout", "grace_seconds": grace},
+            )
+            _nullify_agent_references(db, agent.agent_id)
             db.expire(agent)
             deleted += 1
 
