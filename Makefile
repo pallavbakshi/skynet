@@ -227,8 +227,15 @@ stop-cp: ## Stop local control plane + sweepers (does not touch Docker)
 	@echo "CP stopped."
 
 stop-runtime: ## Stop runtime worker
+	@# Kill runtime-work-loop processes and their parent uv/make wrappers
 	@for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \
 		$(SUDO) kill $$pid 2>/dev/null || kill $$pid 2>/dev/null || true; \
+	done
+	@for pid in $$(ps -eo pid=,args= | awk '/[u]v run agp runtime-work-loop/ {print $$1}'); do \
+		kill $$pid 2>/dev/null || true; \
+	done
+	@for pid in $$(ps -eo pid=,args= | awk '/[m]ake runtime AGP_RUNTIME_ID/ {print $$1}'); do \
+		kill $$pid 2>/dev/null || true; \
 	done
 	@echo "Runtime stopped."
 

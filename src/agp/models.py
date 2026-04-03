@@ -245,7 +245,7 @@ class RunArtifact(Base):
     __tablename__ = "run_artifacts"
     __table_args__ = (
         CheckConstraint(
-            "role IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence')",
+            "role IN ('prompt', 'transcript_log', 'exec_log', 'result', 'failure_evidence', 'extraction_diagnostics')",
             name="chk_run_artifacts_role",
         ),
     )

@@ -74,7 +74,7 @@ class MigrationInitTest(unittest.TestCase):
         self.assertIn("current_version", status)
         self.assertEqual(status["pending_migrations"], [])
         self.assertIn("0001_initial", status["available_migrations"])
-        self.assertEqual(status["available_migrations"], ["0001_initial", "0002_dynamic_agent_mesh", "0003_conversations", "0004_attachment_roles", "0005_job_timeouts"])
+        self.assertEqual(status["available_migrations"], ["0001_initial", "0002_dynamic_agent_mesh", "0003_conversations", "0004_attachment_roles", "0005_job_timeouts", "0006_extraction_diagnostics_role"])
 
     def test_apply_migrations_returns_summary(self) -> None:
         result = apply_migrations()

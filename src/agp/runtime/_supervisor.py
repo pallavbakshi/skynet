@@ -430,8 +430,23 @@ class RuntimeSupervisor:
             )
         except _httpx.HTTPStatusError as exc:
             if exc.response.status_code == 409:
-                # 409 Conflict: runtime/agent is busy or no claim available.
-                # Normal idle behavior — not a failure.
+                # Check if the 409 is "runtime is unreachable" — this means
+                # the sweeper marked us offline and we need to re-register.
+                try:
+                    body = exc.response.json()
+                    msg = (body.get("error") or {}).get("message", "")
+                except Exception:
+                    msg = ""
+                if "unreachable" in msg.lower():
+                    _append_runtime_log(
+                        self.client.identity.runtime_id,
+                        {"kind": "runtime_worker", "action": "re_register_after_unreachable"},
+                    )
+                    _logger.info("runtime marked unreachable by CP — re-registering")
+                    self.client.register()
+                    self._registered = True
+                    return {"claimed": False}
+                # Normal idle: busy or no claim available.
                 return {"claimed": False}
             raise
         if not claimed.get("claimed"):
@@ -747,16 +762,30 @@ class RuntimeSupervisor:
             except Exception as comp_exc:  # noqa: BLE001
                 # Lease expired or CP rejected — job is lost; log and move on
                 # instead of crashing into the death loop.
+                error_detail = str(comp_exc)
+                resp_body = ""
+                if hasattr(comp_exc, "response"):
+                    try:
+                        resp_body = comp_exc.response.text[:500]
+                    except Exception:
+                        pass
                 _append_runtime_log(
                     self.client.identity.runtime_id,
                     {
                         "kind": "runtime_worker",
                         "action": "complete_rejected",
                         "run_id": run["run_id"],
-                        "error": str(comp_exc),
+                        "job_id": claimed["job"]["job_id"],
+                        "error": error_detail,
+                        "response_body": resp_body,
+                        "artifact_roles": [a.get("role", "?") for a in stored_artifacts],
+                        "artifact_count": len(stored_artifacts),
                     },
                 )
-                _logger.warning("complete() rejected for run %s: %s", run["run_id"], comp_exc)
+                _logger.warning(
+                    "complete() rejected for run %s (job %s): %s | response: %s",
+                    run["run_id"], claimed["job"]["job_id"], comp_exc, resp_body[:200],
+                )
                 return {"claimed": True, "claim": claimed, "error": str(comp_exc)}
             _append_runtime_log(
                 self.client.identity.runtime_id,
