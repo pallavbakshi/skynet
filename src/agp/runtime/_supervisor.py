@@ -294,6 +294,15 @@ class RuntimeSupervisor:
         restart_attempts = 0
         stop_event = stop_event or Event()
 
+        # Startup cleanup: remove stale result files from previous runs
+        try:
+            from agp.runtime._attachments import cleanup_stale_result_files
+            n = cleanup_stale_result_files()
+            if n:
+                _logger.info("startup cleanup: removed %d stale result files", n)
+        except Exception:  # noqa: BLE001
+            pass
+
         # Register runtime
         if not self._registered:
             self.client.register()
@@ -714,6 +723,15 @@ class RuntimeSupervisor:
                         extend_seconds=lease_ttl_seconds,
                     )
                     attempts += 1
+            # Persist extraction diagnostics as a separate artifact when present
+            if result.diagnostics:
+                result.artifacts.append(ArtifactPayload(
+                    role="extraction_diagnostics",
+                    name="extraction-diagnostics.json",
+                    content=json.dumps(result.diagnostics, indent=2, sort_keys=True),
+                    content_type="application/json",
+                ))
+                result.summary["extraction_diagnostics"] = result.diagnostics
             stored_artifacts = [
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in result.artifacts

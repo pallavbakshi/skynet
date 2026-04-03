@@ -233,7 +233,7 @@ def _extract_trailing_json_payload(text: str) -> dict | None:
 def _review_attachment_note(*, attachment_name: str, short_output_guidance: str) -> str:
     return (
         f"Source job result is attached as {attachment_name}. "
-        f"AGP should also materialize that attachment under agp-attachments/ in the workspace before execution; "
+        f"AGP should also materialize that attachment under .agp-tmp/attachments/ in the workspace before execution; "
         f"search by the attached filename if needed. "
         f"{short_output_guidance}"
     )
@@ -242,7 +242,7 @@ def _review_attachment_note(*, attachment_name: str, short_output_guidance: str)
 def _review_fix_attachment_note(*, attachment_name: str, short_output_guidance: str) -> str:
     return (
         f"Updated result is attached as {attachment_name}. "
-        f"AGP should also materialize that attachment under agp-attachments/ in the workspace before execution; "
+        f"AGP should also materialize that attachment under .agp-tmp/attachments/ in the workspace before execution; "
         f"search by the attached filename if needed. "
         f"{short_output_guidance}"
     )
@@ -1915,6 +1915,228 @@ def review_cmd(
         typer.echo(f"[review] Max rounds ({max_rounds}) reached without approval.")
 
 
+# ── 1c. review-status / review-diagnose ──────────────────────────────
+
+
+@app.command(name="review-status")
+def review_status_cmd(
+    source_job_id: str = typer.Argument(..., help="Source job ID of the review session."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+) -> None:
+    """Show the current state of a review session."""
+    with _cli_client(server_url) as client:
+        state = _load_review_state(client, source_job_id)
+        if state is None:
+            typer.echo(f"No review session found for job {source_job_id}.", err=True)
+            raise typer.Exit(1)
+
+        if output_json:
+            typer.echo(json.dumps(state, indent=2, default=str))
+            return
+
+        typer.echo(f"Review Session: {state.get('review_session_id', '?')}")
+        typer.echo(f"  source_job:    {state.get('source_job_id', '?')}")
+        typer.echo(f"  reviewer:      {state.get('reviewer_id', '?')}")
+        typer.echo(f"  dev:           {state.get('dev_id', '?')}")
+        typer.echo(f"  round:         {state.get('current_round', '?')}/{state.get('max_rounds', '?')}")
+        typer.echo(f"  phase:         {state.get('phase', '?')}")
+        typer.echo(f"  active_job:    {state.get('active_job_id', 'none')}")
+        typer.echo(f"  last_verdict:  {state.get('last_verdict', 'none')}")
+        typer.echo(f"  updated_at:    {state.get('updated_at', '?')}")
+
+        # Show active job status if there's one running
+        active = state.get("active_job_id")
+        if active:
+            try:
+                job = client.get_job(active)
+                typer.echo(f"\n  Active Job ({active}):")
+                typer.echo(f"    status:  {job.get('status', '?').upper()}")
+                run_id = job.get("latest_run_id")
+                if run_id:
+                    typer.echo(f"    run:     {run_id}")
+            except Exception:
+                typer.echo(f"\n  Active Job ({active}): unreachable")
+
+
+@app.command(name="review-diagnose")
+def review_diagnose_cmd(
+    source_job_id: str = typer.Argument(..., help="Source job ID of the review session."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+) -> None:
+    """Diagnose a review session — show state, job health, extraction diagnostics."""
+    with _cli_client(server_url) as client:
+        state = _load_review_state(client, source_job_id)
+        if state is None:
+            typer.echo(f"No review session found for job {source_job_id}.", err=True)
+            raise typer.Exit(1)
+
+        diagnosis: dict = {"review_state": state, "jobs": {}, "extraction_diagnostics": {}}
+
+        # Gather job states for active and source jobs
+        for label, jid in [("source", source_job_id), ("active", state.get("active_job_id"))]:
+            if not jid:
+                continue
+            try:
+                job = client.get_job(jid)
+                diagnosis["jobs"][label] = {
+                    "job_id": jid,
+                    "status": job.get("status"),
+                    "target_agent_id": job.get("target_agent_id"),
+                    "latest_run_id": job.get("latest_run_id"),
+                    "updated_at": job.get("updated_at"),
+                }
+                # Check for extraction diagnostics artifact
+                try:
+                    arts = client.list_job_artifacts(jid, role="extraction_diagnostics")
+                    items = arts.get("items", [])
+                    if items:
+                        art = client.fetch_artifact(items[-1]["artifact_id"], content=True)
+                        diagnosis["extraction_diagnostics"][label] = json.loads(art.get("content", "{}"))
+                except Exception:
+                    pass
+            except Exception:
+                diagnosis["jobs"][label] = {"job_id": jid, "status": "unreachable"}
+
+        # Check reviewer runtime health
+        reviewer_id = state.get("reviewer_id")
+        if reviewer_id:
+            try:
+                agents = client.list_agents(limit=200).get("items", [])
+                reviewer_agent = next((a for a in agents if a.get("agent_id") == reviewer_id), None)
+                if reviewer_agent:
+                    runtimes = reviewer_agent.get("runtime_ids", [])
+                    diagnosis["reviewer_runtime"] = {
+                        "agent_status": reviewer_agent.get("status"),
+                        "runtime_ids": runtimes,
+                    }
+                    if runtimes:
+                        rt = client.ops_get_runtime(runtimes[0])
+                        if rt:
+                            diagnosis["reviewer_runtime"]["heartbeat_age"] = rt.get("heartbeat_age_seconds")
+                            diagnosis["reviewer_runtime"]["runtime_status"] = rt.get("status")
+            except Exception:
+                pass
+
+        if output_json:
+            typer.echo(json.dumps(diagnosis, indent=2, default=str))
+            return
+
+        # Pretty print
+        typer.echo(f"Review Diagnosis: {state.get('review_session_id', '?')}")
+        typer.echo(f"  phase:        {state.get('phase', '?')}")
+        typer.echo(f"  round:        {state.get('current_round', '?')}/{state.get('max_rounds', '?')}")
+        typer.echo(f"  last_verdict: {state.get('last_verdict', 'none')}")
+
+        for label, jdata in diagnosis.get("jobs", {}).items():
+            typer.echo(f"\n  {label.title()} Job ({jdata.get('job_id', '?')}):")
+            typer.echo(f"    status:  {jdata.get('status', '?')}")
+            if jdata.get("latest_run_id"):
+                typer.echo(f"    run:     {jdata['latest_run_id']}")
+
+        rt_info = diagnosis.get("reviewer_runtime", {})
+        if rt_info:
+            typer.echo(f"\n  Reviewer Runtime:")
+            typer.echo(f"    agent_status:   {rt_info.get('agent_status', '?')}")
+            hb = rt_info.get("heartbeat_age")
+            typer.echo(f"    heartbeat:      {f'{hb:.0f}s ago' if hb is not None else 'never'}")
+            typer.echo(f"    runtime_status: {rt_info.get('runtime_status', '?')}")
+
+        for label, ediag in diagnosis.get("extraction_diagnostics", {}).items():
+            typer.echo(f"\n  Extraction Diagnostics ({label}):")
+            typer.echo(f"    source:           {ediag.get('selected_source', '?')}")
+            typer.echo(f"    file_present:     {ediag.get('file_result_present', '?')}")
+            typer.echo(f"    file_valid:       {ediag.get('file_result_valid', '?')}")
+            typer.echo(f"    terminal_found:   {ediag.get('terminal_candidates_found', 0)}")
+            typer.echo(f"    failure_category: {ediag.get('failure_category', 'none')}")
+            for w in ediag.get("warnings", []):
+                typer.echo(f"    warning: {w}")
+
+
+# ── 1d. diagnose ────────────────────────────────────────────────────
+
+
+@app.command(name="diagnose")
+def diagnose_cmd(
+    entity_type: str = typer.Argument(..., help="Entity type: 'runtime'"),
+    entity_id: str = typer.Argument(..., help="Runtime ID to diagnose."),
+    server_url: str = typer.Option(None, help="CP URL."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+) -> None:
+    """Diagnose a runtime — show registration, heartbeat, jobs, and logs."""
+    if entity_type != "runtime":
+        typer.echo(f"Unknown entity type '{entity_type}'. Supported: runtime", err=True)
+        raise typer.Exit(1)
+
+    with _cli_client(server_url) as client:
+        rt = client.ops_get_runtime(entity_id)
+        if rt is None:
+            typer.echo(f"Runtime '{entity_id}' not found.", err=True)
+            raise typer.Exit(1)
+
+        diagnosis: dict = {
+            "runtime": rt,
+            "agents": [],
+            "recent_logs": [],
+        }
+
+        # Find agents bound to this runtime
+        try:
+            agents = client.list_agents(limit=200).get("items", [])
+            bound = [a for a in agents if entity_id in (a.get("runtime_ids") or [])]
+            diagnosis["agents"] = [
+                {
+                    "agent_id": a.get("agent_id"),
+                    "status": a.get("status"),
+                    "capabilities": a.get("capabilities", []),
+                    "queue_depth": a.get("queue_depth", 0),
+                }
+                for a in bound
+            ]
+        except Exception:
+            pass
+
+        # Recent runtime logs
+        try:
+            logs = client.logs_runtime(entity_id, limit=20)
+            diagnosis["recent_logs"] = logs.get("entries", logs) if isinstance(logs, dict) else logs
+        except Exception:
+            pass
+
+        if output_json:
+            typer.echo(json.dumps(diagnosis, indent=2, default=str))
+            return
+
+        # Pretty print
+        typer.echo(f"Runtime: {entity_id}")
+        typer.echo(f"  status:     {rt.get('status', '?')}")
+        hb = rt.get("heartbeat_age_seconds")
+        typer.echo(f"  heartbeat:  {f'{hb:.0f}s ago' if hb is not None else 'never'}")
+        typer.echo(f"  host:       {rt.get('host_kind', '?')}")
+        typer.echo(f"  registered: {rt.get('registered_at', '?')}")
+
+        if diagnosis["agents"]:
+            typer.echo(f"\n  Bound Agents:")
+            for a in diagnosis["agents"]:
+                typer.echo(f"    {a['agent_id']}  status={a['status']}  queue={a.get('queue_depth', 0)}")
+        else:
+            typer.echo(f"\n  Bound Agents: none")
+
+        logs = diagnosis.get("recent_logs", [])
+        if logs:
+            entries = logs[-10:] if isinstance(logs, list) else []
+            if entries:
+                typer.echo(f"\n  Recent Logs (last {len(entries)}):")
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        ts = entry.get("created_at", "?")
+                        action = entry.get("action", entry.get("kind", "?"))
+                        typer.echo(f"    [{ts}] {action}")
+                    else:
+                        typer.echo(f"    {str(entry)[:120]}")
+
+
 # ── 2. wait ──────────────────────────────────────────────────────────
 
 
@@ -1958,6 +2180,91 @@ def wait_cmd(
         typer.echo("timeout — job still running", err=True)
         typer.echo(f"Check again with: agp status {job_id}")
         raise typer.Exit(1)
+
+
+# ── 2b. health ──────────────────────────────────────────────────────
+
+
+@app.command()
+def health(
+    server_url: str = typer.Option(None, help="CP URL."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+) -> None:
+    """Show control-plane, runtime, and agent health at a glance."""
+    import httpx as _httpx
+
+    url = server_url or os.environ.get("AGP_SERVER_URL") or _default_server_url()
+    with _make_client(url) as client:
+        try:
+            cp_health = client.health()
+        except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
+            typer.echo(f"Control plane unreachable: {exc}", err=True)
+            raise typer.Exit(1)
+
+        # Ops health (runtimes, agents, jobs)
+        ops: dict | None = None
+        agents: list[dict] = []
+        runtimes: list[dict] = []
+        try:
+            ops = client.ops_health()
+        except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
+            pass
+        try:
+            page = client.list_agents(limit=200)
+            agents = page.get("items", [])
+        except Exception:
+            pass
+        try:
+            rt_page = client.list_runtimes(limit=200)
+            runtimes = rt_page.get("items", [])
+        except Exception:
+            pass
+
+        if output_json:
+            typer.echo(json.dumps({
+                "control_plane": cp_health,
+                "ops": ops,
+                "agents": agents,
+                "runtimes": runtimes,
+            }, indent=2, default=str))
+            return
+
+        # Control plane — unwrap {"ok": ..., "data": {...}} envelope
+        cp_data = cp_health.get("data", cp_health)
+        cp_status = cp_data.get("status", "unknown")
+        typer.echo(f"Control Plane: {cp_status}")
+        for k, v in cp_data.get("components", {}).items():
+            typer.echo(f"  {k}: {v}")
+
+        # Runtimes
+        typer.echo(f"\nRuntimes: {len(runtimes)}")
+        for rt in runtimes:
+            rid = rt.get("runtime_id", "?")
+            hb_age = rt.get("heartbeat_age_seconds")
+            hb_str = f"{hb_age:.0f}s ago" if hb_age is not None else "never"
+            agents_bound = ", ".join(rt.get("agent_ids", [])) or "none"
+            typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
+
+        # Agents
+        typer.echo(f"\nAgents: {len(agents)}")
+        for agent in agents:
+            aid = agent.get("agent_id", "?")
+            state = agent.get("status", "unknown")
+            caps = ", ".join(agent.get("capabilities", []))
+            qdepth = int(agent.get("queue_depth", 0) or 0)
+            parts = [f"  {aid}  status={state}"]
+            if caps:
+                parts.append(f"caps=[{caps}]")
+            if qdepth > 0:
+                parts.append(f"queue={qdepth}")
+            typer.echo("  ".join(parts))
+
+        # Queue summary
+        if ops:
+            queue = ops.get("queue") or {}
+            depth = int(queue.get("depth") or 0)
+            if depth > 0:
+                typer.echo(f"\nQueue depth: {depth}")
 
 
 # ── 3. status ────────────────────────────────────────────────────────
@@ -2569,6 +2876,32 @@ def _wait_for_tmux_idle(
         time.sleep(poll_seconds)
 
     return False
+
+
+# ── cleanup ──────────────────────────────────────────────────────────
+
+
+@app.command()
+def cleanup(
+    workspace: str = typer.Argument(None, help="Workspace directory (default: cwd)."),
+    keep_temp_artifacts: bool = typer.Option(False, "--keep-temp-artifacts", help="Skip temp artifact cleanup."),
+) -> None:
+    """Remove AGP temp artifacts and stale result files."""
+    from agp.runtime._attachments import cleanup_temp_artifacts, cleanup_stale_result_files
+
+    ws = Path(workspace) if workspace else None
+    total = 0
+    if not keep_temp_artifacts:
+        n = cleanup_temp_artifacts(ws)
+        if n:
+            typer.echo(f"Cleaned {n} temp artifact director{'ies' if n != 1 else 'y'}.")
+        total += n
+    n = cleanup_stale_result_files()
+    if n:
+        typer.echo(f"Cleaned {n} stale result file{'s' if n != 1 else ''}.")
+    total += n
+    if total == 0:
+        typer.echo("Nothing to clean.")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from agp.plugins._output_contracts import (
     result_file_path_for_run,
     validate_json_against_contract,
 )
+from agp.plugins._structured_output import select_structured_result
 from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
@@ -1012,84 +1013,30 @@ class CodexAdapter(AgentAdapter):
             raw_output,
             baseline_last_response=baseline_last_response,
         )
+        extraction_diag = None
         if json_contract:
-            import logging as _logging
-            _log = _logging.getLogger(__name__)
-
-            # Layer 1: file-based result delivery — most reliable for long output.
-            file_json: str | None = None
-            if result_file:
-                try:
-                    _fpath = __import__("pathlib").Path(result_file)
-                    if _fpath.exists() and not _fpath.is_symlink():
-                        _raw = _fpath.read_text().strip()
-                        if _raw:
-                            json.loads(_raw)  # validate before trusting
-                            file_json = _raw
-                            _log.info("file-based result read from %s (%d bytes)", result_file, len(_raw))
-                        # Only clean up after successful read.
-                        _fpath.unlink(missing_ok=True)
-                    elif _fpath.is_symlink():
-                        _log.warning("result file %s is a symlink — ignoring", result_file)
-                        _fpath.unlink(missing_ok=True)
-                except Exception as _e:
-                    _log.warning("file-based result at %s unreadable: %s", result_file, _e)
-
-            # Layer 2: terminal-based extraction (fallback or validation).
-            json_text = _extract_trailing_json_text(cleaned)
-            # Also probe the full scrollback: if the visible pane only shows the
-            # tail of a long response, the beginning may have scrolled off but is
-            # still present in raw_output.  Prefer whichever candidate produces
-            # the larger (more complete) JSON object.
+            # Build cleaned sources for the shared pipeline.
+            # Codex-specific: include bullet-line extraction as additional sources.
+            cleaned_sources: list[tuple[str, str]] = [
+                ("cleaned", cleaned),
+            ]
             if raw_output:
-                _raw_cleaned = _clean_codex_tui_output(raw_output)
-                _raw_json = _extract_trailing_json_text(_raw_cleaned) if _raw_cleaned else None
-                if _raw_json and (not json_text or len(_raw_json) > len(json_text)):
-                    json_text = _raw_json
-            if not json_text:
-                for source in (visible_output, last_good_screen, raw_output):
-                    if not source:
-                        continue
-                    json_text = _extract_trailing_json_text(_clean_codex_tui_output(source))
-                    if json_text:
-                        break
-                    bullet_text = "\n".join(_collect_bullet_lines(_strip_ansi(source).splitlines()))
-                    json_text = _extract_trailing_json_text(bullet_text)
-                    if json_text:
-                        break
-
-            # Pick the best candidate: file > terminal, preferring whichever is
-            # larger (more complete) and passes contract validation.
-            candidates: list[tuple[str, str]] = []
-            if file_json:
-                candidates.append(("file", file_json))
-            if json_text:
-                candidates.append(("terminal", json_text))
-            best_source, best_json = "none", None
-            for source_name, candidate in candidates:
-                valid, reason = validate_json_against_contract(candidate, claimed)
-                if valid:
-                    if best_json is None or len(candidate) > len(best_json):
-                        best_source, best_json = source_name, candidate
-                else:
-                    _log.warning("JSON from %s failed contract validation: %s", source_name, reason)
-
-            # Layer 3: truncation detection — warn if best candidate fails validation.
-            if best_json:
-                cleaned = best_json
-            elif candidates:
-                # None passed validation — use the largest anyway but warn.
-                _largest = max(candidates, key=lambda c: len(c[1]))
-                _log.warning(
-                    "potential truncation: best JSON (%s, %d bytes) failed contract validation; "
-                    "using it anyway as no better candidate exists",
-                    _largest[0], len(_largest[1]),
-                )
-                cleaned = _largest[1]
-            elif json_text:
-                cleaned = json_text
-            if best_source != "none":
-                _log.info("JSON result selected from %s (%d bytes)", best_source, len(cleaned))
+                raw_cleaned = _clean_codex_tui_output(raw_output)
+                if raw_cleaned:
+                    cleaned_sources.append(("raw_cleaned", raw_cleaned))
+            for tag, src in [("visible", visible_output), ("last_good", last_good_screen), ("raw", raw_output)]:
+                if src:
+                    cleaned_sources.append((f"{tag}_tui_cleaned", _clean_codex_tui_output(src)))
+                    bullet_text = "\n".join(_collect_bullet_lines(_strip_ansi(src).splitlines()))
+                    if bullet_text:
+                        cleaned_sources.append((f"{tag}_bullets", bullet_text))
+            selected, extraction_diag = select_structured_result(
+                result_file=result_file,
+                cleaned_sources=cleaned_sources,
+                claimed=claimed,
+            )
+            if selected:
+                cleaned = selected
         transcript_output = _select_codex_tui_transcript(
             visible_output,
             last_good_screen,
@@ -1108,6 +1055,7 @@ class CodexAdapter(AgentAdapter):
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],
             summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui"},
+            diagnostics=extraction_diag.to_dict() if extraction_diag else None,
         )
 
     def _execute_run_marker(

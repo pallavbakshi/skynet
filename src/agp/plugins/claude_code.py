@@ -14,6 +14,7 @@ from agp.plugins._output_contracts import (
     result_file_path_for_run,
     validate_json_against_contract,
 )
+from agp.plugins._structured_output import select_structured_result
 from agp.plugins._provider_env import collect_provider_env
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
@@ -979,41 +980,27 @@ class ClaudeCodeAdapter(AgentAdapter):
         cleaned = _clean_claude_code_output(raw_output)
         if (not cleaned.strip() or self._looks_like_shell_returned(raw_output)) and last_good_screen:
             cleaned = _clean_claude_code_output(last_good_screen)
+        extraction_diag = None
         if json_contract:
-            file_json = None
-            if result_file:
-                try:
-                    _fpath = __import__("pathlib").Path(result_file)
-                    if _fpath.exists() and _fpath.is_file() and not _fpath.is_symlink():
-                        _raw = _fpath.read_text(encoding="utf-8").strip()
-                        if _raw:
-                            valid, reason = validate_json_against_contract(_raw, claimed)
-                            if valid:
-                                file_json = _raw
-                            else:
-                                _logger.warning(
-                                    "file-based Claude result at %s failed validation: %s",
-                                    result_file,
-                                    reason,
-                                )
-                        _fpath.unlink(missing_ok=True)
-                    elif _fpath.is_symlink():
-                        _fpath.unlink(missing_ok=True)
-                except Exception as exc:
-                    _logger.warning("file-based Claude result at %s unreadable: %s", result_file, exc)
-            json_text = file_json or _extract_trailing_json_text(cleaned)
-            if not json_text:
-                for source in (raw_output, last_good_screen):
-                    if not source:
-                        continue
-                    json_text = _extract_trailing_json_text(_clean_claude_code_output(source))
-                    if json_text:
-                        break
-                    json_text = _extract_trailing_json_text(source)
-                    if json_text:
-                        break
-            if json_text:
-                cleaned = json_text
+            cleaned_sources = [
+                ("cleaned", cleaned),
+                ("raw_cleaned", _clean_claude_code_output(raw_output) if raw_output else ""),
+            ]
+            if last_good_screen:
+                cleaned_sources.append(
+                    ("last_good_cleaned", _clean_claude_code_output(last_good_screen)),
+                )
+            # Also try raw uncleaned sources as last resort
+            for tag, src in [("raw_output", raw_output), ("last_good_screen", last_good_screen)]:
+                if src:
+                    cleaned_sources.append((tag, src))
+            selected, extraction_diag = select_structured_result(
+                result_file=result_file,
+                cleaned_sources=cleaned_sources,
+                claimed=claimed,
+            )
+            if selected:
+                cleaned = selected
 
         if not cleaned.strip():
             raise ExecutionTimeout("claude code tui produced no output after idle")
@@ -1026,6 +1013,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],
             summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui"},
+            diagnostics=extraction_diag.to_dict() if extraction_diag else None,
         )
 
     def recover(

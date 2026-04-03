@@ -1582,7 +1582,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 },
             )
             runtime_client.close()
-            staged = Path(tmpdir) / "agp-attachments" / "art_attach" / "note.txt"
+            staged = Path(tmpdir) / ".agp-tmp" / "attachments" / "art_attach" / "note.txt"
             self.assertTrue(staged.exists())
             self.assertEqual(staged.read_text(encoding="utf-8"), "attached body")
 
@@ -1624,7 +1624,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 },
             )
             runtime_client.close()
-            staged = Path(tmpdir) / "agp-attachments" / "art_attach_http" / "note.txt"
+            staged = Path(tmpdir) / ".agp-tmp" / "attachments" / "art_attach_http" / "note.txt"
             self.assertEqual(fetch_calls, ["art_attach_http"])
             self.assertTrue(staged.exists())
             self.assertEqual(staged.read_text(encoding="utf-8"), "fetched from cp")
@@ -1641,7 +1641,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 adapter=DefaultAgentAdapter(),
                 artifact_root=".agp-artifacts-tests",
             )
-            staged_root = Path(tmpdir) / "agp-attachments" / "art_cleanup"
+            staged_root = Path(tmpdir) / ".agp-tmp" / "attachments" / "art_cleanup"
             staged_root.mkdir(parents=True)
             staged = staged_root / "staged.txt"
             staged.write_text("temp", encoding="utf-8")
@@ -1694,7 +1694,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 },
             )
             runtime_client.close()
-            staged = Path(tmpdir) / "agp-attachments" / "art_same_name" / "README.md"
+            staged = Path(tmpdir) / ".agp-tmp" / "attachments" / "art_same_name" / "README.md"
             self.assertEqual(original.read_text(encoding="utf-8"), "real workspace file")
             self.assertEqual(staged.read_text(encoding="utf-8"), "attached body")
 
