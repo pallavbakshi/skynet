@@ -2206,8 +2206,7 @@ def health(
     """Show control-plane, runtime, and agent health at a glance."""
     import httpx as _httpx
 
-    url = server_url or os.environ.get("AGP_SERVER_URL") or _default_server_url()
-    with _make_client(url) as client:
+    with _make_client(server_url) as client:
         try:
             cp_health = client.health()
         except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
