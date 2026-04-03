@@ -471,13 +471,19 @@ runtime-deploy: ## Generate deploy script for a remote runtime
 
 # ── Dev/test targets ─────────────────────────────────────────────────
 
-.PHONY: test lint
+.PHONY: test lint test-parser capture
 
 test: ## Run test suite
 	$(RUN) python -m pytest tests/ -x -q --tb=short
 
+test-parser: ## Run Claude Code parser tests only
+	$(RUN) python -m pytest tests/plugins/claude_code/ -v
+
 lint: ## Run linter
 	$(RUN) python -m ruff check src/ tests/
+
+capture: ## Capture tmux pane to corpus (usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer])
+	@./scripts/capture-pane.sh $(CAT) $(NAME) $(SESSION)
 
 # ── Help ─────────────────────────────────────────────────────────────
 

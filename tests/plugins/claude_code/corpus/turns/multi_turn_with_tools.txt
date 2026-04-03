@@ -1,0 +1,50 @@
+
+~/projects/skynet master ↑at 22:27:03
+❯ mkdir -p /tmp/agp-corpus-untrusted && cd /tmp/agp-corpus-untrusted && /opt/homebrew/bin/claude
+╭─── Claude Code v2.1.91 ───────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                             │
+│                  Welcome back PB!                  │ Ask Claude to create a new app or clone a repository │
+│                                                    │ ──────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ Recent activity                                      │
+│                      ▝▜█████▛▘                     │ No recent activity                                   │
+│                        ▘▘ ▝▝                       │                                                      │
+│   Opus 4.6 (1M context) with me… · Claude Max ·    │                                                      │
+│   user@example.com's Organization         │                                                      │
+│         /private/tmp/agp-corpus-untrusted          │                                                      │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+❯ What is 2+2?
+
+⏺ 4
+
+❯ Say hello 1
+
+⏺ Hello 1!
+
+❯ Say hello 2
+
+⏺ Hello 2!
+
+❯ Read the first 20 lines of /Users/pb/projects/skynet/src/agp/cli.py, then summarize what this module does in 2 sentences.
+
+⏺ Read(/Users/pb/projects/skynet/src/agp/cli.py · lines 1-20)
+  ⎿  Read 20 lines
+
+⏺ This module is the CLI entrypoint for the AGP scaffold, exposing agent-facing client commands (send, wait, status, ls, info, nudge, etc.) that communicate with a running control plane over HTTP. It
+  also includes hidden compatibility shims for older operational commands, while deferring server-side imports so that a minimal install can use the client without pulling in heavy dependencies like
+  uvicorn or SQLAlchemy.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sTAT | Opus 4.6 (1M context) | medium | 18db9482-c6c8-43d7-a346-fd56fbca0b64 | 2%                                                                                                 ◐ medium · /effort
+  ⏵⏵ accept edits on (shift+tab to cycle)                                                                                                                                                 16555 tokens
+
+
+
+
+
+
+
+
+

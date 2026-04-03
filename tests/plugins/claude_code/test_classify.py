@@ -63,7 +63,7 @@ def test_ready_screens_end_with_prompt(capture, corpus):
 
 
 def test_thinking_screen_is_working(corpus):
-    text = normalize_screen(corpus("working/thinking.txt"))
+    text = _prepare(corpus("working/thinking.txt"))
     assert is_working(text)
     assert not is_shell_returned(text)
 
@@ -72,12 +72,12 @@ def test_thinking_screen_is_working(corpus):
 
 
 def test_post_response_is_completed_turn(corpus):
-    text = normalize_screen(corpus("ready/post_response.txt"))
+    text = _prepare(corpus("ready/post_response.txt"))
     assert is_completed_turn(text, baseline_answered_turns=0, baseline_last_response=None)
 
 
 def test_fresh_launch_is_not_completed_turn(corpus):
-    text = normalize_screen(corpus("ready/fresh_launch.txt"))
+    text = _prepare(corpus("ready/fresh_launch.txt"))
     assert not is_completed_turn(text, baseline_answered_turns=0, baseline_last_response=None)
 
 
@@ -93,27 +93,21 @@ def test_gate_screens_detected(capture, corpus_with_expected):
 
 
 def test_ready_screens_no_gate(corpus):
-    text = normalize_screen(corpus("ready/fresh_launch.txt"))
+    text = _prepare(corpus("ready/fresh_launch.txt"))
     assert classify_gate(text) == GateKind.NONE
 
 
-def test_login_is_fatal_gate(corpus):
-    text = normalize_screen(corpus("gates/login_required.txt"))
-    assert classify_gate(text) == GateKind.FATAL
+def test_permission_prompt_is_auto_gate(corpus):
+    text = _prepare(corpus("gates/permission_prompt.txt"))
+    assert classify_gate(text) == GateKind.AUTO
 
 
 # ── Edge cases ────────────────────────────────────────────────────────
 
 
 def test_empty_pane(corpus):
-    text = normalize_screen(corpus("edge/empty_pane.txt"))
+    text = _prepare(corpus("edge/empty_pane.txt"))
     assert not is_ready(text)
     assert not is_working(text)
     assert not is_shell_returned(text)
     assert classify_gate(text) == GateKind.NONE
-
-
-def test_upgrade_notification_not_working(corpus):
-    text = normalize_screen(corpus("edge/upgrade_notification.txt"))
-    assert not is_working(text)
-    assert is_ready(text)

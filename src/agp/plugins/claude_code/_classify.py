@@ -16,6 +16,7 @@ from agp.plugins.claude_code._markers import (
     STATUS_LINE_RE,
     THINKING_PREFIXES,
     THINKING_VERBS,
+    WORKING_PREFIXES,
 )
 from agp.plugins.claude_code._normalize import is_noise_line, is_status_continuation
 from agp.plugins.claude_code._parse import parse_turns
@@ -33,6 +34,8 @@ def _has_tui_indicator(text: str) -> bool:
         if SEPARATOR_RE.match(s):
             return True
         if STATUS_BAR_RE.match(s):
+            return True
+        if _is_response_line(s):
             return True
         if any(s.startswith(c) for c in ("\u256d", "\u2570", "\u2502")):
             # Welcome box border
@@ -102,18 +105,38 @@ def is_working(text: str) -> bool:
     if not meaningful:
         return False
 
-    # Check for thinking indicators first — they take precedence
-    # over prompt+response detection because the thinking indicator
-    # is the most recent activity.
+    # meaningful is in bottom-up order (index 0 = screen bottom).
+    # If a response line (⏺/●) appears closer to the bottom than
+    # the thinking indicator, the indicator is stale — not working.
+    first_thinking_idx = None
+    first_response_idx = None
+    for i, s in enumerate(meaningful):
+        if first_response_idx is None and _is_response_line(s):
+            first_response_idx = i
+        if first_thinking_idx is None:
+            for prefix in THINKING_PREFIXES:
+                if s.startswith(prefix):
+                    first_thinking_idx = i
+                    break
+    if (
+        first_thinking_idx is not None
+        and first_response_idx is not None
+        and first_response_idx < first_thinking_idx
+    ):
+        return False
+
+    # Check for thinking indicators in the bottom lines.
+    # Uses WORKING_PREFIXES which excludes · (middle dot) — it appears
+    # as both a spinner frame and a bullet point in response content.
     for s in meaningful:
-        # Thinking prefix + ellipsis or verb
-        for prefix in THINKING_PREFIXES:
-            if s.startswith(prefix):
-                lower = s.lower()
-                if "\u2026" in s or "..." in s:  # ellipsis
-                    return True
-                if any(verb in lower for verb in THINKING_VERBS):
-                    return True
+        for prefix in WORKING_PREFIXES:
+            if not s.startswith(prefix):
+                continue
+            lower = s.lower()
+            if "\u2026" in s or "..." in s:
+                return True
+            if any(verb in lower for verb in THINKING_VERBS):
+                return True
 
         # Agent/Explore/Tool indicators
         if s.startswith("Running") and "\u2026" in s:
@@ -161,9 +184,9 @@ def is_shell_returned(text: str) -> bool:
     if last.endswith("$") or last.endswith("%") or last.endswith("#"):
         return True
 
-    # Bare ❯ at the bottom without TUI chrome nearby = zsh prompt after exit
-    if last.startswith(PROMPT_PREFIX):
-        # Check if any of the bottom lines have TUI-specific content
+    # Bare ❯ with no text after it (zsh idle prompt) without TUI chrome = shell
+    # ❯ with text (like "❯ task prompt") is ambiguous — could be TUI input
+    if last == PROMPT_PREFIX or last == PROMPT_PREFIX + " ":
         has_tui_below = any(
             SEPARATOR_RE.match(ln) or STATUS_BAR_RE.match(ln)
             for ln in tail

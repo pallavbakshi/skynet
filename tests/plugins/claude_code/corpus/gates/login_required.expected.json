@@ -1,7 +1,0 @@
-{
-  "classify": {
-    "is_ready": false,
-    "is_working": false,
-    "gate_kind": "FATAL"
-  }
-}

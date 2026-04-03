@@ -6,52 +6,43 @@ Used as ground truth for the parser test suite.
 ## How to capture
 
 ```bash
-# Visible screen only (most common):
-tmux capture-pane -t <pane> -p > corpus/<category>/<name>.txt
+# One command — captures raw, plain, scrollback, and metadata:
+./scripts/capture-pane.sh <category> <name> [session]
 
-# With ANSI escapes (for strip_ansi robustness testing):
-tmux capture-pane -t <pane> -p -e > corpus/<category>/<name>.ansi.txt
-
-# Full scrollback:
-tmux capture-pane -t <pane> -p -S - > corpus/<category>/<name>.txt
+# Or via make:
+make capture CAT=ready NAME=fresh_launch
+make capture CAT=working NAME=thinking SESSION=agp-claude-reviewer
 ```
+
+## What gets saved
+
+Each capture produces 4 files:
+
+| File | Content |
+|------|---------|
+| `{name}.raw` | Raw tmux output with ANSI escapes (source of truth) |
+| `{name}.txt` | Plain text (ANSI stripped by tmux) |
+| `{name}.scrollback.txt` | Full scrollback history (plain) |
+| `{name}.capture.json` | Metadata: timestamp, pane size, cursor position, version |
+
+Optional: `{name}.expected.json` — ground-truth assertions for tests.
 
 ## Directory layout
 
-- `ready/` — Idle prompt states (fresh launch, post-response, with welcome box)
-- `working/` — Active processing (thinking, tool use in progress)
-- `turns/` — Completed conversations (single turn, multi-turn, with tool results)
-- `gates/` — Gate/permission/trust/login screens
+- `ready/` — Idle prompt states (fresh launch, post-response)
+- `working/` — Active processing (thinking, tool use)
+- `turns/` — Completed conversations (single, multi-turn, tool results)
+- `gates/` — Permission/trust/login screens
 - `shell/` — Post-exit shell prompt states
 - `scrollback/` — Full read_output accumulations
 - `edge/` — Edge cases and regression captures
 
-## Sidecar files
+## When to capture
 
-Each `.txt` can have an optional `.expected.json` sidecar with ground-truth assertions:
+Capture whenever you see a new TUI state:
+- New gate/dialog type
+- Different spinner verb or frame
+- Unusual layout (compaction, error box, swarm mode)
+- After Claude Code version updates
 
-```json
-{
-  "classify": {
-    "is_ready": true,
-    "is_working": false,
-    "ends_with_prompt": true,
-    "is_shell_returned": false,
-    "gate_kind": "NONE"
-  },
-  "turns": [
-    {"prompt": "hello", "response_starts_with": "Hello"}
-  ],
-  "last_response_contains": "Hello"
-}
-```
-
-## When to update
-
-Update captures when Claude Code ships UI changes that affect:
-- Prompt markers (❯)
-- Response markers (⏺, ●)
-- Status bar format (⏵⏵)
-- Gate/permission dialogs
-- Welcome box layout
-- Thinking/working indicators
+Each new capture is a regression guard for the parser.

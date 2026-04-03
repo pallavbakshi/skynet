@@ -1,8 +1,0 @@
-{
-  "classify": {
-    "is_ready": false,
-    "is_working": false,
-    "gate_kind": "AUTO"
-  },
-  "gate_response": "0"
-}

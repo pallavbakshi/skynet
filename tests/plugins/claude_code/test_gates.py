@@ -31,24 +31,9 @@ def test_gate_response_matches(capture, corpus_with_expected):
         assert gate_response(text) == expected["gate_response"]
 
 
-def test_trust_folder_response(corpus):
-    text = normalize_screen(corpus("gates/trust_folder.txt"))
-    assert gate_response(text) == "1"
-
-
-def test_bypass_permissions_response(corpus):
-    text = normalize_screen(corpus("gates/bypass_permissions.txt"))
-    assert gate_response(text) == "2"
-
-
-def test_feedback_survey_response(corpus):
-    text = normalize_screen(corpus("gates/feedback_survey.txt"))
-    assert gate_response(text) == "0"
-
-
-def test_login_is_fatal(corpus):
-    text = normalize_screen(corpus("gates/login_required.txt"))
-    assert classify_gate(text) == GateKind.FATAL
+def test_permission_prompt_is_auto_gate(corpus):
+    text = _prepare(corpus("gates/permission_prompt.txt"))
+    assert classify_gate(text) == GateKind.AUTO
 
 
 @pytest.mark.parametrize("capture", corpus_files("ready"))

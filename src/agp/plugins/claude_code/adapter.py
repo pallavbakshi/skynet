@@ -1,0 +1,580 @@
+"""Claude Code CLI agent adapter — orchestration (poll loop, bootstrap, recovery).
+
+All TUI parsing and classification is delegated to sibling modules
+(_classify, _parse, _gates, _normalize, _json_extract, _metadata).
+"""
+from __future__ import annotations
+
+import logging
+from time import monotonic, sleep
+from typing import Any
+
+from agp.plugins.claude_code._classify import (
+    ends_with_prompt as _ends_with_prompt,
+    is_completed_turn as _is_completed_turn,
+    is_ready as _is_ready,
+    is_shell_returned as _is_shell_returned,
+    is_working as _is_working,
+)
+from agp.plugins.claude_code._gates import (
+    GateKind,
+    classify_gate as _classify_gate,
+    gate_response as _gate_response,
+)
+from agp.plugins.claude_code._json_extract import (
+    extract_trailing_json,
+    repair_json_string,
+)
+from agp.plugins.claude_code._markers import PROMPT_PREFIX
+from agp.plugins.claude_code._normalize import (
+    normalize_screen as _normalize_screen,
+    screen_tail as _screen_tail,
+)
+from agp.plugins.claude_code._parse import (
+    extract_last_response,
+    parse_turns,
+)
+from agp.plugins._output_contracts import (
+    apply_output_contract_instruction,
+    prompt_for_claim,
+    result_file_path_for_run,
+    validate_json_against_contract,
+)
+from agp.plugins._structured_output import select_structured_result
+from agp.plugins._provider_env import collect_provider_env
+from agp.runtime import (
+    AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
+    AuthFailure, BootstrapFailure, ExecutionTimeout, PaneDied,
+    RecoverableExecutionError, StableButIndeterminate, TerminalHost,
+    TerminalSession, _strip_ansi,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+# ── Convenience helpers (also re-exported from __init__ for compat) ──
+
+
+def _clean_claude_code_output(text: str) -> str:
+    """Extract the last Claude Code response from raw TUI output."""
+    return extract_last_response(_strip_ansi(text))
+
+
+def _parse_claude_code_turns(text: str) -> list[dict[str, Any]]:
+    """Parse visible Claude Code TUI output into prompt/response turns.
+
+    Returns list[dict] with "prompt" and "response" keys for backward
+    compatibility.
+    """
+    turns = parse_turns(_strip_ansi(text))
+    return [
+        {"prompt": t.prompt, "response": t.response_lines}
+        for t in turns
+    ]
+
+
+def _extract_trailing_json_text(text: str) -> str | None:
+    return extract_trailing_json(text)
+
+
+def _repair_json_string(text: str) -> str:
+    return repair_json_string(text)
+
+
+# ── Adapter ──────────────────────────────────────────────────────────
+
+
+class ClaudeCodeAdapter(AgentAdapter):
+    def __init__(
+        self,
+        *,
+        cli_command: str = "claude",
+        idle_poll_seconds: float = 2.0,
+        idle_after: int = 3,
+        idle_timeout_seconds: float = 0.0,
+        session_mode: str = "ephemeral",
+        bootstrap_settle_seconds: float = 0.0,
+    ) -> None:
+        self.cli_command = cli_command
+        self.idle_poll_seconds = idle_poll_seconds
+        self.idle_after = idle_after
+        self.idle_timeout_seconds = idle_timeout_seconds
+        self.session_mode = session_mode
+        self.bootstrap_settle_seconds = bootstrap_settle_seconds
+
+    @property
+    def kind(self) -> str:
+        return "claude_code"
+
+    # ── TUI detection helpers (public for tests) ─────────────────────
+
+    @staticmethod
+    def _looks_like_ready(text: str) -> bool:
+        return _is_ready(text)
+
+    @staticmethod
+    def _visible_ends_with_prompt(text: str) -> bool:
+        return _ends_with_prompt(text)
+
+    @staticmethod
+    def _looks_like_working(text: str) -> bool:
+        return _is_working(text)
+
+    @staticmethod
+    def _screen_tail(text: str, n: int = 10) -> str:
+        return _screen_tail(text, n)
+
+    @staticmethod
+    def _looks_like_shell_returned(text: str) -> bool:
+        return _is_shell_returned(text)
+
+    @staticmethod
+    def _looks_like_gate_prompt(text: str) -> bool:
+        return _classify_gate(text) != GateKind.NONE
+
+    @staticmethod
+    def _is_fatal_gate(text: str) -> bool:
+        return _classify_gate(text) == GateKind.FATAL
+
+    @staticmethod
+    def _gate_response(text: str) -> str:
+        return _gate_response(text)
+
+    @staticmethod
+    def _normalise_visible_screen(raw: str) -> str:
+        return _normalize_screen(raw)
+
+    def _looks_like_completed_turn(
+        self,
+        text: str,
+        *,
+        baseline_answered_turns: int,
+        baseline_last_response: str | None,
+    ) -> bool:
+        return _is_completed_turn(
+            text,
+            baseline_answered_turns=baseline_answered_turns,
+            baseline_last_response=baseline_last_response,
+        )
+
+    def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
+        cleaned = _clean_claude_code_output(text)
+        screen = _strip_ansi(text)
+        return {
+            "adapter_kind": self.kind,
+            "mode": "tui",
+            "run_id": run_id,
+            "cleaned_output": cleaned,
+            "looks_like_ready": _is_ready(screen),
+            "looks_like_gate_prompt": _classify_gate(screen) != GateKind.NONE,
+            "looks_like_shell_returned": _is_shell_returned(screen),
+            "supported": True,
+        }
+
+    def ensure_bootstrapped(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],
+    ) -> bool:  # noqa: ARG002
+        """Ensure the Claude Code TUI is ready.
+
+        Returns True when the adapter reused an already-running foreground TUI.
+        Returns False when it had to launch or re-bootstrap the session.
+        """
+        if session.metadata.get("claude_code_bootstrapped"):
+            if hasattr(host, "is_foreground_tui"):
+                if not host.is_foreground_tui(session):
+                    session.metadata.pop("claude_code_bootstrapped", None)
+                else:
+                    return True
+            elif host.kind == "tmux":
+                session.metadata.pop("claude_code_bootstrapped", None)
+            else:
+                return True
+
+        health = host.health(session)
+        if not health.healthy:
+            raise BootstrapFailure(f"session unhealthy before bootstrap: {health.reason}")
+
+        if self.session_mode == "sticky" and hasattr(host, "is_foreground_tui") and host.is_foreground_tui(session):
+            session.metadata["claude_code_bootstrapped"] = True
+            return True
+
+        host.launch_command(
+            session,
+            command=f"{self.cli_command} --dangerously-skip-permissions",
+            env=collect_provider_env(),
+            cwd=session.workspace_ref,
+        )
+
+        deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
+        gate_dismissals = 0
+        max_gate_dismissals = 10
+        while monotonic() < deadline:
+            sleep(self.idle_poll_seconds)
+            screen = _strip_ansi(host.read_visible(session))
+            if _classify_gate(screen) != GateKind.NONE:
+                if _classify_gate(screen) == GateKind.FATAL:
+                    raise AuthFailure(
+                        "claude code requires interactive login — complete OAuth "
+                        "setup in the container and re-commit the image"
+                    )
+                host.send_text(session, _gate_response(screen), enter=True)
+                gate_dismissals += 1
+                if gate_dismissals <= max_gate_dismissals:
+                    deadline = max(deadline, monotonic() + 30.0)
+                continue
+            if _is_ready(screen):
+                break
+        else:
+            raise BootstrapFailure("claude code did not become ready after launch")
+
+        if self.bootstrap_settle_seconds > 0:
+            sleep(self.bootstrap_settle_seconds)
+            health = host.health(session)
+            if not health.healthy:
+                raise BootstrapFailure(f"session unhealthy after bootstrap: {health.reason}")
+
+        session.metadata["claude_code_bootstrapped"] = True
+        return False
+
+    # ── Execution paths ──────────────────────────────────────────────
+
+    def execute_run(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],
+        supervisor: "RuntimeSupervisor",
+    ) -> ExecutionResult:
+        return self._execute_run_tui(host=host, session=session, claimed=claimed, supervisor=supervisor)
+
+    def _execute_run_tui(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],
+        supervisor: "RuntimeSupervisor",
+    ) -> ExecutionResult:
+        """TUI mode: send prompt at ❯ -> wait for idle -> parse output."""
+        contract = (claimed.get("job") or {}).get("output_contract_json") or {}
+        json_contract = isinstance(contract, dict) and contract.get("format", "json") == "json"
+        result_file = result_file_path_for_run(claimed["run"]["run_id"]) if json_contract else None
+        if result_file:
+            try:
+                __import__("pathlib").Path(result_file).unlink(missing_ok=True)
+            except Exception:
+                pass
+        prompt = apply_output_contract_instruction(
+            prompt=claimed["message"]["text"],
+            claimed=claimed,
+            result_file_path=result_file,
+        )
+        run_id = claimed["run"]["run_id"]
+
+        if self.session_mode == "ephemeral":
+            session = host.reset_session(session)
+            session.metadata.pop('restored_cursor', None)
+        reused_existing_tui = self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
+
+        baseline_turns: list[dict[str, Any]] = []
+        baseline_last_response = None
+        if reused_existing_tui:
+            baseline_screen = _strip_ansi(host.read_visible(session))
+            baseline_turns = [t for t in _parse_claude_code_turns(baseline_screen) if t["response"]]
+            if baseline_turns:
+                baseline_last_response = "\n".join(baseline_turns[-1]["response"]).strip()
+
+        health = host.health(session)
+        if not health.healthy:
+            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
+
+        cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
+        startup_settled_event = session.metadata.get("startup_settled_event") or getattr(
+            supervisor, "_active_startup_settled", None,
+        )
+        lock = getattr(supervisor, "_session_lock", None)
+        if lock is not None:
+            with lock:
+                supervisor._active_session = session
+        else:
+            supervisor._active_session = session
+        supervisor.emit_progress(
+            claimed,
+            message="runtime.tui_dispatch",
+            details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
+        )
+
+        host.send_text(session, prompt, enter=True)
+
+        def _poll_hook() -> None:
+            supervisor.check_interrupt(claimed)
+
+        timeout = self.idle_timeout_seconds or 180.0
+        deadline = monotonic() + timeout
+        prev_screen = ""
+        prev_tail = ""
+        unchanged = 0
+        indeterminate_polls = 0
+        tui_active = False
+        dispatch_time = monotonic()
+        accumulated_turns_above_baseline = 0
+        last_good_screen = ""
+        last_heartbeat_at = dispatch_time
+        heartbeat_interval = max(self.idle_poll_seconds, min(10.0, timeout / 4.0))
+
+        while monotonic() < deadline:
+            sleep(self.idle_poll_seconds)
+            _poll_hook()
+            screen = _strip_ansi(host.read_visible(session))
+            read = host.read_output(session, cursor)
+            cursor = read.cursor
+            answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
+            accumulated_turns_above_baseline = max(
+                accumulated_turns_above_baseline,
+                len(answered_turns) - len(baseline_turns),
+            )
+            snap = _normalize_screen(screen)
+            tail = _screen_tail(screen)
+            changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
+
+            now = monotonic()
+            if changed or now - last_heartbeat_at >= heartbeat_interval:
+                output_chars = len(read.full_text)
+                last_line = ""
+                if read.text:
+                    for ln in reversed(read.text.splitlines()):
+                        stripped = _strip_ansi(ln).strip()
+                        if stripped:
+                            last_line = stripped[:80]
+                            break
+                supervisor.emit_progress(
+                    claimed,
+                    message="runtime.progress_heartbeat",
+                    details={
+                        "adapter": self.kind,
+                        "session_id": session.session_id,
+                        "run_id": run_id,
+                        "stage": "tui",
+                        "changed": changed,
+                        "output_chars": output_chars,
+                        "last_line": last_line,
+                    },
+                )
+                last_heartbeat_at = now
+
+            startup_settled = tui_active
+            if startup_settled_event is not None and startup_settled:
+                startup_settled_event.set()
+            if startup_settled and _is_shell_returned(screen):
+                if accumulated_turns_above_baseline > 0:
+                    break
+                if last_good_screen and _is_completed_turn(
+                    last_good_screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                ):
+                    break
+                if host._get_pane_tty(session) is not None and not host.shell_idle(session):
+                    continue
+                raise PaneDied("claude code cli exited during execution")
+
+            if _classify_gate(screen) != GateKind.NONE:
+                if _classify_gate(screen) == GateKind.FATAL:
+                    raise AuthFailure(
+                        "claude code requires interactive login — complete OAuth "
+                        "setup in the container and re-commit the image"
+                    )
+                if snap != prev_screen:
+                    host.send_text(session, _gate_response(screen), enter=True)
+                prev_screen = snap
+                prev_tail = tail
+                unchanged = 0
+                tui_active = True
+                continue
+
+            if tail == prev_tail:
+                unchanged += 1
+            else:
+                unchanged = 0
+                indeterminate_polls = 0
+                tui_active = True
+                deadline = monotonic() + timeout
+            prev_screen = snap
+            prev_tail = tail
+            non_empty_lines = [ln for ln in screen.splitlines() if ln.strip()]
+            if PROMPT_PREFIX in screen and len(non_empty_lines) > 1:
+                last_good_screen = screen
+
+            stable_after = max(1, self.idle_after - 1)
+            if unchanged < stable_after:
+                continue
+
+            if _is_completed_turn(
+                screen,
+                baseline_answered_turns=len(baseline_turns),
+                baseline_last_response=baseline_last_response,
+            ):
+                break
+            if _is_working(screen):
+                unchanged = 0
+                continue
+            if accumulated_turns_above_baseline > 0 and _ends_with_prompt(screen):
+                break
+            if (
+                tui_active
+                and _ends_with_prompt(screen)
+                and last_good_screen
+                and _is_completed_turn(
+                    last_good_screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                )
+            ):
+                break
+
+            if (
+                _ends_with_prompt(screen)
+                and "[pasted text" in screen.lower()
+                and "0 tokens" in screen.lower()
+            ):
+                _logger.warning("paste-not-submitted detected, re-sending Enter")
+                host.send_text(session, "", enter=True)
+                unchanged = 0
+                indeterminate_polls = 0
+                continue
+
+            if not screen.strip():
+                continue
+            indeterminate_polls += 1
+            if indeterminate_polls == 1:
+                turns = _parse_claude_code_turns(screen)
+                answered = [t for t in turns if t["response"]]
+                _logger.warning(
+                    "indeterminate state entered: turns=%d answered=%d "
+                    "baseline_turns=%d accumulated_scrollback=%d "
+                    "tui_active=%s visible_prompt=%s tail=%r",
+                    len(turns), len(answered), len(baseline_turns),
+                    accumulated_turns_above_baseline, tui_active,
+                    _ends_with_prompt(screen),
+                    _screen_tail(screen)[-100:],
+                )
+            if indeterminate_polls >= 5:
+                raise StableButIndeterminate(
+                    "screen is stable but adapter cannot determine if the "
+                    "agent completed, is waiting for input, or is stuck",
+                    screen=screen,
+                    last_good_screen=last_good_screen,
+                )
+        else:
+            if not prev_screen.strip():
+                raise ExecutionTimeout("claude code tui produced no output after dispatch")
+            raise ExecutionTimeout("claude code tui did not become idle within timeout")
+
+        raw_output = _strip_ansi(host.read_visible(session))
+        read = host.read_output(session, cursor)
+        session.metadata["restored_cursor"] = read.cursor
+        cleaned = _clean_claude_code_output(raw_output)
+        if (not cleaned.strip() or _is_shell_returned(raw_output)) and last_good_screen:
+            cleaned = _clean_claude_code_output(last_good_screen)
+        extraction_diag = None
+        if json_contract:
+            cleaned_sources = [
+                ("cleaned", cleaned),
+                ("raw_cleaned", _clean_claude_code_output(raw_output) if raw_output else ""),
+            ]
+            if last_good_screen:
+                cleaned_sources.append(
+                    ("last_good_cleaned", _clean_claude_code_output(last_good_screen)),
+                )
+            for tag, src in [("raw_output", raw_output), ("last_good_screen", last_good_screen)]:
+                if src:
+                    cleaned_sources.append((tag, src))
+            selected, extraction_diag = select_structured_result(
+                result_file=result_file,
+                cleaned_sources=cleaned_sources,
+                claimed=claimed,
+            )
+            if selected:
+                cleaned = selected
+
+        if not cleaned.strip():
+            raise ExecutionTimeout("claude code tui produced no output after idle")
+
+        return ExecutionResult(
+            artifacts=[
+                ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
+                ArtifactPayload(role="transcript_log", name="transcript.txt", content=_strip_ansi(host.read_scrollback(session))),
+                ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
+                ArtifactPayload(role="result", name="result.txt", content=cleaned),
+            ],
+            summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui"},
+            diagnostics=extraction_diag.to_dict() if extraction_diag else None,
+        )
+
+    def recover(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],  # noqa: ARG002
+        attempt: int,  # noqa: ARG002
+        error: Exception,
+        supervisor: "RuntimeSupervisor",  # noqa: ARG002
+    ) -> None:
+        health = host.health(session)
+        if not health.healthy:
+            return
+        if isinstance(error, PaneDied):
+            session.metadata.pop("claude_code_bootstrapped", None)
+            return
+        host.interrupt(session)
+        for _ in range(5):
+            sleep(0.2)
+            if host.shell_idle(session):
+                break
+
+    def build_failure_result(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        claimed: dict[str, Any],
+        error: Exception,
+        supervisor: "RuntimeSupervisor",
+    ) -> ExecutionResult:
+        if isinstance(error, StableButIndeterminate):
+            screen = error.screen or _strip_ansi(host.read_visible(session))
+            cleaned = _clean_claude_code_output(error.last_good_screen or screen)
+            return ExecutionResult(
+                artifacts=[
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
+                    ArtifactPayload(role="transcript_log", name="transcript.txt", content=cleaned),
+                    ArtifactPayload(role="exec_log", name="exec.txt", content=screen),
+                    ArtifactPayload(role="failure_evidence", name="screen.txt", content=screen),
+                    ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
+                ],
+                summary={
+                    "adapter": self.kind,
+                    "host": host.kind,
+                    "exception_type": "StableButIndeterminate",
+                    "indeterminate": True,
+                },
+            )
+        if isinstance(error, AdapterExecutionFailed):
+            return ExecutionResult(
+                artifacts=[
+                    ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),
+                    ArtifactPayload(role="transcript_log", name="transcript.txt", content=error.transcript),
+                    ArtifactPayload(role="exec_log", name="exec.txt", content=error.output),
+                    ArtifactPayload(role="failure_evidence", name="failure.txt", content=str(error)),
+                ],
+                summary={"adapter": self.kind, "host": host.kind, "exception_type": type(error).__name__},
+            )
+        return super().build_failure_result(
+            host=host, session=session, claimed=claimed, error=error, supervisor=supervisor,
+        )

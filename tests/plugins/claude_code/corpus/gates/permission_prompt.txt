@@ -1,0 +1,50 @@
+
+~/projects/skynet master ↑at 22:27:03
+❯ mkdir -p /tmp/agp-corpus-untrusted && cd /tmp/agp-corpus-untrusted && /opt/homebrew/bin/claude
+╭─── Claude Code v2.1.91 ───────────────────────────────────────────────────────────────────────────────────╮
+│                                                    │ Tips for getting started                             │
+│                  Welcome back PB!                  │ Ask Claude to create a new app or clone a repository │
+│                                                    │ ──────────────────────────────────────────────────── │
+│                       ▐▛███▜▌                      │ Recent activity                                      │
+│                      ▝▜█████▛▘                     │ No recent activity                                   │
+│                        ▘▘ ▝▝                       │                                                      │
+│   Opus 4.6 (1M context) with me… · Claude Max ·    │                                                      │
+│   user@example.com's Organization         │                                                      │
+│         /private/tmp/agp-corpus-untrusted          │                                                      │
+╰───────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+❯ What is 2+2?
+
+⏺ 4
+
+❯ Say hello 1
+
+⏺ Hello 1!
+
+❯ Say hello 2
+
+⏺ Hello 2!
+
+❯ Read the first 20 lines of /Users/pb/projects/skynet/src/agp/cli.py, then summarize what this module does in 2 sentences.
+
+⏺ Read(/Users/pb/projects/skynet/src/agp/cli.py · lines 1-20)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Read file
+
+  Read(/Users/pb/projects/skynet/src/agp/cli.py · lines 1-20)
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, allow reading from agp/ during this session
+   3. No
+
+ Esc to cancel · Tab to amend
+
+
+
+
+
+
+
+
