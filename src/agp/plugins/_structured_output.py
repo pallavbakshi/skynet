@@ -105,6 +105,9 @@ def repair_json_string(text: str) -> str:
     return repaired
 
 
+_MAX_SCAN_BYTES = 32 * 1024  # limit backward scan to avoid O(n²) on large outputs
+
+
 def extract_trailing_json(text: str) -> str | None:
     """Extract the last valid JSON object/array from noisy text.
 
@@ -112,14 +115,20 @@ def extract_trailing_json(text: str) -> str | None:
     openers, attempts to parse from each one, and returns the last
     (deepest / outermost) valid JSON found.  Prefers dict payloads over
     arrays and clean (no trailing noise) parses over partial ones.
+
+    Only the trailing ``_MAX_SCAN_BYTES`` characters are scanned to
+    bound worst-case cost.
     """
     stripped = text.strip()
     if not stripped:
         return None
+    # Limit scan depth: structured output is near the end, not buried
+    # thousands of lines back.
+    scan_start = max(0, len(stripped) - _MAX_SCAN_BYTES)
     decoder = json.JSONDecoder()
     best_object: str | None = None
     best_other: str | None = None
-    for idx in range(len(stripped) - 1, -1, -1):
+    for idx in range(len(stripped) - 1, scan_start - 1, -1):
         if stripped[idx] not in "[{":
             continue
         suffix = stripped[idx:]

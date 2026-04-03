@@ -260,6 +260,7 @@ def _build_review_state(
     conversation_id: str,
     active_job_id: str | None = None,
     last_verdict: str | None = None,
+    review_attempt_id: str | None = None,
 ) -> dict:
     from datetime import datetime, timezone
 
@@ -274,7 +275,7 @@ def _build_review_state(
         "conversation_id": conversation_id,
         "active_job_id": active_job_id,
         "last_verdict": last_verdict,
-        "review_attempt_id": review_session_id,
+        "review_attempt_id": review_attempt_id or review_session_id,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -1676,7 +1677,7 @@ def review_cmd(
                         reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
                         current_round=current_round, phase="poll_dev",
                         conversation_id=conversation_id, active_job_id=fix_job_id,
-                        last_verdict=verdict,
+                        last_verdict=verdict, review_attempt_id=review_attempt_id,
                     )
                     _save_review_state(client, state_update)
 
@@ -1733,6 +1734,7 @@ def review_cmd(
                 reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
                 current_round=1, phase="send_to_reviewer",
                 conversation_id=conversation_id,
+                review_attempt_id=review_attempt_id,
             ))
 
         # ── Shared review loop ───────────────────────────────────
@@ -1826,7 +1828,7 @@ def review_cmd(
                 review_session_id=review_session_id, source_job_id=original_job_id,
                 reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
                 current_round=round_num, phase="send_to_reviewer",
-                conversation_id=conversation_id,
+                conversation_id=conversation_id, review_attempt_id=review_attempt_id,
             ))
 
             typer.echo(f"[review] Sending to reviewer {reviewer_id}...")
@@ -1849,6 +1851,7 @@ def review_cmd(
                 reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
                 current_round=round_num, phase="poll_reviewer",
                 conversation_id=conversation_id, active_job_id=review_job_id,
+                review_attempt_id=review_attempt_id,
             )
             _save_review_state(client, review_state)
 
@@ -1894,7 +1897,7 @@ def review_cmd(
                     reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
                     current_round=round_num, phase="poll_dev",
                     conversation_id=conversation_id, active_job_id=fix_job_id,
-                    last_verdict=verdict,
+                    last_verdict=verdict, review_attempt_id=review_attempt_id,
                 )
                 _save_review_state(client, dev_state)
 
@@ -2006,16 +2009,20 @@ def review_diagnose_cmd(
                 agents = client.list_agents(limit=200).get("items", [])
                 reviewer_agent = next((a for a in agents if a.get("agent_id") == reviewer_id), None)
                 if reviewer_agent:
-                    runtimes = reviewer_agent.get("runtime_ids", [])
                     diagnosis["reviewer_runtime"] = {
                         "agent_status": reviewer_agent.get("status"),
-                        "runtime_ids": runtimes,
                     }
-                    if runtimes:
-                        rt = client.ops_get_runtime(runtimes[0])
-                        if rt:
-                            diagnosis["reviewer_runtime"]["heartbeat_age"] = rt.get("heartbeat_age_seconds")
-                            diagnosis["reviewer_runtime"]["runtime_status"] = rt.get("status")
+                    # Find runtimes bound to this agent via claimed_work
+                    rt_page = client.list_runtimes(limit=200)
+                    bound_rts = [
+                        rt for rt in rt_page.get("items", [])
+                        if any(w.get("agent_id") == reviewer_id for w in rt.get("claimed_work", []))
+                    ]
+                    diagnosis["reviewer_runtime"]["runtime_ids"] = [rt.get("runtime_id") for rt in bound_rts]
+                    if bound_rts:
+                        rt = bound_rts[0]
+                        diagnosis["reviewer_runtime"]["heartbeat_age"] = rt.get("heartbeat_age_seconds")
+                        diagnosis["reviewer_runtime"]["runtime_status"] = rt.get("status")
             except Exception:
                 pass
 
@@ -2081,10 +2088,11 @@ def diagnose_cmd(
             "recent_logs": [],
         }
 
-        # Find agents bound to this runtime
+        # Find agents bound to this runtime via its claimed_work
         try:
+            bound_agent_ids = {w.get("agent_id") for w in rt.get("claimed_work", []) if w.get("agent_id")}
             agents = client.list_agents(limit=200).get("items", [])
-            bound = [a for a in agents if entity_id in (a.get("runtime_ids") or [])]
+            bound = [a for a in agents if a.get("agent_id") in bound_agent_ids]
             diagnosis["agents"] = [
                 {
                     "agent_id": a.get("agent_id"),
@@ -2242,7 +2250,9 @@ def health(
             rid = rt.get("runtime_id", "?")
             hb_age = rt.get("heartbeat_age_seconds")
             hb_str = f"{hb_age:.0f}s ago" if hb_age is not None else "never"
-            agents_bound = ", ".join(rt.get("agent_ids", [])) or "none"
+            agents_bound = ", ".join(
+                sorted({w.get("agent_id", "?") for w in rt.get("claimed_work", [])})
+            ) or "none"
             typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
 
         # Agents

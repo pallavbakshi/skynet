@@ -162,6 +162,9 @@ class RuntimeSupervisor:
         if tui_died is not None and tui_died.is_set():
             reason = getattr(self, "_active_tui_died_reason", "tui exited during execution")
             raise PaneDied(reason)
+        # NOTE: lease_lost is checked at the complete() boundary (not here)
+        # because raising InterruptRequested here conflates lease death with
+        # CP-requested interrupts, which have different cancel semantics.
         # Primary path: check the local interrupt event set by the heartbeat
         # thread.  No HTTP call — instant.
         interrupt_event = getattr(self, "_interrupt_event", None)
@@ -466,6 +469,7 @@ class RuntimeSupervisor:
 
         max_missed_heartbeats = 6
         lease_lost = Event()  # signals that we lost the lease / fencing
+        self._lease_lost = lease_lost
         interrupt_event = Event()  # set by heartbeat when CP requests interrupt
         self._interrupt_event = interrupt_event
         thread: Thread | None = None
@@ -534,6 +538,11 @@ class RuntimeSupervisor:
                             stop.set()
                             break
                     except Exception:  # noqa: BLE001
+                        # If stop is already set, the main thread is shutting
+                        # down and may have closed _hb_client underneath us.
+                        # Don't count this as a real missed heartbeat.
+                        if stop.is_set():
+                            break
                         consecutive_misses += 1
                         _append_runtime_log(
                             self.client.identity.runtime_id,
@@ -564,8 +573,10 @@ class RuntimeSupervisor:
                             stop.set()
                             break
             finally:
-                if _hb_client is not None:
-                    _hb_client.close()
+                # Client cleanup is handled by the main thread's finally
+                # block after thread.join().  Closing here would race with
+                # an in-flight request if stop was set mid-heartbeat.
+                pass
 
         self._active_tui_died = tui_died
         self._active_tui_died_reason = "tui exited during execution"
@@ -751,6 +762,24 @@ class RuntimeSupervisor:
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in result.artifacts
             ]
+            # If the lease was lost during execution, skip complete() — the
+            # CP already considers this run dead.  Logging the outcome
+            # avoids a confusing 409 and the misleading complete_rejected log.
+            if lease_lost.is_set():
+                _append_runtime_log(
+                    self.client.identity.runtime_id,
+                    {
+                        "kind": "runtime_worker",
+                        "action": "complete_skipped_lease_lost",
+                        "run_id": run["run_id"],
+                        "job_id": claimed["job"]["job_id"],
+                    },
+                )
+                _logger.warning(
+                    "Skipping complete() for run %s — lease was lost during execution",
+                    run["run_id"],
+                )
+                return {"claimed": True, "claim": claimed, "error": "lease lost during execution"}
             try:
                 completed = self.client.complete(
                     run_id=run["run_id"],
@@ -837,7 +866,10 @@ class RuntimeSupervisor:
                 error=exc,
                 supervisor=self,
             )
-            failure_result.artifacts.extend(self._failure_snapshot_payloads(session=session, error=exc))
+            try:
+                failure_result.artifacts.extend(self._failure_snapshot_payloads(session=session, error=exc))
+            except Exception:  # noqa: BLE001
+                _logger.warning("Failed to collect failure snapshots for run %s", run["run_id"], exc_info=True)
             artifacts = [
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in failure_result.artifacts
@@ -870,6 +902,7 @@ class RuntimeSupervisor:
             self._active_startup_settled = None
             self._active_tui_died = None
             self._active_tui_died_reason = None
+            self._lease_lost = None
             session.metadata.pop("startup_settled_event", None)
             stop.set()
             if thread is not None:
