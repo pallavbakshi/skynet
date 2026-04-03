@@ -874,6 +874,22 @@ class RuntimeSupervisor:
                 self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                 for payload in failure_result.artifacts
             ]
+            if lease_lost.is_set():
+                _append_runtime_log(
+                    self.client.identity.runtime_id,
+                    {
+                        "kind": "runtime_worker",
+                        "action": "fail_skipped_lease_lost",
+                        "run_id": run["run_id"],
+                        "job_id": claimed["job"]["job_id"],
+                        "error": str(exc),
+                    },
+                )
+                _logger.warning(
+                    "Skipping fail() for run %s — lease was lost during execution",
+                    run["run_id"],
+                )
+                return {"claimed": True, "claim": claimed, "error": str(exc)}
             try:
                 failed = self.client.fail(
                     run_id=run["run_id"],

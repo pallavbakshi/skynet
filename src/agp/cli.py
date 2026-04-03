@@ -747,13 +747,16 @@ def _print_job_result(job: dict, client) -> None:
 
     if job_status == "completed":
         _print_banner("COMPLETED", "Task Finished")
+    elif job_status == "cancelled":
+        _print_banner("CANCELLED", "Task Cancelled")
     else:
         suffix = " with Errors" if retry_count > 0 else ""
-        _print_banner("COMPLETED", f"Task Failed{suffix}")
+        _print_banner("FAILED", f"Task Failed{suffix}")
 
+    status_label = {"completed": "SUCCESS", "cancelled": "CANCELLED", "failed": "FAILED"}.get(job_status, job_status.upper())
     typer.echo(f"JOB_ID:       {job['job_id']}")
     typer.echo(f"AGENT:        {job.get('target_agent_id', 'unknown')}")
-    typer.echo(f"STATUS:       {'SUCCESS' if job_status == 'completed' else 'FAILED'}")
+    typer.echo(f"STATUS:       {status_label}")
     if retry_count > 0:
         typer.echo(f"RETRIES:      {retry_count}/{max_retries}")
 
