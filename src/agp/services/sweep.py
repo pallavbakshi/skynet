@@ -64,6 +64,15 @@ def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[st
         job = db.get(Job, run.job_id)
         if job is None:
             continue
+        # Guard: if the runtime already completed/failed this run between
+        # our SELECT of expired leases and now, skip it to avoid reverting
+        # a terminal state back to ABANDONED.
+        if run.status in (
+            RunStatus.COMPLETED.value,
+            RunStatus.FAILED.value,
+            RunStatus.CANCELLED.value,
+        ):
+            continue
         runtime = db.get(Runtime, lease.runtime_id)
 
         lease.status = LeaseStatus.EXPIRED.value

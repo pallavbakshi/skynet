@@ -405,6 +405,10 @@ class DeliveryTableQueueBackend:
                 record.dead_lettered_at = now
                 record.updated_at = now
                 dead_lettered += 1
+                job = db.get(Job, record.job_id)
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.status = JobStatus.FAILED.value
+                    job.updated_at = now
                 continue
             job = db.get(Job, record.job_id)
             if job is not None and job.status == JobStatus.QUEUED.value:
@@ -533,6 +537,10 @@ class InMemoryBrokerQueueBackend:
             if inflight.delivery_attempt >= max_delivery_attempts:
                 self._dead_lettered_jobs.add(inflight.job_id)
                 dead_lettered += 1
+                job = db.get(Job, inflight.job_id)
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.status = JobStatus.FAILED.value
+                    job.updated_at = utc_now()
                 continue
             queue = self._queued(inflight.target_queue)
             if inflight.job_id not in queue:
@@ -786,6 +794,10 @@ class RedisQueueBackend:
                 record.updated_at = now
                 self.client.sadd(self._dead_lettered_jobs_key(), item["job_id"])
                 dead_lettered += 1
+                job = db.get(Job, item["job_id"])
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.status = JobStatus.FAILED.value
+                    job.updated_at = now
                 continue
             if record is not None:
                 job = db.get(Job, item["job_id"])
@@ -826,6 +838,10 @@ class RedisQueueBackend:
                 record.updated_at = now
                 self.client.sadd(self._dead_lettered_jobs_key(), record.job_id)
                 dead_lettered += 1
+                job = db.get(Job, record.job_id)
+                if job is not None and job.status == JobStatus.QUEUED.value:
+                    job.status = JobStatus.FAILED.value
+                    job.updated_at = now
             else:
                 job = db.get(Job, record.job_id)
                 if job is not None and job.status == JobStatus.QUEUED.value:
@@ -863,6 +879,8 @@ class RedisQueueBackend:
                 record.dead_lettered_at = now
                 dead_lettered += 1
                 self.client.sadd(self._dead_lettered_jobs_key(), record.job_id)
+                job.status = JobStatus.FAILED.value
+                job.updated_at = now
             else:
                 record.state = "acked"
                 record.acked_at = now
