@@ -40,7 +40,7 @@ _STATUS_BAR_RE = re.compile(r"^\s*\u23f5\u23f5\s+")  # ⏵⏵ (any status bar va
 # whitespace + a token count like "16200 tokens" at the right edge.
 _STATUS_TAIL_RE = re.compile(r"^\s*\d[\d,]*\s+tokens?\s*$", re.IGNORECASE)
 _STATUS_CONTINUATION_RE = re.compile(
-    r"^(?:\u00b7\s+.*|.*(?:esc to interrupt|shift\+tab to cycle|bypass permissions on).*)$",
+    r"^(?:\u00b7\s+.*|.*(?:esc to interrupt|shift\+tab to cycle|bypass permissions on|claude install|native installer|switched from npm|update available).*)$",
     re.IGNORECASE,
 )
 _BOX_CHARS = set("\u2500\u2502\u256d\u256e\u256f\u2570\u2514\u250c\u2510\u2518\u2524\u251c\u252c\u2534\u253c\u2501\u2503")

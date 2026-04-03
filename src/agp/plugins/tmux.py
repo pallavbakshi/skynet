@@ -208,23 +208,34 @@ class TmuxHost(TerminalHost):
             delta = _compute_output_delta(raw, cursor.checkpoint)
 
         accumulator = self._get_accumulator(session)
-        accumulator.append(delta)
         abs_line = self._absolute_line(session)
+
+        # When the cursor hasn't advanced (TUI re-rendering in place),
+        # _capture_from returns the same visible content each poll.
+        # Deduplicate by comparing against the previous capture to avoid
+        # unbounded accumulator growth that prevents the completion-
+        # detection stability counter from ever triggering.
+        prev_capture = cursor.metadata.get("_last_capture", "")
+        is_new = delta != prev_capture
+        if delta and is_new:
+            accumulator.append(delta)
+
         updated = OutputCursor(
             session_id=session.session_id,
             checkpoint="",
             metadata={
                 "absolute_line": abs_line,
-                "line_count": cursor.metadata.get("line_count", 0) + delta.count("\n"),
+                "line_count": cursor.metadata.get("line_count", 0) + (delta.count("\n") if is_new else 0),
+                "_last_capture": delta,
             },
         )
         self._save_cursor(session, updated)
         return OutputReadResult(
             session_id=session.session_id,
             cursor=updated,
-            text=delta,
+            text=delta if is_new else "",
             full_text=accumulator.text,
-            changed=bool(delta.strip()),
+            changed=bool(delta.strip()) if is_new else False,
         )
 
     def _save_cursor(self, session: TerminalSession, cursor: OutputCursor) -> None:
