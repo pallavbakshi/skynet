@@ -77,6 +77,7 @@ class AgentUpRequest(BaseModel):
     capabilities: list[str] | None = None
     metadata: dict[str, Any] | None = None
     workspace_ref: str | None = None
+    runtime_id: str | None = None
 
     @field_validator("capabilities", mode="before")
     @classmethod

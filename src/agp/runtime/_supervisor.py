@@ -184,7 +184,7 @@ class RuntimeSupervisor:
             except InterruptRequested:
                 raise
             except Exception:  # noqa: BLE001
-                pass  # transient CP error — rely on heartbeat thread
+                _logger.debug("check_interrupt: CP poll failed", exc_info=True)
 
     def _workspace_dir(self, session: TerminalSession) -> Path | None:
         raw = session.workspace_ref
@@ -272,7 +272,7 @@ class RuntimeSupervisor:
                 if path.exists() and path.is_dir():
                     shutil.rmtree(path)
             except Exception:  # noqa: BLE001
-                pass
+                _logger.warning("_cleanup_workspace: failed to remove %s", raw_path, exc_info=True)
         try:
             run_id = claimed.get("run", {}).get("run_id", "unknown")
             _append_runtime_log(
@@ -327,6 +327,7 @@ class RuntimeSupervisor:
                 agent_id=agent_id,
                 capabilities=resolved_caps,
                 metadata=self.client.identity.metadata,
+                runtime_id=self.client.identity.runtime_id,
             )
 
         last_agent_heartbeat = monotonic()
@@ -345,6 +346,7 @@ class RuntimeSupervisor:
                                 agent_id=agent_id,
                                 capabilities=resolved_caps,
                                 metadata=self.client.identity.metadata,
+                                runtime_id=self.client.identity.runtime_id,
                             )
                         except Exception:  # noqa: BLE001
                             _logger.warning("agent heartbeat failed (CP may be temporarily unreachable)", exc_info=True)
@@ -450,12 +452,12 @@ class RuntimeSupervisor:
                     msg = (body.get("error") or {}).get("message", "")
                 except Exception:
                     msg = ""
-                if "unreachable" in msg.lower():
+                if "unreachable" in msg.lower() or "degraded" in msg.lower():
                     _append_runtime_log(
                         self.client.identity.runtime_id,
-                        {"kind": "runtime_worker", "action": "re_register_after_unreachable"},
+                        {"kind": "runtime_worker", "action": "re_register_after_health_rejection", "detail": msg},
                     )
-                    _logger.info("runtime marked unreachable by CP — re-registering")
+                    _logger.info("runtime rejected by CP (%s) — re-registering", msg)
                     self.client.register()
                     self._registered = True
                     return {"claimed": False}

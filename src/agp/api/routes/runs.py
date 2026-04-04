@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _ok, _serialize
+from agp.api.helpers import _error_response, _ok, _serialize
 from agp.db import get_db
 from agp.enums import ArtifactKind, HealthStatus, RuntimeStatus
 from agp.models import Agent, Artifact, Job, JobArtifact, Message, Run, utc_now
@@ -94,7 +94,7 @@ def _conversation_context(db: Session, *, message: Message) -> list[dict]:
             "message_id": item.message_id,
             "text": item.text,
             "created_at": item.created_at,
-            "role": str(item.metadata_json.get("role", "user")),
+            "role": str((item.metadata_json or {}).get("role", "user")),
         }
         for item in messages
     ]
@@ -112,7 +112,7 @@ def _job_attachments(db: Session, *, job_id: str) -> list[dict]:
             "artifact_id": artifact.artifact_id,
             "role": link.role,
             "storage_ref": artifact.storage_ref,
-            "name": unquote(artifact.storage_ref.rsplit("/", 1)[-1]),
+            "name": unquote(artifact.storage_ref.rsplit("/", 1)[-1]) if artifact.storage_ref else None,
         }
         for link, artifact in rows
     ]
@@ -261,7 +261,11 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
             artifacts=failure_artifacts,
             summary={"validation_error": exc.detail},
         )
-        raise
+        return _error_response(
+            422,
+            "output_contract_validation_failed",
+            exc.detail,
+        )
     result_artifact_id = complete_run_service(db, run=run, job=job, agent=agent, runtime=runtime, lease=lease, artifacts=request.artifacts, summary=request.summary)
     return _ok({"run_id": run_id, "job_id": job.job_id, "status": run.status, "result_artifact_id": result_artifact_id})
 

@@ -58,7 +58,7 @@ def list_runtimes(
         next_cursor = _encode_cursor({"created_at": last.created_at.isoformat(), "runtime_id": last.runtime_id})
     items = []
     for runtime in page_items:
-        data = _serialize(runtime, ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at"))
+        data = _serialize(runtime, ("runtime_id", "agent_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at"))
         active_leases = db.scalars(select(Lease).where(Lease.runtime_id == runtime.runtime_id, Lease.status == LeaseStatus.ACTIVE.value)).all()
         data["claimed_work"] = [{"lease_id": l.lease_id, "run_id": l.run_id, "agent_id": l.agent_id} for l in active_leases]
         data["active_run_count"] = len(active_leases)

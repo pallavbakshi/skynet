@@ -35,6 +35,7 @@ def agent_up_service(
     capabilities: list[str] | None = None,
     metadata: dict | None = None,
     workspace_ref: str | None = None,
+    runtime_id: str | None = None,
 ) -> Agent:
     """Register an agent or refresh its heartbeat (idempotent).
 
@@ -56,13 +57,25 @@ def agent_up_service(
         if workspace_ref is not None:
             existing.workspace_ref = workspace_ref
         # If agent was draining but re-registers, stay draining (operator decision)
-        # Also refresh linked runtime so the runtime sweeper doesn't mark it stale
-        linked_runtime = db.scalar(
-            select(Runtime).where(Runtime.agent_id == existing.agent_id).limit(1)
-        )
-        if linked_runtime is not None:
-            linked_runtime.last_heartbeat_at = now
-            linked_runtime.last_seen_at = now
+        # Also refresh linked runtime(s) so the runtime sweeper doesn't mark them stale.
+        # When runtime_id is provided (from register()), ensure that runtime is linked
+        # to this agent and gets heartbeat updates — even if an older auto-created
+        # runtime also exists from a previous run.
+        linked_runtimes = list(db.scalars(
+            select(Runtime).where(Runtime.agent_id == existing.agent_id)
+        ))
+        if runtime_id:
+            explicit_rt = db.get(Runtime, runtime_id)
+            if explicit_rt is not None and explicit_rt not in linked_runtimes:
+                if explicit_rt.agent_id is not None and explicit_rt.agent_id != existing.agent_id:
+                    raise ConflictError(
+                        f"runtime {runtime_id} is already bound to agent {explicit_rt.agent_id}"
+                    )
+                explicit_rt.agent_id = existing.agent_id
+                linked_runtimes.append(explicit_rt)
+        for rt in linked_runtimes:
+            rt.last_heartbeat_at = now
+            rt.last_seen_at = now
         db.commit()
         return existing
 
@@ -81,13 +94,19 @@ def agent_up_service(
 
     # Auto-create an internal runtime for this agent (1:1 binding).
     # First check if any runtime is already linked to this agent (bootstrap-era).
-    runtime_id = f"rtm_{resolved_id}"
+    synthetic_runtime_id = f"rtm_{resolved_id}"
     runtime = db.scalar(
         select(Runtime).where(Runtime.agent_id == agent.agent_id).limit(1)
     )
+    if runtime is None and runtime_id:
+        # Caller provided an explicit runtime_id (from register()) — prefer it.
+        candidate = db.get(Runtime, runtime_id)
+        if candidate is not None and candidate.agent_id is not None and candidate.agent_id != agent.agent_id:
+            raise ConflictError(f"runtime {runtime_id} is already bound to agent {candidate.agent_id}")
+        runtime = candidate
     if runtime is None:
         # Fall back to synthetic-ID lookup.
-        runtime = db.get(Runtime, runtime_id)
+        runtime = db.get(Runtime, synthetic_runtime_id)
     if runtime is None:
         # Third: check run history for orphaned bootstrap-era runtimes
         # (non-standard ID, no agent_id set after migration).
@@ -99,7 +118,7 @@ def agent_up_service(
         )
     if runtime is None:
         runtime = Runtime(
-            runtime_id=runtime_id,
+            runtime_id=runtime_id or synthetic_runtime_id,
             agent_id=agent.agent_id,
             hostname=(metadata or {}).get("hostname", "unknown"),
             status=RuntimeStatus.IDLE.value,

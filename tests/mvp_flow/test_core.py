@@ -1096,8 +1096,10 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 "summary": {"ok": True},
             },
         )
-        self.assertEqual(complete.status_code, 400)
-        self.assertIn("result artifact is not valid JSON", complete.json()["error"]["message"])
+        self.assertEqual(complete.status_code, 422)
+        err = complete.json()["error"]
+        self.assertEqual(err["code"], "output_contract_validation_failed")
+        self.assertIn("result artifact is not valid JSON", err["message"])
 
         job = self.client.get(f"/jobs/{job_id}")
         self.assertEqual(job.status_code, 200)
@@ -2457,8 +2459,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         with patch.object(self.agp, "ops_health", side_effect=httpx.HTTPStatusError("forbidden", request=request, response=response)):
             result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("status: ok", result.output)
-        self.assertNotIn("queue_depth_total:", result.output)
+        self.assertIn("CP reachable", result.output)
 
     def test_agents_api_counts_only_direct_queue_depth(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_depth", "capabilities": ["python"]})
@@ -2580,45 +2581,16 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("[WARNINGS]", result.output)
         self.assertIn("agt_warn: 1 queued, no runtime bound.", result.output)
 
-    def test_agp_status_shows_queue_summary(self) -> None:
+    def test_agp_status_agent_lookup(self) -> None:
+        """status with an agent ID shows agent info."""
         self.client.post("/agents/up", json={"agent_id": "agt_status_queue", "capabilities": ["python"]})
-        self.client.post(
-            "/messages/send",
-            json={
-                "target": {"type": "agent", "id": "agt_status_queue"},
-                "message": {"text": "status queue", "metadata": {}},
-            },
-            headers={"Idempotency-Key": "status-queue-1"},
-        )
-        self.client.post(
-            "/messages/send",
-            json={
-                "target": {"type": "capability", "id": "python"},
-                "message": {"text": "status capability queue", "metadata": {}},
-            },
-            headers={"Idempotency-Key": "status-queue-2"},
-        )
-        session = SessionLocal()
-        try:
-            job = session.scalar(
-                select(Job).where(
-                    Job.target_queue == "agent:agt_status_queue",
-                    Job.status == "queued",
-                )
-            )
-            assert job is not None
-            job.updated_at = utc_now() - timedelta(seconds=185)
-            session.commit()
-        finally:
-            session.close()
-
-        result = self._cli_invoke(["status"])
+        result = self._cli_invoke(["status", "agt_status_queue"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("queue_depth_total: 2", result.output)
-        self.assertIn("direct_queue_busiest: agt_status_queue=1", result.output)
-        self.assertRegex(result.output, r"direct_queue_oldest_age: agt_status_queue=03m:[0-5][0-9]s")
+        self.assertIn("AGENT:", result.output)
+        self.assertIn("agt_status_queue", result.output)
 
-    def test_agp_status_shows_global_queue_total_without_any_agents(self) -> None:
+    def test_agp_status_no_args_ping_with_queued_work(self) -> None:
+        """status (no args) is a simple ping even when work is queued."""
         self.client.post(
             "/messages/send",
             json={
@@ -2630,43 +2602,13 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
         result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("queue_depth_total: 1", result.output)
-        self.assertNotIn("direct_queue_busiest:", result.output)
-        self.assertNotIn("direct_queue_oldest_age:", result.output)
+        self.assertIn("CP reachable", result.output)
 
-    def test_agp_status_pages_all_agents_for_direct_queue_summary(self) -> None:
-        from unittest.mock import patch
-
-        filler_agents = [
-            {"agent_id": f"agt_status_fill_{idx:03d}", "queue_depth": 0, "oldest_queue_age_seconds": None}
-            for idx in range(200)
-        ]
-        with patch.object(self.agp, "health", return_value={"status": "ok", "components": {}}), patch.object(
-            self.agp,
-            "ops_health",
-            return_value={"queue": {"depth": 1}},
-        ), patch.object(
-            self.agp,
-            "list_agents",
-            side_effect=[
-                {"items": filler_agents, "page": {"next_cursor": "page-2"}},
-                {
-                    "items": [
-                        {
-                            "agent_id": "agt_status_paged",
-                            "queue_depth": 1,
-                            "oldest_queue_age_seconds": 185.0,
-                        }
-                    ],
-                    "page": {"next_cursor": None},
-                },
-            ],
-        ):
-            result = self._cli_invoke(["status"])
+    def test_agp_status_no_args_is_simple_ping(self) -> None:
+        result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("queue_depth_total: 1", result.output)
-        self.assertIn("direct_queue_busiest: agt_status_paged=1", result.output)
-        self.assertRegex(result.output, r"direct_queue_oldest_age: agt_status_paged=03m:[0-5][0-9]s")
+        self.assertIn("CP reachable", result.output)
+        self.assertIn("agp health", result.output)
 
     def test_agents_api_real_cursor_flow_reaches_second_page(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_cursor_target", "capabilities": ["python"]})

@@ -316,6 +316,8 @@ def execute_handoff(
         db.add(HandoffJob(handoff_id=handoff.handoff_id, job_id=child.job_id))
         child_job_ids.append(child.job_id)
         _queue_backend().enqueue_job(db, job=child)
+        _create_event(db, job_id=child.job_id, event_type="job.accepted", body={"message_id": msg.message_id, "target_type": target.type, "target_id": target.id})
+        _create_event(db, job_id=child.job_id, event_type="job.queued", body={"target_queue": child.target_queue})
 
     validated_artifact_ids: list[str] = []
     for aid in artifact_ids:

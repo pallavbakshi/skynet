@@ -1626,7 +1626,7 @@ class TestRuntimeDebug(unittest.TestCase):
         self.assertEqual(len(created_workers), 2)
         joined = "\n".join(str(call.args[0]) for call in mock_echo.call_args_list if call.args)
         self.assertIn("reinitializing", joined)
-        self.assertIn("{'claimed': False}", joined)
+        self.assertIn('"claimed": false', joined)
 
 
 class TestWorkspaceCommands(unittest.TestCase):

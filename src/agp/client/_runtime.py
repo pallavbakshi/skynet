@@ -87,6 +87,7 @@ class RuntimeClient:
         agent_id: str,
         capabilities: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
+        runtime_id: str | None = None,
     ) -> dict:
         """Register an agent or refresh its heartbeat (idempotent)."""
         body: dict[str, Any] = {"agent_id": agent_id}
@@ -94,6 +95,8 @@ class RuntimeClient:
             body["capabilities"] = capabilities
         if metadata is not None:
             body["metadata"] = metadata
+        if runtime_id is not None:
+            body["runtime_id"] = runtime_id
         response = self._client.post("/agents/up", json=body)
         response.raise_for_status()
         payload = response.json()["data"]

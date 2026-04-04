@@ -6,6 +6,11 @@ import json
 from typing import Any
 
 
+def is_json_contract(contract: Any) -> bool:
+    """Return True when the contract requires JSON-format output."""
+    return isinstance(contract, dict) and bool(contract) and contract.get("format", "json") == "json"
+
+
 def prompt_for_claim(*, claimed: dict[str, Any]) -> str:
     """Return the exact prompt text dispatched for a claimed job."""
     prompt = str(((claimed.get("message") or {}).get("text")) or "")

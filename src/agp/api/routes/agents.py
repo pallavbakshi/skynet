@@ -107,8 +107,10 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
         capabilities=request.capabilities,
         metadata=request.metadata,
         workspace_ref=request.workspace_ref,
+        runtime_id=request.runtime_id,
     )
-    return _ok(_serialize(agent, _AGENT_FIELDS))
+    backlog = _agent_backlogs(db, [agent])[agent.agent_id]
+    return _ok(_serialize_agent_with_queue_depth(agent, backlog))
 
 
 @router.patch("/agents/{agent_id}", response_model=OkResponse[AgentResponse])
@@ -121,7 +123,8 @@ def agent_patch(agent_id: str, request: AgentPatchRequest, db: Session = Depends
         workspace_ref=workspace_ref,
         clear_workspace_ref=clear_workspace_ref,
     )
-    return _ok(_serialize(agent, _AGENT_FIELDS))
+    backlog = _agent_backlogs(db, [agent])[agent.agent_id]
+    return _ok(_serialize_agent_with_queue_depth(agent, backlog))
 
 
 @router.post("/agents/{agent_id}/undrain")

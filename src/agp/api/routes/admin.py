@@ -61,10 +61,10 @@ def list_capabilities(
     if name is not None:
         query = query.where(Capability.name == name)
     if cursor_payload is not None:
-        name = str(cursor_payload["name"])
+        cursor_name = str(cursor_payload["name"])
         capability_id = str(cursor_payload["capability_id"])
         query = query.where(
-            (Capability.name > name) | ((Capability.name == name) & (Capability.capability_id > capability_id))
+            (Capability.name > cursor_name) | ((Capability.name == cursor_name) & (Capability.capability_id > capability_id))
         )
     capabilities = db.scalars(query.order_by(Capability.name.asc(), Capability.capability_id.asc()).limit(limit + 1)).all()
     page_items = capabilities[:limit]

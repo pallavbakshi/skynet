@@ -33,6 +33,7 @@ from agp.plugins.claude_code._parse import (
 )
 from agp.plugins._output_contracts import (
     apply_output_contract_instruction,
+    is_json_contract,
     prompt_for_claim,
     result_file_path_for_run,
     validate_json_against_contract,
@@ -198,7 +199,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             cwd=session.workspace_ref,
         )
 
-        deadline = monotonic() + (self.idle_timeout_seconds or 60.0)
+        deadline = monotonic() + (self.idle_timeout_seconds if self.idle_timeout_seconds is not None else 60.0)
         gate_dismissals = 0
         max_gate_dismissals = 10
         while monotonic() < deadline:
@@ -251,14 +252,14 @@ class ClaudeCodeAdapter(AgentAdapter):
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
         """TUI mode: send prompt at ❯ -> wait for idle -> parse output."""
-        contract = (claimed.get("job") or {}).get("output_contract_json") or {}
-        json_contract = isinstance(contract, dict) and contract.get("format", "json") == "json"
+        contract = (claimed.get("job") or {}).get("output_contract_json")
+        json_contract = is_json_contract(contract)
         result_file = result_file_path_for_run(claimed["run"]["run_id"]) if json_contract else None
         if result_file:
             try:
                 Path(result_file).unlink(missing_ok=True)
-            except Exception:
-                pass
+            except OSError as exc:
+                _logger.warning("failed to clean result file %s: %s", result_file, exc)
         prompt = apply_output_contract_instruction(
             prompt=claimed["message"]["text"],
             claimed=claimed,
@@ -306,7 +307,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)
 
-        timeout = self.idle_timeout_seconds or 180.0
+        timeout = self.idle_timeout_seconds if self.idle_timeout_seconds is not None else 180.0
         # Hard ceiling: the idle-timeout reset extends `deadline` when
         # output is flowing, but `absolute_deadline` never moves.
         absolute_deadline = monotonic() + min(timeout * 10, 3600.0)
@@ -330,15 +331,18 @@ class ClaudeCodeAdapter(AgentAdapter):
             screen = _strip_ansi(host.read_visible(session))
             read = host.read_output(session, cursor)
             cursor = read.cursor
-            # Skip expensive scrollback re-parsing once we know turns exist
-            if accumulated_turns_above_baseline == 0:
-                answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
-                accumulated_turns_above_baseline = max(
-                    0, len(answered_turns) - len(baseline_turns),
-                )
             snap = _normalize_screen(screen)
             tail = _screen_tail(screen)
             changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
+            # Re-evaluate scrollback turn count when it was previously zero
+            # or when output has changed (so we track multi-turn progress).
+            # The accumulator-based read.full_text may miss ⏺ markers for TUI
+            # apps, so this is a best-effort heuristic.
+            if accumulated_turns_above_baseline == 0 or changed:
+                answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
+                new_count = max(0, len(answered_turns) - len(baseline_turns))
+                if new_count > accumulated_turns_above_baseline:
+                    accumulated_turns_above_baseline = new_count
 
             now = monotonic()
             if changed or now - last_heartbeat_at >= heartbeat_interval:
@@ -412,6 +416,9 @@ class ClaudeCodeAdapter(AgentAdapter):
                 prev_tail = tail
                 unchanged = 0
                 tui_active = True
+                # Extend deadline for gate dismissals — tool-use confirmations
+                # eat poll cycles and shouldn't count against the idle timeout
+                deadline = min(max(deadline, monotonic() + 30.0), absolute_deadline)
                 continue
 
             if tail == prev_tail:
@@ -419,6 +426,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             else:
                 unchanged = 0
                 indeterminate_polls = 0
+                working_logged = False
                 tui_active = True
                 deadline = min(monotonic() + timeout, absolute_deadline)
             prev_screen = snap
@@ -445,6 +453,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                           "elapsed": round(monotonic() - dispatch_time, 1)})
                     working_logged = True
                 unchanged = 0
+                indeterminate_polls = 0
+                tui_active = True
+                # Agent is visibly working — extend the soft deadline so
+                # long-running tasks with a frozen spinner don't timeout.
+                deadline = min(monotonic() + timeout, absolute_deadline)
                 continue
             if accumulated_turns_above_baseline > 0 and _ends_with_prompt(screen):
                 _dbg({**_dbg_ctx, "action": "completed", "path": "scrollback_turns+prompt",
@@ -478,24 +491,23 @@ class ClaudeCodeAdapter(AgentAdapter):
                 indeterminate_polls = 0
                 continue
 
-            if not screen.strip():
-                continue
             indeterminate_polls += 1
             if indeterminate_polls == 1:
-                turns = _parse_claude_code_turns(screen)
+                blank = not screen.strip()
+                turns = _parse_claude_code_turns(screen) if not blank else []
                 answered = [t for t in turns if t["response"]]
                 _logger.warning(
                     "indeterminate state entered: turns=%d answered=%d "
                     "baseline_turns=%d accumulated_scrollback=%d "
-                    "tui_active=%s visible_prompt=%s tail=%r",
+                    "tui_active=%s visible_prompt=%s blank=%s tail=%r",
                     len(turns), len(answered), len(baseline_turns),
                     accumulated_turns_above_baseline, tui_active,
-                    _ends_with_prompt(screen),
+                    _ends_with_prompt(screen), blank,
                     _screen_tail(screen)[-100:],
                 )
                 _dbg({**_dbg_ctx, "action": "indeterminate_entered",
                       "turns": len(turns), "answered": len(answered),
-                      "tui_active": tui_active,
+                      "tui_active": tui_active, "blank_screen": blank,
                       "elapsed": round(monotonic() - dispatch_time, 1)})
             if indeterminate_polls >= 5:
                 _dbg({**_dbg_ctx, "action": "indeterminate_escalation",
@@ -520,23 +532,57 @@ class ClaudeCodeAdapter(AgentAdapter):
                 raise ExecutionTimeout("claude code tui produced no output after dispatch")
             raise ExecutionTimeout("claude code tui did not become idle within timeout")
 
-        raw_output = _strip_ansi(host.read_visible(session))
-        read = host.read_output(session, cursor)
+        try:
+            raw_output = _strip_ansi(host.read_visible(session))
+            read = host.read_output(session, cursor)
+            full_scrollback = _strip_ansi(host.read_scrollback(session))
+        except Exception as exc:
+            _logger.warning("post-loop tmux read failed: %s", exc)
+            raise PaneDied(f"pane died during extraction: {exc}") from exc
         session.metadata["restored_cursor"] = read.cursor
-        cleaned = _clean_claude_code_output(raw_output)
-        if (not cleaned.strip() or _is_shell_returned(raw_output)) and last_good_screen:
-            cleaned = _clean_claude_code_output(last_good_screen)
+
+        # ── Extraction cascade ──────────────────────────────────────
+        # Priority: scrollback > visible > empty.
+        #
+        # Scrollback (full tmux buffer) is the primary source because it
+        # always contains the ⏺ response markers even when they scroll
+        # off the visible screen.  parse_turns → answered[-1] naturally
+        # returns the *last* (= current) response, which is safe even
+        # when scrollback contains prior-run content.
+        #
+        # Visible screen is only used as a fast-path or fallback when
+        # scrollback extraction fails (shouldn't happen in practice).
+        cleaned = _clean_claude_code_output(full_scrollback)
+        extraction_source = "scrollback"
+        # Guard against cross-run contamination: if the extracted response
+        # matches the baseline (prior run's last response), treat as empty.
+        if baseline_last_response and cleaned.strip() == baseline_last_response.strip():
+            _dbg({**_dbg_ctx, "action": "extraction_stale_baseline",
+                  "cleaned_len": len(cleaned)})
+            cleaned = ""
+        if not cleaned.strip():
+            # Scrollback failed or stale — fall back to visible screen
+            cleaned = _clean_claude_code_output(raw_output)
+            extraction_source = "visible"
+            if baseline_last_response and cleaned.strip() == baseline_last_response.strip():
+                cleaned = ""
+        _dbg({**_dbg_ctx, "action": "extraction_source",
+              "source": extraction_source,
+              "result_len": len(cleaned),
+              "scrollback_len": len(full_scrollback),
+              "elapsed": round(monotonic() - dispatch_time, 1)})
+
+        # JSON contract overlay (only when explicitly requested)
         extraction_diag = None
         if json_contract:
+            # Build candidate list without re-cleaning the same source.
+            # `cleaned` already comes from scrollback or visible (see above).
+            visible_cleaned = _clean_claude_code_output(raw_output) if extraction_source == "scrollback" else cleaned
             cleaned_sources = [
                 ("cleaned", cleaned),
-                ("raw_cleaned", _clean_claude_code_output(raw_output) if raw_output else ""),
+                ("visible_cleaned", visible_cleaned),
             ]
-            if last_good_screen:
-                cleaned_sources.append(
-                    ("last_good_cleaned", _clean_claude_code_output(last_good_screen)),
-                )
-            for tag, src in [("raw_output", raw_output), ("last_good_screen", last_good_screen)]:
+            for tag, src in [("scrollback", full_scrollback), ("raw_output", raw_output)]:
                 if src:
                     cleaned_sources.append((tag, src))
             selected, extraction_diag = select_structured_result(
@@ -549,8 +595,8 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         if not cleaned.strip():
             _dbg({**_dbg_ctx, "action": "extraction_empty",
+                  "scrollback_len": len(full_scrollback),
                   "raw_output_len": len(raw_output),
-                  "last_good_screen_len": len(last_good_screen),
                   "elapsed": round(monotonic() - dispatch_time, 1)})
             raise ExecutionTimeout("claude code tui produced no output after idle")
 
@@ -559,7 +605,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
-                ArtifactPayload(role="transcript_log", name="transcript.txt", content=_strip_ansi(host.read_scrollback(session))),
+                ArtifactPayload(role="transcript_log", name="transcript.txt", content=full_scrollback),
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],
@@ -585,7 +631,9 @@ class ClaudeCodeAdapter(AgentAdapter):
               "session_id": session.session_id})
         health = host.health(session)
         if not health.healthy:
-            _dbg({"kind": "adapter_recovery", "action": "recover_skip_unhealthy", "run_id": run_id})
+            session.metadata.pop("claude_code_bootstrapped", None)
+            _dbg({"kind": "adapter_recovery", "action": "recover_skip_unhealthy",
+                  "run_id": run_id, "cleared_bootstrap": True})
             return
         if isinstance(error, PaneDied):
             session.metadata.pop("claude_code_bootstrapped", None)
@@ -598,8 +646,13 @@ class ClaudeCodeAdapter(AgentAdapter):
             if host.shell_idle(session):
                 idle = True
                 break
+        # After Ctrl-C the TUI may have exited, leaving a bare shell.
+        # Clear the bootstrap flag so the next run re-launches Claude Code.
+        if idle:
+            session.metadata.pop("claude_code_bootstrapped", None)
         _dbg({"kind": "adapter_recovery", "action": "recover_done",
-              "run_id": run_id, "shell_idle": idle})
+              "run_id": run_id, "shell_idle": idle,
+              "cleared_bootstrap": idle})
 
     def build_failure_result(
         self,
@@ -611,8 +664,13 @@ class ClaudeCodeAdapter(AgentAdapter):
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
         if isinstance(error, StableButIndeterminate):
-            screen = error.screen or _strip_ansi(host.read_visible(session))
-            cleaned = _clean_claude_code_output(error.last_good_screen or screen)
+            screen = error.screen or ""
+            try:
+                screen = screen or _strip_ansi(host.read_visible(session))
+                scrollback = _strip_ansi(host.read_scrollback(session))
+            except Exception:
+                scrollback = ""
+            cleaned = _clean_claude_code_output(scrollback) or _clean_claude_code_output(screen)
             return ExecutionResult(
                 artifacts=[
                     ArtifactPayload(role="prompt", name="prompt.txt", content=prompt_for_claim(claimed=claimed)),

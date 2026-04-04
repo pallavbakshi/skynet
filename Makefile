@@ -237,7 +237,56 @@ stop-runtime: ## Stop runtime worker
 	@for pid in $$(ps -eo pid=,args= | awk '/[m]ake runtime AGP_RUNTIME_ID/ {print $$1}'); do \
 		kill $$pid 2>/dev/null || true; \
 	done
+	@# Wait for processes to fully exit (avoids exit code 144 on restart)
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+		if ! ps -eo args= 2>/dev/null | grep -q '[a]gp runtime-work-loop'; then break; fi; \
+		sleep 0.5; \
+	done
 	@echo "Runtime stopped."
+
+restart-runtime: ## Restart runtime workers (re-reads code changes)
+	@# Discover running runtimes BEFORE stopping them (sweeper deletes agents on death)
+	@_agents=$$(ps -eo args= 2>/dev/null | awk '/[a]gp runtime-work-loop/ { \
+		for(i=1;i<=NF;i++) { if($$i=="--agent-id") print $$(i+1) } \
+	}' | sort -u); \
+	if [ -z "$$_agents" ]; then \
+		echo "No running runtimes found. Start them manually:"; \
+		echo "  make claude-dev &"; \
+		echo "  make claude-reviewer &"; \
+		exit 0; \
+	fi; \
+	echo "Stopping runtimes..."; \
+	for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \
+		kill $$pid 2>/dev/null || true; \
+	done; \
+	for i in 1 2 3 4 5 6 7 8 9 10; do \
+		ps -eo args= 2>/dev/null | grep -q '[a]gp runtime-work-loop' || break; \
+		sleep 0.5; \
+	done; \
+	echo "Reinstalling editable package..."; \
+	uv pip install -e . -q 2>&1 | tail -1; \
+	echo "Restarting runtimes..."; \
+	for agent in $$_agents; do \
+		case "$$agent" in \
+			claude-*) _adapter=claude_code ;; \
+			codex-*)  _adapter=codex ;; \
+			*)        _adapter=$(ADAPTER_KIND); \
+				if [ -z "$$_adapter" ]; then \
+					echo "WARNING: Cannot infer adapter for '$$agent' (no claude-*/codex-* prefix). Set ADAPTER_KIND explicitly."; \
+					_adapter=codex; \
+				fi ;; \
+		esac; \
+		case "$$agent" in \
+			*-dev)      _caps="code,python" ;; \
+			*-reviewer) _caps="review" ;; \
+			*)          _caps="code" ;; \
+		esac; \
+		echo "  Starting rtm-$$agent (adapter=$$_adapter, caps=$$_caps)"; \
+		$(MAKE) runtime AGP_RUNTIME_ID="rtm-$$agent" AGP_RUNTIME_AGENT_ID="$$agent" \
+			AGP_RUNTIME_CAPS="$$_caps" ADAPTER_KIND="$$_adapter" & \
+	done; \
+	sleep 5; \
+	echo "Runtimes restarted. Check: make status"
 
 stop-docker: ## Stop docker compose stack
 	@if command -v docker >/dev/null 2>&1; then \
@@ -335,7 +384,10 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 		fi; \
 		sleep 1; \
 	done
+	@mkdir -p .agp-logs
 	@echo "Starting runtime $(AGP_RUNTIME_ID) -> http://127.0.0.1:$(AGP_PORT) (agent=$(AGP_RUNTIME_AGENT_ID), adapter=$(ADAPTER_KIND), caps=$(AGP_RUNTIME_CAPS))"
+	@echo "  Logs: .agp-logs/$(AGP_RUNTIME_ID).out"
+	@echo "  (stdout/stderr redirected to log file — tail -f .agp-logs/$(AGP_RUNTIME_ID).out to monitor)"
 	$(_PROVIDER_ENV) \
 	AGP_ARTIFACT_BACKEND=http \
 	$(if $(filter codex,$(ADAPTER_KIND)), \
@@ -357,7 +409,8 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 		--host-kind tmux \
 		--adapter-kind $(ADAPTER_KIND) \
 		--agent-id $(AGP_RUNTIME_AGENT_ID) \
-		--capabilities $(AGP_RUNTIME_CAPS)
+		--capabilities $(AGP_RUNTIME_CAPS) \
+	>> .agp-logs/$(AGP_RUNTIME_ID).out 2>&1
 
 # ── Convenience runtime targets ──────────────────────────────────────
 

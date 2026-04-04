@@ -64,6 +64,20 @@ def _format_http_error(exc) -> str:
     return f"[HTTP {exc.response.status_code}] {message}"
 
 
+def _heartbeat_age_seconds(iso_timestamp: str | None) -> float | None:
+    """Compute seconds since an ISO-8601 heartbeat timestamp, or None."""
+    if not iso_timestamp:
+        return None
+    from datetime import datetime, timezone
+    try:
+        hb_dt = datetime.fromisoformat(str(iso_timestamp).replace("Z", "+00:00"))
+        if hb_dt.tzinfo is None:
+            hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - hb_dt).total_seconds()
+    except (ValueError, TypeError):
+        return None
+
+
 def _cli_idempotency_key(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
 
@@ -620,7 +634,7 @@ def runtime_work_loop(
             err=True,
         )
         time.sleep(backoff_seconds)
-    typer.echo(payload)
+    typer.echo(json.dumps(payload))
 
 
 def _runtime_binding_warning(client, agent_id: str) -> str | None:
@@ -967,7 +981,7 @@ def _poll_agent_ready(
         except _httpx.HTTPStatusError as exc:
             # Non-retryable HTTP errors — bail immediately
             if exc.response.status_code in (401, 403, 404):
-                return {"status": "error", "detail": str(exc)}
+                raise
             # 5xx or other — keep polling
         except _httpx.TransportError:
             # Network-level failures (timeout, DNS, connection reset) — keep polling
@@ -1372,6 +1386,8 @@ def send(
             raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
         attachments.append({"name": path.name, "role": role, "content": content})
     if task is None:
+        if sys.stdin.isatty():
+            typer.echo("[..] Reading task from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
         task = sys.stdin.read().strip()
     if not task:
         raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
@@ -1405,6 +1421,9 @@ def send(
         _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, job_id, timeout)
+        except KeyboardInterrupt:
+            _print_detached(job_id, agent_id)
+            raise typer.Exit(0)
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
@@ -1522,6 +1541,9 @@ def reply(
 
         try:
             job, timed_out = _poll_until_done(client, new_job_id, timeout)
+        except KeyboardInterrupt:
+            _print_detached(new_job_id, agent_id)
+            raise typer.Exit(0)
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
@@ -1552,7 +1574,7 @@ def review_cmd(
         "--prompt", help="Review prompt template.",
     ),
     server_url: str = typer.Option(None, help="CP URL."),
-    timeout_per_round: int = typer.Option(120, "--timeout", help="Seconds to wait per round."),
+    timeout_per_round: int = typer.Option(300, "--timeout", help="Seconds to wait per round."),
     attach_diff: bool = typer.Option(False, "--diff/--no-diff", help="Attach local git diff alongside the source artifact (best-effort, opt-in)."),
     resume: str = typer.Option(None, "--resume", help="Resume a detached review session by source job ID."),
 ) -> None:
@@ -1691,6 +1713,13 @@ def review_cmd(
                     typer.echo(f"[review] Summary: {summary[:200]}")
 
                     if verdict == "approved":
+                        _save_review_state(client, _build_review_state(
+                            review_session_id=review_session_id, source_job_id=job_id,
+                            reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                            current_round=current_round, phase="completed",
+                            conversation_id=conversation_id, last_verdict="approved",
+                            review_attempt_id=review_attempt_id,
+                        ))
                         typer.echo(f"[review] Approved after {current_round} round(s).")
                         return
 
@@ -1913,6 +1942,13 @@ def review_cmd(
             typer.echo(f"[review] Summary: {summary[:200]}")
 
             if verdict == "approved":
+                _save_review_state(client, _build_review_state(
+                    review_session_id=review_session_id, source_job_id=original_job_id,
+                    reviewer_id=reviewer_id, dev_id=dev_agent, max_rounds=max_rounds,
+                    current_round=round_num, phase="completed",
+                    conversation_id=conversation_id, last_verdict="approved",
+                    review_attempt_id=review_attempt_id,
+                ))
                 typer.echo(f"[review] Approved after {round_num} round(s).")
                 return
 
@@ -2056,12 +2092,14 @@ def review_diagnose_cmd(
                     rt_page = client.list_runtimes(limit=200)
                     bound_rts = [
                         rt for rt in rt_page.get("items", [])
-                        if any(w.get("agent_id") == reviewer_id for w in rt.get("claimed_work", []))
+                        if rt.get("agent_id") == reviewer_id
                     ]
                     diagnosis["reviewer_runtime"]["runtime_ids"] = [rt.get("runtime_id") for rt in bound_rts]
                     if bound_rts:
                         rt = bound_rts[0]
-                        diagnosis["reviewer_runtime"]["heartbeat_age"] = rt.get("heartbeat_age_seconds")
+                        hb_age = _heartbeat_age_seconds(rt.get("last_heartbeat_at"))
+                        if hb_age is not None:
+                            diagnosis["reviewer_runtime"]["heartbeat_age"] = hb_age
                         diagnosis["reviewer_runtime"]["runtime_status"] = rt.get("status")
             except Exception as rt_exc:
                 typer.echo(f"[warn] Failed to fetch reviewer runtime health: {rt_exc}", err=True)
@@ -2104,19 +2142,100 @@ def review_diagnose_cmd(
 # ── 1d. diagnose ────────────────────────────────────────────────────
 
 
+def _diagnose_agent(client, agent_id: str, *, output_json: bool = False) -> None:
+    """Diagnose an agent — show detail, runtime binding, heartbeat, and recent jobs."""
+    import httpx as _httpx
+
+    try:
+        agent = client.get_agent(agent_id)
+    except _httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            typer.echo(f"Agent '{agent_id}' not found.", err=True)
+        else:
+            typer.echo(_format_http_error(exc), err=True)
+        raise typer.Exit(1)
+
+    diagnosis: dict = {"agent": agent, "runtime": None, "recent_jobs": []}
+
+    # Runtime binding — query all runtimes and find the one bound to this agent.
+    try:
+        rt_page = client.ops_list_runtimes(limit=200)
+        bound_rts = [
+            rt for rt in rt_page.get("items", [])
+            if rt.get("agent_id") == agent_id
+        ]
+        if bound_rts:
+            diagnosis["runtime"] = bound_rts[0]
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Recent jobs targeting this agent
+    try:
+        jobs_data = client.list_jobs(target_agent_id=agent_id, limit=10)
+        diagnosis["recent_jobs"] = jobs_data.get("items", [])
+    except Exception:  # noqa: BLE001
+        pass
+
+    if output_json:
+        typer.echo(json.dumps(diagnosis, indent=2, default=str))
+        return
+
+    # Pretty print
+    typer.echo(f"Agent: {agent_id}")
+    typer.echo(f"  status:       {agent.get('status', '?')}")
+    typer.echo(f"  capabilities: {', '.join(agent.get('capabilities', [])) or 'none'}")
+    typer.echo(f"  workspace:    {agent.get('workspace_ref') or '(none)'}")
+    typer.echo(f"  registered:   {agent.get('created_at', '?')}")
+
+    # Heartbeat
+    hb = _heartbeat_age_seconds(agent.get("last_heartbeat_at"))
+    typer.echo(f"  heartbeat:    {f'{hb:.0f}s ago' if hb is not None else 'never'}")
+
+    # Queue depth (if available from get_agent)
+    qd = agent.get("queue_depth")
+    if qd is not None:
+        typer.echo(f"  queue_depth:  {qd}")
+
+    # Runtime binding
+    rt = diagnosis["runtime"]
+    if rt:
+        typer.echo(f"\n  Runtime Binding:")
+        typer.echo(f"    runtime_id: {rt.get('runtime_id', '?')}")
+        typer.echo(f"    status:     {rt.get('status', '?')}")
+        typer.echo(f"    host:       {rt.get('hostname', '?')}")
+    else:
+        typer.echo(f"\n  Runtime Binding: none")
+
+    # Recent jobs
+    jobs = diagnosis["recent_jobs"]
+    if jobs:
+        typer.echo(f"\n  Recent Jobs ({len(jobs)}):")
+        for j in jobs:
+            status = j.get("status", "?")
+            created = j.get("created_at", "?")
+            job_id = j.get("job_id", "?")
+            typer.echo(f"    {job_id}  status={status}  created={created}")
+    else:
+        typer.echo(f"\n  Recent Jobs: none")
+
+
 @app.command(name="diagnose")
 def diagnose_cmd(
-    entity_type: str = typer.Argument(..., help="Entity type: 'runtime'"),
-    entity_id: str = typer.Argument(..., help="Runtime ID to diagnose."),
+    entity_type: str = typer.Argument(..., help="Entity type: 'runtime' or 'agent'"),
+    entity_id: str = typer.Argument(..., help="Runtime or agent ID to diagnose."),
     server_url: str = typer.Option(None, help="CP URL."),
     output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Diagnose a runtime — show registration, heartbeat, jobs, and logs."""
-    if entity_type != "runtime":
-        typer.echo(f"Unknown entity type '{entity_type}'. Supported: runtime", err=True)
+    """Diagnose a runtime or agent — show registration, heartbeat, jobs, and logs."""
+    if entity_type not in ("runtime", "agent"):
+        typer.echo(f"Unknown entity type '{entity_type}'. Supported: runtime, agent", err=True)
         raise typer.Exit(1)
 
     with _cli_client(server_url) as client:
+        if entity_type == "agent":
+            _diagnose_agent(client, entity_id, output_json=output_json)
+            return
+
         rt = client.ops_get_runtime(entity_id)
         if rt is None:
             typer.echo(f"Runtime '{entity_id}' not found.", err=True)
@@ -2128,22 +2247,8 @@ def diagnose_cmd(
             "recent_logs": [],
         }
 
-        # Find agents bound to this runtime via its claimed_work
-        try:
-            bound_agent_ids = {w.get("agent_id") for w in rt.get("claimed_work", []) if w.get("agent_id")}
-            agents = client.list_agents(limit=200).get("items", [])
-            bound = [a for a in agents if a.get("agent_id") in bound_agent_ids]
-            diagnosis["agents"] = [
-                {
-                    "agent_id": a.get("agent_id"),
-                    "status": a.get("status"),
-                    "capabilities": a.get("capabilities", []),
-                    "queue_depth": a.get("queue_depth", 0),
-                }
-                for a in bound
-            ]
-        except Exception as agents_exc:
-            typer.echo(f"[warn] Failed to fetch bound agents: {agents_exc}", err=True)
+        # Use agents already returned by the runtime detail API
+        diagnosis["agents"] = rt.get("agents", [])
 
         # Recent runtime logs
         try:
@@ -2160,14 +2265,26 @@ def diagnose_cmd(
         typer.echo(f"Runtime: {entity_id}")
         typer.echo(f"  status:     {rt.get('status', '?')}")
         hb = rt.get("heartbeat_age_seconds")
+        if hb is None:
+            hb_raw = rt.get("last_heartbeat_at")
+            if hb_raw:
+                from datetime import datetime, timezone
+                try:
+                    hb_dt = datetime.fromisoformat(str(hb_raw).replace("Z", "+00:00"))
+                    if hb_dt.tzinfo is None:
+                        hb_dt = hb_dt.replace(tzinfo=timezone.utc)
+                    hb = (datetime.now(timezone.utc) - hb_dt).total_seconds()
+                except (ValueError, TypeError):
+                    pass
         typer.echo(f"  heartbeat:  {f'{hb:.0f}s ago' if hb is not None else 'never'}")
-        typer.echo(f"  host:       {rt.get('host_kind', '?')}")
-        typer.echo(f"  registered: {rt.get('registered_at', '?')}")
+        typer.echo(f"  host:       {rt.get('hostname', '?')}")
+        typer.echo(f"  registered: {rt.get('created_at', '?')}")
 
         if diagnosis["agents"]:
             typer.echo(f"\n  Bound Agents:")
             for a in diagnosis["agents"]:
-                typer.echo(f"    {a['agent_id']}  status={a['status']}  queue={a.get('queue_depth', 0)}")
+                caps = ", ".join(a.get("capabilities", []))
+                typer.echo(f"    {a['agent_id']}  status={a['status']}  caps=[{caps}]")
         else:
             typer.echo(f"\n  Bound Agents: none")
 
@@ -2215,6 +2332,9 @@ def wait_cmd(
         _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, job_id, timeout)
+        except KeyboardInterrupt:
+            _print_detached(job_id, agent_id)
+            raise typer.Exit(0)
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
@@ -2291,10 +2411,17 @@ def health(
         for rt in runtimes:
             rid = rt.get("runtime_id", "?")
             hb_age = rt.get("heartbeat_age_seconds")
+            if hb_age is None:
+                hb_age = _heartbeat_age_seconds(rt.get("last_heartbeat_at"))
             hb_str = f"{hb_age:.0f}s ago" if hb_age is not None else "never"
-            agents_bound = ", ".join(
-                sorted({w.get("agent_id", "?") for w in rt.get("claimed_work", [])})
-            ) or "none"
+            # Show bound agent from agent_id field, fall back to claimed_work leases
+            bound_aid = rt.get("agent_id")
+            if bound_aid:
+                agents_bound = bound_aid
+            else:
+                agents_bound = ", ".join(
+                    sorted({w.get("agent_id", "?") for w in rt.get("claimed_work", [])})
+                ) or "none"
             typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
 
         # Agents
@@ -2324,66 +2451,85 @@ def health(
 
 @app.command()
 def status(
-    job_id: str = typer.Argument(None, help="Optional job ID for job-specific status."),
+    target: str = typer.Argument(None, help="Job ID or agent ID (optional)."),
     server_url: str = typer.Option(None, help="CP URL."),
 ) -> None:
-    """Check agent-facing job state.
+    """Check job or agent status.
 
     With a job ID: shows full job details + artifacts.
-    With no arguments: performs a lightweight control-plane reachability check.
+    With an agent ID: shows agent status, heartbeat, and current job.
+    With no arguments: quick reachability check (use ``agp health`` for full details).
     """
-    if job_id is not None:
-        _status_job(job_id, server_url)
-    else:
-        _status_health(server_url)
-
-
-def _status_health(server_url: str | None) -> None:
+    if target is None:
+        _status_ping(server_url)
+        return
+    # Try as job first; on 404, try as agent before giving up
     import httpx as _httpx
+    with _cli_client(server_url) as client:
+        try:
+            job = client.get_job(target)
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
+            # Not a job — try as agent
+            try:
+                agent = client.get_agent(target)
+            except _httpx.HTTPStatusError as exc2:
+                if exc2.response.status_code == 404:
+                    typer.echo(f"Not found: '{target}' is neither a job ID nor an agent ID.", err=True)
+                else:
+                    typer.echo(_format_http_error(exc2), err=True)
+                raise typer.Exit(1)
+            _status_agent(agent, client)
+            return
+        _status_job_from_data(job, client)
 
-    def _list_all_agents(client) -> list[dict]:
-        agents: list[dict] = []
-        cursor: str | None = None
-        while True:
-            page = client.list_agents(limit=200, cursor=cursor)
-            items = page.get("items", [])
-            agents.extend(items)
-            cursor = (page.get("page") or {}).get("next_cursor")
-            if not cursor:
-                return agents
 
+def _status_agent(agent: dict, client) -> None:
+    """Show agent status summary."""
+    aid = agent["agent_id"]
+    typer.echo(f"AGENT:        {aid}")
+    typer.echo(f"STATUS:       {agent.get('status', '?').upper()}")
+    typer.echo(f"CAPABILITIES: {', '.join(agent.get('capabilities', [])) or '-'}")
+
+    # Heartbeat
+    hb_age = _heartbeat_age_seconds(agent.get("last_heartbeat_at"))
+    if hb_age is not None:
+        typer.echo(f"HEARTBEAT:    {hb_age:.0f}s ago")
+
+    qdepth = int(agent.get("queue_depth", 0) or 0)
+    if qdepth:
+        typer.echo(f"QUEUE_DEPTH:  {qdepth}")
+
+    workspace = agent.get("workspace_ref")
+    if workspace:
+        typer.echo(f"WORKSPACE:    {workspace}")
+
+    # Show current job if busy
+    if agent.get("status") == "busy":
+        try:
+            running = client.list_jobs(status="running", target_agent_id=aid, limit=1)
+            items = running.get("items", [])
+            if items:
+                typer.echo(f"CURRENT_JOB:  {items[0]['job_id']}")
+                _print_peek_tip(aid)
+        except Exception:
+            pass
+
+
+def _status_ping(server_url: str | None) -> None:
+    """Quick CP reachability check."""
     try:
         with _make_client(server_url) as client:
             data = client.health()
-            summary = None
-            agents: list[dict] = []
-            try:
-                summary = client.ops_health()
-                agents = _list_all_agents(client)
-            except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
-                pass
         cp_data = data.get("data", data)
-        typer.echo(f"status: {cp_data.get('status', 'ok')}")
-        for k, v in cp_data.get("components", {}).items():
-            typer.echo(f"  {k}: {v}")
-        if summary is not None:
-            total_pending = int(((summary.get("queue") or {}).get("depth")) or 0)
-            typer.echo(f"queue_depth_total: {total_pending}")
-            if agents:
-                busiest = max(agents, key=lambda agent: int(agent.get("queue_depth", 0) or 0))
-                oldest = max(
-                    (agent for agent in agents if agent.get("oldest_queue_age_seconds") is not None),
-                    key=lambda agent: float(agent.get("oldest_queue_age_seconds") or 0.0),
-                    default=None,
-                )
-                if int(busiest.get("queue_depth", 0) or 0) > 0:
-                    typer.echo(f"direct_queue_busiest: {busiest['agent_id']}={int(busiest.get('queue_depth', 0) or 0)}")
-                if oldest is not None:
-                    typer.echo(
-                        f"direct_queue_oldest_age: {oldest['agent_id']}={_format_duration(float(oldest.get('oldest_queue_age_seconds') or 0.0))}"
-                    )
+        components = cp_data.get("components", {})
+        parts = [f"{k}={v}" for k, v in components.items()]
+        typer.echo(f"CP reachable ({', '.join(parts) or 'ok'})")
+        typer.echo("Run `agp health` for full system status.")
     except Exception as e:
-        typer.echo(f"unreachable: {e}", err=True)
+        typer.echo(f"CP unreachable: {e}", err=True)
         raise typer.Exit(1)
 
 
@@ -2396,40 +2542,45 @@ def _status_job(job_id: str, server_url: str | None) -> None:
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
-        retry_count = job.get("retry_count", 0)
-        max_retries = job.get("max_retries", 3)
+        _status_job_from_data(job, client)
 
-        typer.echo(f"JOB_ID:       {job['job_id']}")
-        typer.echo(f"AGENT:        {job.get('target_agent_id', 'unknown')}")
-        typer.echo(f"STATUS:       {job['status'].upper()}")
-        if retry_count > 0:
-            typer.echo(f"RETRIES:      {retry_count}/{max_retries}")
-        if job.get("latest_run_id"):
-            typer.echo(f"RUN:          {job['latest_run_id']}")
-        typer.echo(f"CREATED:      {job.get('created_at', '?')}")
-        typer.echo(f"UPDATED:      {job.get('updated_at', '?')}")
 
-        if job["status"] in ("queued", "accepted", "leased", "running"):
-            _print_peek_tip(job.get("target_agent_id", ""))
+def _status_job_from_data(job: dict, client) -> None:
+    retry_count = job.get("retry_count", 0)
+    max_retries = job.get("max_retries", 3)
+    job_id = job["job_id"]
 
-        # Show result/failure artifact if terminal
-        if job["status"] in ("completed", "failed") and job.get("result_artifact_id"):
-            try:
-                art = client.fetch_artifact(job["result_artifact_id"], content=True)
+    typer.echo(f"JOB_ID:       {job_id}")
+    typer.echo(f"AGENT:        {job.get('target_agent_id', 'unknown')}")
+    typer.echo(f"STATUS:       {job['status'].upper()}")
+    if retry_count > 0:
+        typer.echo(f"RETRIES:      {retry_count}/{max_retries}")
+    if job.get("latest_run_id"):
+        typer.echo(f"RUN:          {job['latest_run_id']}")
+    typer.echo(f"CREATED:      {job.get('created_at', '?')}")
+    typer.echo(f"UPDATED:      {job.get('updated_at', '?')}")
+
+    if job["status"] in ("queued", "accepted", "leased", "running"):
+        _print_peek_tip(job.get("target_agent_id", ""))
+
+    # Show result/failure artifact if terminal
+    if job["status"] in ("completed", "failed") and job.get("result_artifact_id"):
+        try:
+            art = client.fetch_artifact(job["result_artifact_id"], content=True)
+            typer.echo("---")
+            typer.echo(art.get("content", "(no content)"))
+        except Exception:
+            pass
+    elif job["status"] == "failed":
+        try:
+            artifacts = client.list_job_artifacts(job_id, role="failure_evidence")
+            items = artifacts.get("items", [])
+            if items:
+                art = client.fetch_artifact(items[0]["artifact_id"], content=True)
                 typer.echo("---")
                 typer.echo(art.get("content", "(no content)"))
-            except Exception:
-                pass
-        elif job["status"] == "failed":
-            try:
-                artifacts = client.list_job_artifacts(job_id, role="failure_evidence")
-                items = artifacts.get("items", [])
-                if items:
-                    art = client.fetch_artifact(items[0]["artifact_id"], content=True)
-                    typer.echo("---")
-                    typer.echo(art.get("content", "(no content)"))
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 # ── 4. jobs ──────────────────────────────────────────────────────────
@@ -2506,8 +2657,8 @@ def result(
             candidates = [a for a in items if a.get("role") == role]
         else:
             candidates = (
-                [a for a in items if a.get("role") == "transcript_log"]
-                or [a for a in items if a.get("role") == "result"]
+                [a for a in items if a.get("role") == "result"]
+                or [a for a in items if a.get("role") == "transcript_log"]
                 or [a for a in items if a.get("role") == "exec_log"]
             )
         if not candidates:
@@ -2519,7 +2670,7 @@ def result(
         art = candidates[-1]  # latest
         try:
             data = client.fetch_artifact(art["artifact_id"], content=True)
-            typer.echo(data.get("content", ""))
+            typer.echo(data.get("content") or "(no content)")
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
@@ -2537,11 +2688,18 @@ def ls(
 
     with _cli_client(server_url) as client:
         try:
-            agents_data = client.list_agents()
+            agents: list[dict] = []
+            cursor: str | None = None
+            _MAX_PAGES = 10
+            for _page_num in range(_MAX_PAGES):
+                page = client.list_agents(limit=200, cursor=cursor)
+                agents.extend(page.get("items", []))
+                cursor = (page.get("page") or {}).get("next_cursor")
+                if not cursor:
+                    break
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
-        agents = agents_data.get("items", [])
 
         try:
             caps_data = client.list_capabilities()
@@ -2570,17 +2728,20 @@ def ls(
         agent_jobs: dict[str, dict] = {}
         busy_agents = [a for a in agents if a.get("status") == "busy"]
         if busy_agents:
-            running_jobs = client.list_jobs(status="running", limit=100)
-            for j in running_jobs.get("items", []):
-                tid = j.get("target_agent_id")
-                if tid:
-                    agent_jobs[tid] = j
+            try:
+                running_jobs = client.list_jobs(status="running", limit=100)
+                for j in running_jobs.get("items", []):
+                    tid = j.get("target_agent_id")
+                    if tid:
+                        agent_jobs[tid] = j
+            except _httpx.HTTPStatusError:
+                pass  # job listing may fail; proceed without job details
 
         # ── Header
         typer.echo(_SEPARATOR)
         typer.echo("      AGP SERVICE DISCOVERY (agp ls)")
         typer.echo(_SEPARATOR)
-        typer.echo("Logical agent view only. Use `skyops runtime ...` for runtime and machine health.")
+        typer.echo("Logical agent view only. Use `agp health` or `agp diagnose runtime <id>` for runtime health.")
         typer.echo("")
 
         # ── Active Agents section
@@ -2740,13 +2901,21 @@ def _info_agent(agent: dict, client) -> None:
     typer.echo(_SEPARATOR)
     typer.echo(f"      AGENT INFO: {agent_id}")
     typer.echo(_SEPARATOR)
-    typer.echo("Logical agent view. Use `skyops runtime ...` to inspect the bound runtime directly.")
 
     typer.echo(f"STATUS:       {agent.get('status', '?').upper()}")
     typer.echo(f"CAPABILITIES: {', '.join(agent.get('capabilities', [])) or '-'}")
 
-    # Current job for busy agents
+    # Heartbeat
     now = datetime.now(timezone.utc)
+    hb_age = _heartbeat_age_seconds(agent.get("last_heartbeat_at"))
+    if hb_age is not None:
+        typer.echo(f"HEARTBEAT:    {hb_age:.0f}s ago")
+
+    # Queue depth
+    qdepth = int(agent.get("queue_depth", 0) or 0)
+    typer.echo(f"QUEUE_DEPTH:  {qdepth}")
+
+    # Current job for busy agents
     if agent.get("status") == "busy":
         try:
             running = client.list_jobs(status="running", target_agent_id=agent_id, limit=1)
@@ -2776,8 +2945,31 @@ def _info_agent(agent: dict, client) -> None:
     workspace = agent.get("workspace_ref") or "-"
     typer.echo(f"WORKSPACE:    {workspace}")
 
-    # Capability blueprint section removed — agents now declare capabilities
-    # as string arrays via /agents/up, not from the capabilities table.
+    # Runtime binding — query by agent_id instead of guessing runtime ID prefixes
+    try:
+        rt_page = client.ops_list_runtimes(limit=200)
+        bound_rts = [
+            rt for rt in rt_page.get("items", [])
+            if rt.get("agent_id") == agent_id
+        ]
+        if bound_rts:
+            rt = bound_rts[0]
+            typer.echo(f"RUNTIME:      {rt.get('runtime_id', '?')} ({rt.get('hostname', '?')})")
+        else:
+            typer.echo("RUNTIME:      (unbound)")
+    except Exception:
+        typer.echo("RUNTIME:      (unbound)")
+
+    # Recent jobs
+    try:
+        jobs_data = client.list_jobs(target_agent_id=agent_id, limit=5)
+        recent = jobs_data.get("items", [])
+        if recent:
+            typer.echo(f"\nRECENT JOBS ({len(recent)}):")
+            for j in recent:
+                typer.echo(f"  {j.get('job_id', '?')}  {j.get('status', '?')}")
+    except Exception:
+        pass
 
 
 def _info_capability(target: str, client) -> None:

@@ -8,6 +8,7 @@ from typing import Any
 
 from agp.plugins._output_contracts import (
     apply_output_contract_instruction,
+    is_json_contract,
     prompt_for_claim,
     result_file_path_for_run,
     validate_json_against_contract,
@@ -768,8 +769,8 @@ class CodexAdapter(AgentAdapter):
         run_id = claimed["run"]["run_id"]
         # For JSON contract jobs, instruct the LLM to also write its result to a
         # file so we don't depend solely on terminal capture for long responses.
-        contract = (claimed.get("job") or {}).get("output_contract_json") or {}
-        json_contract = isinstance(contract, dict) and contract.get("format", "json") == "json"
+        contract = (claimed.get("job") or {}).get("output_contract_json")
+        json_contract = is_json_contract(contract)
         result_file = result_file_path_for_run(run_id) if json_contract else None
         # Pre-delete any stale file from a prior attempt so we don't read old data.
         if result_file:

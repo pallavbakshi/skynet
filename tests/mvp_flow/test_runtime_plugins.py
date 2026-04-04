@@ -3936,8 +3936,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         self.assertTrue(ctx.exception.screen.strip(), "screen should be non-empty")
         self.assertIn("cannot determine", str(ctx.exception))
 
-    def test_claude_code_empty_screen_gets_timeout_not_indeterminate(self) -> None:
-        """Empty screen should raise ExecutionTimeout, not StableButIndeterminate."""
+    def test_claude_code_empty_screen_raises_indeterminate(self) -> None:
+        """Empty screen should raise StableButIndeterminate quickly."""
         class SilentHost(InProcessTerminalHost):
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 pass
@@ -3955,7 +3955,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         adapter = ClaudeCodeAdapter(
             idle_poll_seconds=0.01,
             idle_after=1,
-            idle_timeout_seconds=0.05,
+            idle_timeout_seconds=0.5,
         )
         host = SilentHost()
         session = host.get_or_create_session(agent_id="agt_empty_cc")
@@ -3968,4 +3968,177 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         }
         with self.assertRaises(RecoverableExecutionError) as ctx:
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
-        self.assertIn("no output", str(ctx.exception))
+        self.assertIn("stable but adapter cannot determine", str(ctx.exception))
+
+    def test_claude_code_long_response_extracts_from_scrollback(self) -> None:
+        """When ⏺ markers scroll off the visible screen, extraction should
+        succeed via the scrollback (full tmux buffer) fallback."""
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+
+        # The full response (visible in scrollback but NOT on screen)
+        FULL_RESPONSE = (
+            "\u276f review the adapter\n"
+            "\u23fa Here is my detailed review of the adapter code.\n"
+            "\n"
+            "  Bug 1: The extraction cascade is fragile because...\n"
+            "  Bug 2: The poll loop has several issues including...\n"
+            "  Bug 3: Gate dismissals don't extend the deadline...\n"
+            "\n"
+            "  session.metadata[\"restored_cursor\"] = read.cursor\n"
+            "\n"
+            "  Impact: Silent data corruption.\n"
+            "\n"
+            "\u2733 Worked for 41s\n"
+            "\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+        )
+
+        # Only the tail is visible (no ⏺ marker, no ❯ with prompt text)
+        VISIBLE_TAIL = (
+            "  session.metadata[\"restored_cursor\"] = read.cursor\n"
+            "\n"
+            "  Impact: Silent data corruption.\n"
+            "\n"
+            "\u2733 Worked for 41s\n"
+            "\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+            "\u2500\u2500\u2500\u2500\n"
+            "  sTAT | Opus 4.6 (1M context)\n"
+            "  \u23f5\u23f5 bypass permissions on\n"
+        )
+
+        class LongResponseHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self):
+                super().__init__()
+                self._phase = "bootstrap"
+                self._response_reads = 0
+
+            def send_text(self, session, text, *, enter=True):
+                super().send_text(session, text, enter=enter)
+                if self._phase == "bootstrap" and "review the adapter" in text:
+                    self._phase = "response"
+
+            def read_visible(self, session):
+                if self._phase == "bootstrap":
+                    return "\u276f \n\u2500\u2500\u2500\u2500\n"
+                # During polling: return the visible tail (no ⏺ marker)
+                self._response_reads += 1
+                return VISIBLE_TAIL
+
+            def read_scrollback(self, session):
+                if self._phase == "bootstrap":
+                    return self.read_visible(session)
+                # Scrollback has the FULL response with ⏺ markers
+                return FULL_RESPONSE
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_long"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.5,
+        )
+        host = LongResponseHost()
+        session = host.get_or_create_session(agent_id="agt_long")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_long",
+            "job": {"job_id": "job_long"},
+            "run": {"run_id": "run_long"},
+            "message": {"text": "review the adapter"},
+        }
+
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed, supervisor=SupervisorStub(),
+        )
+        result_log = next(a for a in result.artifacts if a.name == "result.txt")
+        # Must extract the full review from scrollback, not garbage from visible
+        self.assertIn("detailed review of the adapter", result_log.content)
+        self.assertIn("Bug 1", result_log.content)
+        self.assertIn("Bug 3", result_log.content)
+        # Must NOT have extracted the quoted code as the response
+        self.assertNotEqual(result_log.content.strip(), '["restored_cursor"]')
+
+    def test_claude_code_visible_fast_path_when_markers_present(self) -> None:
+        """When ⏺ markers ARE visible, extraction should still work (fast path)."""
+        from agp.plugins.claude_code import ClaudeCodeAdapter
+
+        SCREEN = (
+            "\u276f hello\n"
+            "\u23fa Hi there! How can I help?\n"
+            "\u2500\u2500\u2500\u2500\n"
+            "\u276f \n"
+        )
+
+        class ShortResponseHost(InProcessTerminalHost):
+            @property
+            def kind(self):
+                return "tmux"
+
+            def __init__(self):
+                super().__init__()
+                self._phase = "bootstrap"
+                self._reads = 0
+
+            def send_text(self, session, text, *, enter=True):
+                super().send_text(session, text, enter=enter)
+                if self._phase == "bootstrap" and "hello" in text:
+                    self._phase = "response"
+
+            def read_visible(self, session):
+                if self._phase == "bootstrap":
+                    return "\u276f \n\u2500\u2500\u2500\u2500\n"
+                self._reads += 1
+                return SCREEN
+
+            def read_scrollback(self, session):
+                return self.read_visible(session)
+
+        class SupervisorStub:
+            def __init__(self):
+                self.client = type("Client", (), {
+                    "identity": type("Identity", (), {"runtime_id": "rtm_short"})()
+                })()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = ClaudeCodeAdapter(
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=0.5,
+        )
+        host = ShortResponseHost()
+        session = host.get_or_create_session(agent_id="agt_short")
+        session.metadata["claude_code_bootstrapped"] = True
+        claimed = {
+            "agent_id": "agt_short",
+            "job": {"job_id": "job_short"},
+            "run": {"run_id": "run_short"},
+            "message": {"text": "hello"},
+        }
+
+        result = adapter.execute_run(
+            host=host, session=session, claimed=claimed, supervisor=SupervisorStub(),
+        )
+        result_log = next(a for a in result.artifacts if a.name == "result.txt")
+        self.assertIn("Hi there", result_log.content)

@@ -14,13 +14,20 @@ _UNSET = object()
 _DATETIME_KEYS = {"created_at", "updated_at", "started_at", "finished_at", "expires_at", "deadline_at", "last_heartbeat_at", "last_seen_at", "delivered_at"}
 
 
+def _try_parse_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value)
+    except (ValueError, TypeError):
+        return None
+
+
 def _decode_datetimes(value: Any) -> Any:
     if isinstance(value, dict):
         return {
             key: (
                 parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
             )
-            if key in _DATETIME_KEYS and isinstance(item, str) and (parsed := datetime.fromisoformat(item))
+            if key in _DATETIME_KEYS and isinstance(item, str) and (parsed := _try_parse_datetime(item)) is not None
             else _decode_datetimes(item)
             for key, item in value.items()
         }
@@ -300,7 +307,7 @@ class AgpClient:
             params["cursor"] = cursor
         response = self._client.get("/queue/deliveries", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def get_job_events(
         self,
@@ -314,7 +321,7 @@ class AgpClient:
             params["cursor"] = cursor
         response = self._client.get(f"/jobs/{job_id}/events", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def watch_job(
         self,
@@ -360,7 +367,7 @@ class AgpClient:
         path = f"/artifacts/{artifact_id}/content" if content else f"/artifacts/{artifact_id}"
         response = self._client.get(path)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def list_job_artifacts(self, job_id: str, *, role: str | None = None) -> dict:
         params: dict[str, object] = {}
@@ -368,7 +375,7 @@ class AgpClient:
             params["role"] = role
         response = self._client.get(f"/jobs/{job_id}/artifacts", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def list_run_artifacts(self, run_id: str, *, role: str | None = None) -> dict:
         params: dict[str, object] = {}
@@ -376,7 +383,7 @@ class AgpClient:
             params["role"] = role
         response = self._client.get(f"/runs/{run_id}/artifacts", params=params)
         response.raise_for_status()
-        return response.json()["data"]
+        return _decode_datetimes(response.json()["data"])
 
     def upload_artifact(
         self,
