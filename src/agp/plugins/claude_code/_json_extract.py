@@ -46,22 +46,28 @@ def _candidate_json_strings(text: str) -> list[str]:
         idx = text.rfind(end_char)
         if idx < 0:
             continue
-        # Search backward for the matching opener
+        # Search backward for the matching opener.
+        # When scanning backward, a " at position i is escaped if
+        # preceded (in the forward direction) by an odd number of \.
         depth = 0
         in_string = False
-        escape = False
-        for i in range(idx, -1, -1):
+        i = idx
+        while i >= 0:
             ch = text[i]
-            if escape:
-                escape = False
-                continue
-            if ch == "\\":
-                escape = True
-                continue
-            if ch == '"' and not escape:
-                in_string = not in_string
+            if ch == '"':
+                # Count preceding backslashes to detect escaping
+                n_bs = 0
+                j = i - 1
+                while j >= 0 and text[j] == '\\':
+                    n_bs += 1
+                    j -= 1
+                if n_bs % 2 == 0:
+                    in_string = not in_string
+                # Skip past the backslashes we already inspected
+                i = j
                 continue
             if in_string:
+                i -= 1
                 continue
             if ch == end_char:
                 depth += 1
@@ -70,6 +76,7 @@ def _candidate_json_strings(text: str) -> list[str]:
                 if depth == 0:
                     candidates.append(text[i:idx + 1])
                     break
+            i -= 1
 
     # Also try extracting from markdown code blocks
     code_block_re = re.compile(r"```(?:json)?\s*\n(.*?)\n```", re.DOTALL)

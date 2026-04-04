@@ -15,7 +15,8 @@ from agp.plugins.claude_code._markers import (
     STATUS_BAR_RE,
     STATUS_LINE_RE,
     THINKING_PREFIXES,
-    THINKING_VERBS,
+    SPINNER_VERBS,
+    TURN_COMPLETION_VERBS,
     WORKING_PREFIXES,
 )
 from agp.plugins.claude_code._normalize import is_noise_line, is_status_continuation
@@ -135,7 +136,7 @@ def is_working(text: str) -> bool:
             lower = s.lower()
             if "\u2026" in s or "..." in s:
                 return True
-            if any(verb in lower for verb in THINKING_VERBS):
+            if any(verb in lower for verb in SPINNER_VERBS):
                 return True
 
         # Agent/Explore/Tool indicators
@@ -197,6 +198,25 @@ def is_shell_returned(text: str) -> bool:
     return False
 
 
+def _has_turn_timing(text: str) -> bool:
+    """Return True when a turn-completion timing line is visible.
+
+    Claude Code renders '✻ Baked for 2m 4s' (or Brewed, Cooked, etc.)
+    when a response finishes.  This is definitive proof that a turn
+    completed, even when the ❯ prompt and ⏺ response markers have
+    scrolled off the visible screen.
+    """
+    for line in text.splitlines():
+        s = line.strip()
+        for prefix in THINKING_PREFIXES:
+            if not s.startswith(prefix):
+                continue
+            lower = s.lower()
+            if any(verb in lower for verb in TURN_COMPLETION_VERBS):
+                return True
+    return False
+
+
 def is_completed_turn(
     text: str,
     *,
@@ -213,19 +233,25 @@ def is_completed_turn(
 
     turns = parse_turns(text)
     answered = [t for t in turns if t.response]
-    if not answered:
-        return False
 
-    # More answered turns than baseline → new turn completed
-    if len(answered) > baseline_answered_turns:
-        return True
+    if answered:
+        # More answered turns than baseline → new turn completed
+        if len(answered) > baseline_answered_turns:
+            return True
 
-    # Same count but different response content → response updated
-    if (
-        len(answered) == baseline_answered_turns
-        and baseline_last_response is not None
-        and answered[-1].response != baseline_last_response
-    ):
+        # Same count but different response content → response updated
+        if (
+            len(answered) == baseline_answered_turns
+            and baseline_last_response is not None
+            and answered[-1].response != baseline_last_response
+        ):
+            return True
+
+    # Fallback: when the response is long enough that both ❯ and ⏺
+    # markers scrolled off the visible screen, parse_turns finds no
+    # turns.  A timing line (✻ Baked for 2m 4s) is definitive proof
+    # that a turn completed.
+    if not answered and _has_turn_timing(text):
         return True
 
     return False

@@ -12,6 +12,7 @@ All server-side imports are deferred to command bodies so that
 """
 
 import json
+import logging
 import os
 import re as _re
 import sys
@@ -485,6 +486,22 @@ def serve(
     uvicorn.run(build_app(), host=actual_host, port=actual_port)
 
 
+def _runtime_debug_log(runtime_id: str, entry: dict) -> None:
+    """Write a structured entry to the runtime JSONL log if debug logging is on."""
+    _rtl = logging.getLogger("agp")
+    if not _rtl.isEnabledFor(logging.DEBUG):
+        return
+    try:
+        from datetime import datetime, UTC
+        from agp.logs import append_jsonl_log
+        from agp.config import settings
+        path = settings.log_root / f"runtime-{runtime_id}.jsonl"
+        payload = {"created_at": datetime.now(UTC).isoformat(), "kind": "runtime_lifecycle", **entry}
+        append_jsonl_log(path, payload, rotation_bytes=settings.observability_log_rotation_bytes)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @app.command(hidden=True)
 def runtime_work_loop(
     runtime_id: str,
@@ -499,9 +516,15 @@ def runtime_work_loop(
     max_local_recoveries: int = 1,
     host_kind: str = typer.Option(None, help="Terminal host kind (default: AGP_RUNTIME_TERMINAL_HOST_KIND or inprocess)."),
     adapter_kind: str = typer.Option(None, help="Agent adapter kind (default: AGP_RUNTIME_AGENT_ADAPTER_KIND or default)."),
+    log_level: str = typer.Option("WARNING", help="Python log level (DEBUG, INFO, WARNING, ERROR)."),
 ) -> None:
     """Continuously claim and execute jobs until stopped or iteration bound is hit."""
     _require_server_extra()
+    if isinstance(log_level, str):
+        level = getattr(logging, log_level.upper(), logging.WARNING)
+        # Scope to agp loggers only — avoid flooding stderr with httpcore/httpx transport noise
+        logging.basicConfig(level=logging.WARNING, force=True)
+        logging.getLogger("agp").setLevel(level)
 
     import socket as _socket
     from threading import Event
@@ -525,6 +548,7 @@ def runtime_work_loop(
     payload: list[dict] = []
     restart_attempt = 0
     max_restart_attempts = int(os.environ.get("AGP_MAX_RUNTIME_RESTARTS", "3"))
+    _runtime_debug_log(runtime_id, {"action": "startup", "host_kind": actual_host_kind, "adapter_kind": actual_adapter_kind, "agent_id": agent_id})
 
     while True:
         stop_event = Event()
@@ -554,30 +578,36 @@ def runtime_work_loop(
                 max_local_recoveries=max_local_recoveries,
             )
             payload.extend(batch)
+            _runtime_debug_log(runtime_id, {"action": "shutdown_clean", "iterations": len(payload)})
             break
         except _httpx.HTTPStatusError as exc:
             # 4xx errors are non-retryable (auth failure, bad config, etc.)
             if 400 <= exc.response.status_code < 500:
+                _runtime_debug_log(runtime_id, {"action": "fatal_http_error", "status": exc.response.status_code, "error": str(exc)})
                 typer.echo(
                     f"[runtime] fatal HTTP {exc.response.status_code}: {exc}; exiting",
                     err=True,
                 )
                 raise typer.Exit(1) from exc
             # 5xx — transient, fall through to retry
+            _runtime_debug_log(runtime_id, {"action": "transient_http_error", "status": exc.response.status_code, "error": str(exc), "attempt": restart_attempt + 1})
             restart_attempt += 1
         except (ValueError, TypeError) as exc:
             # Config/setup errors — non-retryable
+            _runtime_debug_log(runtime_id, {"action": "fatal_config_error", "error": f"{type(exc).__name__}: {exc}"})
             typer.echo(
                 f"[runtime] fatal config error: {type(exc).__name__}: {exc}; exiting",
                 err=True,
             )
             raise typer.Exit(1) from exc
         except Exception as exc:  # noqa: BLE001
+            _runtime_debug_log(runtime_id, {"action": "worker_crash", "error": f"{type(exc).__name__}: {exc}", "attempt": restart_attempt + 1})
             restart_attempt += 1
         finally:
             stop_event.set()
             client.close()
         if restart_attempt > max_restart_attempts:
+            _runtime_debug_log(runtime_id, {"action": "shutdown_max_restarts", "attempts": restart_attempt})
             typer.echo(
                 f"[runtime] giving up after {restart_attempt} restart attempts; exiting",
                 err=True,

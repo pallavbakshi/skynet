@@ -30,9 +30,7 @@ from agp.plugins.claude_code._parse import Turn, extract_last_response, parse_tu
 from agp.plugins.claude_code.adapter import ClaudeCodeAdapter  # noqa: F401
 from agp.plugins.claude_code.adapter import (  # noqa: F401
     _clean_claude_code_output,
-    _extract_trailing_json_text,
     _parse_claude_code_turns,
-    _repair_json_string,
 )
 from agp.runtime import _strip_ansi  # noqa: F401
 
@@ -63,8 +61,6 @@ __all__ = [
     "extract_metadata",
     # Compat re-exports
     "_clean_claude_code_output",
-    "_extract_trailing_json_text",
     "_parse_claude_code_turns",
-    "_repair_json_string",
     "_strip_ansi",
 ]

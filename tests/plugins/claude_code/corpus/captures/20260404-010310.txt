@@ -1,0 +1,50 @@
+  - adapter.py:258: __import__("pathlib") — just import pathlib at the top. Lazy import saves nothing here since it's stdlib and this runs once per execution.
+  - _gates.py:44: "(y/n)" as an auto-gate pattern will match any screen containing "(y/n)" — including response content that quotes a prompt. Could cause spurious gate dismissals mid-response.
+  - _classify.py:190: last == PROMPT_PREFIX + " " checks for "❯ " but is_shell_returned already stripped the line with .strip() on line 163, so this condition can never be true. Dead branch.
+
+  Let me verify that last point and the strip_noise dead code claim.
+
+⏺ Search(pattern: "strip_noise", path: "/Users/pb/projects/skynet")
+  ⎿  Found 1 file
+     src/agp/plugins/claude_code/_normalize.py
+
+⏺ Read(/Users/pb/projects/skynet/src/agp/plugins/claude_code/_classify.py · lines 155-174)
+  ⎿  Read 20 lines
+
+⏺ Confirmed:
+
+  - strip_noise — only defined in _normalize.py, zero callers anywhere in the project. Dead code.
+  - _classify.py:190 — last = tail[-1] where tail contains values of s = ln.strip() (line 163). So last is already stripped. The check last == PROMPT_PREFIX + " " (i.e., "❯ ") can never be True since
+  the trailing space was stripped. Dead branch.
+
+  ---
+  Summary of highest-priority fixes
+
+  ┌──────────┬────────────────────────┬─────────────────────────────────────────────────────────────────────────────────┐
+  │ Priority │          File          │                                      Issue                                      │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ High     │ _json_extract.py:52-60 │ Backward bracket scanner mishandles escaped quotes — will break on JSON with \" │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ High     │ adapter.py:374         │ host._get_pane_tty() — private API access will crash for non-tmux hosts         │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Medium   │ _classify.py:139       │ Substring verb matching causes false-positive is_working() on response content  │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Medium   │ adapter.py:328         │ Full scrollback re-parsed every poll — O(n) growth per cycle                    │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Medium   │ adapter.py:309         │ No hard cap on absolute_deadline — can be 100+ minutes                          │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Low      │ _classify.py:190       │ Dead branch ("❯ " after .strip())                                               │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Low      │ _normalize.py:66       │ Dead function strip_noise                                                       │
+  ├──────────┼────────────────────────┼─────────────────────────────────────────────────────────────────────────────────┤
+  │ Low      │ _json_extract.py:9-17  │ repair_json_string is effectively a no-op                                       │
+  └──────────┴────────────────────────┴─────────────────────────────────────────────────────────────────────────────────┘
+
+✻ Crunched for 1m 26s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sTAT | Opus 4.6 (1M context) | medium | 543b0b57-a41b-4819-bdb9-ed06a7b884a0 | 4%                                                                                                       42440 tokens
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+

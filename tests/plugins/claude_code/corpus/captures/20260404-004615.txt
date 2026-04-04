@@ -1,0 +1,50 @@
+
+  MEDIUM
+  - L218-219 — Double _classify_gate(screen) call. Pure function so currently deterministic, but wasteful and a maintenance hazard. Capture result once.
+  - L382 — _get_pane_tty private method assumes tmux host. For non-tmux hosts it returns None, causing is_shell_returned to immediately raise PaneDied even for legitimate idle shells.
+  - L301-305 — _active_session write unguarded when _session_lock is absent. Data race under free-threaded Python 3.13+.
+  - L296 — Cursor popped from metadata before new cursor is persisted. If the method raises mid-execution, the cursor checkpoint is lost; retries re-read from scratch on sticky sessions.
+
+  LOW
+  - L268-270 — result_file cleanup swallows all exceptions. If unlink fails (permissions in container), the next run silently reads stale results from the previous execution.
+  - L519-539 — recover() never clears supervisor._active_session. Heartbeats/interrupts route to dead sessions after recovery.
+
+  3. Dead Code from Legacy Migration
+
+  ┌─────────────────────────────────────┬─────────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────┐
+  │                What                 │                              Where                              │                                        Status                                        │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ Stale .pyc                          │ src/agp/plugins/__pycache__/_claude_code_legacy.cpython-312.pyc │ Delete                                                                               │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _extract_trailing_json_text wrapper │ adapter.py:76-77, __init__.py:33,66                             │ Zero callers — remove                                                                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _repair_json_string wrapper         │ adapter.py:80-81, __init__.py:35,68                             │ Zero callers — remove                                                                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _COMPAT_IMPORTS entries             │ runtime/__init__.py:70-71                                       │ Zero callers via this path — remove                                                  │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ THINKING_VERBS alias                │ _markers.py:172-173                                             │ Active caller in _classify.py:18 — rename import to SPINNER_VERBS, then remove alias │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _strip_ansi re-export               │ __init__.py:37,69                                               │ 1 caller (test-claude-code-tmux.py) — update caller, remove re-export                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _clean_claude_code_output re-export │ __init__.py:32,65                                               │ Still has test consumers — keep or migrate                                           │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ _parse_claude_code_turns re-export  │ __init__.py:34,67                                               │ Still has test consumers — keep or migrate                                           │
+  └─────────────────────────────────────┴─────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────┘
+
+  Top 3 Recommendations
+
+  1. Fix the unbounded timeout in the poll loop (adapter.py:406). Add an absolute deadline that cannot be reset: absolute_deadline = monotonic() + max_execution_seconds. The idle-timeout reset is fine
+   for detecting stalls, but there must be a hard ceiling.
+  2. Preserve indentation in _parse.py. The line.strip() on response continuation lines destroys code block structure — use lstrip with only the known prefix characters, or don't strip at all for
+  continuation lines.
+  3. Add explicit GATE_CHOICES entries for permission patterns (allow tool, allow bash, etc.) rather than relying on the implicit empty-string/Enter default. Make the auto-response behavior
+  intentional and auditable.
+
+✻ Baked for 2m 54s
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  sTAT | Opus 4.6 (1M context) | medium | 69ca288d-de52-40a3-9501-6dc2955ed2b1 | 3%                                                                                                       28400 tokens
+  ⏵⏵ bypass permissions on (shift+tab to cycle)
+

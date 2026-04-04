@@ -227,6 +227,15 @@ class RuntimeSupervisor:
         if staged_roots:
             session.metadata["staged_attachment_roots"] = staged_roots
 
+    def debug_log(self, entry: dict[str, Any]) -> None:
+        """Write a structured debug entry to the runtime JSONL log.
+
+        Only writes when Python debug logging is enabled (--log-level DEBUG).
+        """
+        if not _logger.isEnabledFor(logging.DEBUG):
+            return
+        _append_runtime_log(self.client.identity.runtime_id, entry)
+
     def emit_progress(self, claimed: dict[str, Any], *, message: str, details: dict[str, Any] | None = None) -> dict:
         try:
             return self.client.progress(
@@ -612,7 +621,16 @@ class RuntimeSupervisor:
             restored = self.host.load_cursor(session)
             if restored is not None:
                 session.metadata["restored_cursor"] = restored
-            self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
+            try:
+                self.adapter.ensure_bootstrapped(host=self.host, session=session, claimed=claimed)
+            except Exception as exc:
+                _append_runtime_log(
+                    self.client.identity.runtime_id,
+                    {"kind": "runtime_worker", "action": "bootstrap_failed",
+                     "run_id": run["run_id"], "error": str(exc),
+                     "exception_type": type(exc).__name__},
+                )
+                raise
 
             # Dedicated httpx client for the heartbeat thread so it never blocks
             # on the main thread's connection pool (critical over SSH tunnels).

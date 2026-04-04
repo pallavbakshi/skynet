@@ -6,6 +6,7 @@ All TUI parsing and classification is delegated to sibling modules
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
@@ -20,10 +21,6 @@ from agp.plugins.claude_code._gates import (
     GateKind,
     classify_gate as _classify_gate,
     gate_response as _gate_response,
-)
-from agp.plugins.claude_code._json_extract import (
-    extract_trailing_json,
-    repair_json_string,
 )
 from agp.plugins.claude_code._markers import PROMPT_PREFIX
 from agp.plugins.claude_code._normalize import (
@@ -71,14 +68,6 @@ def _parse_claude_code_turns(text: str) -> list[dict[str, Any]]:
         {"prompt": t.prompt, "response": t.response_lines}
         for t in turns
     ]
-
-
-def _extract_trailing_json_text(text: str) -> str | None:
-    return extract_trailing_json(text)
-
-
-def _repair_json_string(text: str) -> str:
-    return repair_json_string(text)
 
 
 # ── Adapter ──────────────────────────────────────────────────────────
@@ -215,8 +204,9 @@ class ClaudeCodeAdapter(AgentAdapter):
         while monotonic() < deadline:
             sleep(self.idle_poll_seconds)
             screen = _strip_ansi(host.read_visible(session))
-            if _classify_gate(screen) != GateKind.NONE:
-                if _classify_gate(screen) == GateKind.FATAL:
+            gate_kind = _classify_gate(screen)
+            if gate_kind != GateKind.NONE:
+                if gate_kind == GateKind.FATAL:
                     raise AuthFailure(
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
@@ -266,7 +256,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         result_file = result_file_path_for_run(claimed["run"]["run_id"]) if json_contract else None
         if result_file:
             try:
-                __import__("pathlib").Path(result_file).unlink(missing_ok=True)
+                Path(result_file).unlink(missing_ok=True)
             except Exception:
                 pass
         prompt = apply_output_contract_instruction(
@@ -310,34 +300,42 @@ class ClaudeCodeAdapter(AgentAdapter):
         )
 
         host.send_text(session, prompt, enter=True)
+        _dbg = getattr(supervisor, "debug_log", None) or (lambda entry: None)
+        _dbg_ctx = {"kind": "adapter_poll", "run_id": run_id, "session_id": session.session_id}
 
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)
 
         timeout = self.idle_timeout_seconds or 180.0
+        # Hard ceiling: the idle-timeout reset extends `deadline` when
+        # output is flowing, but `absolute_deadline` never moves.
+        absolute_deadline = monotonic() + min(timeout * 10, 3600.0)
         deadline = monotonic() + timeout
         prev_screen = ""
         prev_tail = ""
         unchanged = 0
         indeterminate_polls = 0
         tui_active = False
+        working_logged = False
         dispatch_time = monotonic()
+        last_breadcrumb_at = dispatch_time
         accumulated_turns_above_baseline = 0
         last_good_screen = ""
         last_heartbeat_at = dispatch_time
         heartbeat_interval = max(self.idle_poll_seconds, min(10.0, timeout / 4.0))
 
-        while monotonic() < deadline:
+        while monotonic() < min(deadline, absolute_deadline):
             sleep(self.idle_poll_seconds)
             _poll_hook()
             screen = _strip_ansi(host.read_visible(session))
             read = host.read_output(session, cursor)
             cursor = read.cursor
-            answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
-            accumulated_turns_above_baseline = max(
-                accumulated_turns_above_baseline,
-                len(answered_turns) - len(baseline_turns),
-            )
+            # Skip expensive scrollback re-parsing once we know turns exist
+            if accumulated_turns_above_baseline == 0:
+                answered_turns = [t for t in _parse_claude_code_turns(read.full_text) if t["response"]]
+                accumulated_turns_above_baseline = max(
+                    0, len(answered_turns) - len(baseline_turns),
+                )
             snap = _normalize_screen(screen)
             tail = _screen_tail(screen)
             changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
@@ -367,30 +365,49 @@ class ClaudeCodeAdapter(AgentAdapter):
                 )
                 last_heartbeat_at = now
 
+            # Periodic breadcrumb every ~30s for long tasks
+            if now - last_breadcrumb_at >= 30.0:
+                _dbg({**_dbg_ctx, "action": "poll_state",
+                      "elapsed": round(now - dispatch_time, 1),
+                      "changed": changed, "unchanged": unchanged,
+                      "tui_active": tui_active,
+                      "accumulated_turns": accumulated_turns_above_baseline,
+                      "output_chars": len(read.full_text)})
+                last_breadcrumb_at = now
+
             startup_settled = tui_active
             if startup_settled_event is not None and startup_settled:
                 startup_settled_event.set()
             if startup_settled and _is_shell_returned(screen):
                 if accumulated_turns_above_baseline > 0:
+                    _dbg({**_dbg_ctx, "action": "completed", "path": "shell_returned+scrollback_turns"})
                     break
                 if last_good_screen and _is_completed_turn(
                     last_good_screen,
                     baseline_answered_turns=len(baseline_turns),
                     baseline_last_response=baseline_last_response,
                 ):
+                    _dbg({**_dbg_ctx, "action": "completed", "path": "shell_returned+last_good_screen"})
                     break
-                if host._get_pane_tty(session) is not None and not host.shell_idle(session):
+                if hasattr(host, "_get_pane_tty") and host._get_pane_tty(session) is not None and not host.shell_idle(session):
                     continue
+                _dbg({**_dbg_ctx, "action": "pane_died",
+                      "accumulated_turns": accumulated_turns_above_baseline,
+                      "last_good_screen_len": len(last_good_screen),
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
                 raise PaneDied("claude code cli exited during execution")
 
-            if _classify_gate(screen) != GateKind.NONE:
-                if _classify_gate(screen) == GateKind.FATAL:
+            gate_kind = _classify_gate(screen)
+            if gate_kind != GateKind.NONE:
+                if gate_kind == GateKind.FATAL:
                     raise AuthFailure(
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
                     )
                 if snap != prev_screen:
-                    host.send_text(session, _gate_response(screen), enter=True)
+                    response = _gate_response(screen)
+                    _dbg({**_dbg_ctx, "action": "gate_dismiss", "gate_kind": gate_kind.name, "response": response})
+                    host.send_text(session, response, enter=True)
                 prev_screen = snap
                 prev_tail = tail
                 unchanged = 0
@@ -403,7 +420,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 unchanged = 0
                 indeterminate_polls = 0
                 tui_active = True
-                deadline = monotonic() + timeout
+                deadline = min(monotonic() + timeout, absolute_deadline)
             prev_screen = snap
             prev_tail = tail
             non_empty_lines = [ln for ln in screen.splitlines() if ln.strip()]
@@ -419,11 +436,20 @@ class ClaudeCodeAdapter(AgentAdapter):
                 baseline_answered_turns=len(baseline_turns),
                 baseline_last_response=baseline_last_response,
             ):
+                _dbg({**_dbg_ctx, "action": "completed", "path": "visible_completed_turn",
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
                 break
             if _is_working(screen):
+                if not working_logged:
+                    _dbg({**_dbg_ctx, "action": "working_detected",
+                          "elapsed": round(monotonic() - dispatch_time, 1)})
+                    working_logged = True
                 unchanged = 0
                 continue
             if accumulated_turns_above_baseline > 0 and _ends_with_prompt(screen):
+                _dbg({**_dbg_ctx, "action": "completed", "path": "scrollback_turns+prompt",
+                      "accumulated_turns": accumulated_turns_above_baseline,
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
                 break
             if (
                 tui_active
@@ -435,6 +461,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                     baseline_last_response=baseline_last_response,
                 )
             ):
+                _dbg({**_dbg_ctx, "action": "completed", "path": "last_good_screen_fallback",
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
                 break
 
             if (
@@ -443,6 +471,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                 and "0 tokens" in screen.lower()
             ):
                 _logger.warning("paste-not-submitted detected, re-sending Enter")
+                _dbg({**_dbg_ctx, "action": "paste_not_submitted_resend",
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
                 host.send_text(session, "", enter=True)
                 unchanged = 0
                 indeterminate_polls = 0
@@ -463,7 +493,17 @@ class ClaudeCodeAdapter(AgentAdapter):
                     _ends_with_prompt(screen),
                     _screen_tail(screen)[-100:],
                 )
+                _dbg({**_dbg_ctx, "action": "indeterminate_entered",
+                      "turns": len(turns), "answered": len(answered),
+                      "tui_active": tui_active,
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
             if indeterminate_polls >= 5:
+                _dbg({**_dbg_ctx, "action": "indeterminate_escalation",
+                      "unchanged": unchanged, "tui_active": tui_active,
+                      "accumulated_turns": accumulated_turns_above_baseline,
+                      "ends_with_prompt": _ends_with_prompt(screen),
+                      "elapsed": round(monotonic() - dispatch_time, 1),
+                      "tail": _screen_tail(screen)[-200:]})
                 raise StableButIndeterminate(
                     "screen is stable but adapter cannot determine if the "
                     "agent completed, is waiting for input, or is stuck",
@@ -471,6 +511,11 @@ class ClaudeCodeAdapter(AgentAdapter):
                     last_good_screen=last_good_screen,
                 )
         else:
+            _dbg({**_dbg_ctx, "action": "timeout",
+                  "tui_active": tui_active,
+                  "accumulated_turns": accumulated_turns_above_baseline,
+                  "elapsed": round(monotonic() - dispatch_time, 1),
+                  "has_output": bool(prev_screen.strip())})
             if not prev_screen.strip():
                 raise ExecutionTimeout("claude code tui produced no output after dispatch")
             raise ExecutionTimeout("claude code tui did not become idle within timeout")
@@ -503,8 +548,14 @@ class ClaudeCodeAdapter(AgentAdapter):
                 cleaned = selected
 
         if not cleaned.strip():
+            _dbg({**_dbg_ctx, "action": "extraction_empty",
+                  "raw_output_len": len(raw_output),
+                  "last_good_screen_len": len(last_good_screen),
+                  "elapsed": round(monotonic() - dispatch_time, 1)})
             raise ExecutionTimeout("claude code tui produced no output after idle")
 
+        _dbg({**_dbg_ctx, "action": "extraction_ok",
+              "result_len": len(cleaned), "elapsed": round(monotonic() - dispatch_time, 1)})
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
@@ -521,22 +572,34 @@ class ClaudeCodeAdapter(AgentAdapter):
         *,
         host: TerminalHost,
         session: TerminalSession,
-        claimed: dict[str, Any],  # noqa: ARG002
-        attempt: int,  # noqa: ARG002
+        claimed: dict[str, Any],
+        attempt: int,
         error: Exception,
-        supervisor: "RuntimeSupervisor",  # noqa: ARG002
+        supervisor: "RuntimeSupervisor",
     ) -> None:
+        _dbg = getattr(supervisor, "debug_log", None) or (lambda entry: None)
+        run_id = claimed.get("run", {}).get("run_id", "unknown")
+        _dbg({"kind": "adapter_recovery", "action": "recover_start",
+              "run_id": run_id, "attempt": attempt,
+              "error_type": type(error).__name__,
+              "session_id": session.session_id})
         health = host.health(session)
         if not health.healthy:
+            _dbg({"kind": "adapter_recovery", "action": "recover_skip_unhealthy", "run_id": run_id})
             return
         if isinstance(error, PaneDied):
             session.metadata.pop("claude_code_bootstrapped", None)
+            _dbg({"kind": "adapter_recovery", "action": "recover_pane_died_reset", "run_id": run_id})
             return
         host.interrupt(session)
+        idle = False
         for _ in range(5):
             sleep(0.2)
             if host.shell_idle(session):
+                idle = True
                 break
+        _dbg({"kind": "adapter_recovery", "action": "recover_done",
+              "run_id": run_id, "shell_idle": idle})
 
     def build_failure_result(
         self,

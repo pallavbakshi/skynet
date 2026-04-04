@@ -169,9 +169,6 @@ SPINNER_VERBS = frozenset((
     "zesting", "zigzagging",
 ))
 
-# Backward compat alias
-THINKING_VERBS = SPINNER_VERBS
-
 # Turn completion verbs from constants/turnCompletionVerbs.ts.
 # These are past-tense and appear as "✻ {Verb} for {duration}".
 TURN_COMPLETION_VERBS = frozenset((

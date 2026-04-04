@@ -63,11 +63,6 @@ def is_status_continuation(line: str) -> bool:
     return bool(STATUS_CONTINUATION_RE.match(s))
 
 
-def strip_noise(lines: list[str]) -> list[str]:
-    """Remove TUI chrome lines, keeping content and blanks."""
-    return [ln for ln in lines if not is_noise_line(ln)]
-
-
 def screen_tail(text: str, n: int = 10) -> str:
     """Return the last N meaningful non-chrome lines of the visible screen.
 

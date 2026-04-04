@@ -1,0 +1,50 @@
+
+  [1mMEDIUM[0m
+  - [1mL218-219 — Double [38;5;153m_classify_gate(screen)[39m call.[0m Pure function so currently deterministic, but wasteful and a maintenance hazard. Capture result once.
+  - [1mL382 — [38;5;153m_get_pane_tty[39m private method assumes tmux host.[0m For non-tmux hosts it returns [38;5;153mNone[39m, causing [38;5;153mis_shell_returned[39m to immediately raise [38;5;153mPaneDied[39m even for legitimate idle shells.
+  - [1mL301-305 — [38;5;153m_active_session[39m write unguarded when [38;5;153m_session_lock[39m is absent.[0m Data race under free-threaded Python 3.13+.
+  - [1mL296 — Cursor popped from metadata before new cursor is persisted.[0m If the method raises mid-execution, the cursor checkpoint is lost; retries re-read from scratch on sticky sessions.
+
+  [1mLOW[0m
+  - [1mL268-270 — [38;5;153mresult_file[39m cleanup swallows all exceptions.[0m If unlink fails (permissions in container), the next run silently reads stale results from the previous execution.
+  - [1mL519-539 — [38;5;153mrecover()[39m never clears [38;5;153msupervisor._active_session[39m.[0m Heartbeats/interrupts route to dead sessions after recovery.
+
+  [1m3. Dead Code from Legacy Migration[0m
+
+  ┌─────────────────────────────────────┬─────────────────────────────────────────────────────────────────┬──────────────────────────────────────────────────────────────────────────────────────┐
+  │                What                 │                              Where                              │                                        Status                                        │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ Stale [38;5;153m.pyc[39m                          │ [38;5;153msrc/agp/plugins/__pycache__/_claude_code_legacy.cpython-312.pyc[39m │ Delete                                                                               │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_extract_trailing_json_text[39m wrapper │ [38;5;153madapter.py:76-77[39m, [38;5;153m__init__.py:33,66[39m                             │ Zero callers — remove                                                                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_repair_json_string[39m wrapper         │ [38;5;153madapter.py:80-81[39m, [38;5;153m__init__.py:35,68[39m                             │ Zero callers — remove                                                                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_COMPAT_IMPORTS[39m entries             │ [38;5;153mruntime/__init__.py:70-71[39m                                       │ Zero callers via this path — remove                                                  │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153mTHINKING_VERBS[39m alias                │ [38;5;153m_markers.py:172-173[39m                                             │ Active caller in [38;5;153m_classify.py:18[39m — rename import to [38;5;153mSPINNER_VERBS[39m, then remove alias │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_strip_ansi[39m re-export               │ [38;5;153m__init__.py:37,69[39m                                               │ 1 caller ([38;5;153mtest-claude-code-tmux.py[39m) — update caller, remove re-export                │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_clean_claude_code_output[39m re-export │ [38;5;153m__init__.py:32,65[39m                                               │ Still has test consumers — keep or migrate                                           │
+  ├─────────────────────────────────────┼─────────────────────────────────────────────────────────────────┼──────────────────────────────────────────────────────────────────────────────────────┤
+  │ [38;5;153m_parse_claude_code_turns[39m re-export  │ [38;5;153m__init__.py:34,67[39m                                               │ Still has test consumers — keep or migrate                                           │
+  └─────────────────────────────────────┴─────────────────────────────────────────────────────────────────┴──────────────────────────────────────────────────────────────────────────────────────┘
+
+  [1mTop 3 Recommendations[0m
+
+  1. [1mFix the unbounded timeout[0m in the poll loop (adapter.py:406). Add an absolute deadline that cannot be reset: [38;5;153mabsolute_deadline = monotonic() + max_execution_seconds[39m. The idle-timeout reset is fine
+   for detecting stalls, but there must be a hard ceiling.
+  2. [1mPreserve indentation[0m in [38;5;153m_parse.py[39m. The [38;5;153mline.strip()[39m on response continuation lines destroys code block structure — use [38;5;153mlstrip[39m with only the known prefix characters, or don't strip at all for
+  continuation lines.
+  3. [1mAdd explicit [38;5;153mGATE_CHOICES[39m entries[0m for permission patterns ([38;5;153mallow tool[39m, [38;5;153mallow bash[39m, etc.) rather than relying on the implicit empty-string/Enter default. Make the auto-response behavior
+  intentional and auditable.
+
+[38;5;246m✻[39m [38;5;246mBaked for 2m 54s[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [7m [0m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246msTAT[39m [2m[38;5;246m|[0m[38;5;246m Opus[39m [38;5;246m4.6[39m [38;5;246m(1M[39m [38;5;246mcontext)[39m [2m[38;5;246m|[0m[38;5;246m medium[39m [2m[38;5;246m|[0m[38;5;246m 69ca288d-de52-40a3-9501-6dc2955ed2b1[39m [2m[38;5;246m|[0m[38;5;246m [32m3%[39m                                                                                                       [38;5;246m28400[39m [38;5;246mtokens[39m
+  [38;5;211m⏵⏵[39m [38;5;211mbypass[39m [38;5;211mpermissions[39m [38;5;211mon[38;5;246m (shift+tab[39m [38;5;246mto[39m [38;5;246mcycle)[39m
+
