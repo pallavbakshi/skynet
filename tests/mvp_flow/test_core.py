@@ -1944,7 +1944,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=supervisor)
         roles = [artifact.role for artifact in result.artifacts]
-        self.assertEqual(roles, ["prompt", "transcript_log", "exec_log", "result"])
+        self.assertEqual(roles, ["prompt", "prompt", "transcript_log", "exec_log", "result"])
         self.assertEqual(result.artifacts[-1].content, "success payload")
 
     def test_codex_adapter_ignores_terminal_lines_for_other_run_ids(self) -> None:

@@ -315,7 +315,7 @@ class RuntimeSupervisor:
         except Exception:  # noqa: BLE001
             pass
         try:
-            from agp.plugins.claude_code._via_file import cleanup_stale_task_files
+            from agp.plugins._via_file import cleanup_stale_task_files
             n = cleanup_stale_task_files()
             if n:
                 _logger.info("startup cleanup: removed %d stale task files", n)

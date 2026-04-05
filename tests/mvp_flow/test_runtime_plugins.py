@@ -370,9 +370,11 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         sent = host.sent[-1]
-        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", sent)
-        self.assertIn('"required": ["status"]', sent)
-        self.assertIn("Do not include markdown fences, prose, or any text outside the JSON object.", sent)
+        # Via-file: the marker envelope contains a reference string, not the full prompt
+        self.assertIn("Read the file", sent)
+        self.assertIn("agp-task-run_contract.md", sent)
+        # The marker envelope still wraps it with AGP_RUN_BEGIN
+        self.assertIn("AGP_RUN_BEGIN run_contract", sent)
         self.assertEqual(result.artifacts[-1].content, '{"status":"ok"}')
 
     def test_claude_code_adapter_appends_output_contract_instruction(self) -> None:
@@ -997,7 +999,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         }
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         roles = [a.role for a in result.artifacts]
-        self.assertEqual(roles, ["prompt", "transcript_log", "exec_log", "result"])
+        self.assertEqual(roles, ["prompt", "prompt", "transcript_log", "exec_log", "result"])
         self.assertIn("result of your task", result.artifacts[-1].content)
         self.assertEqual(result.summary["mode"], "tui")
 
@@ -2496,7 +2498,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                 super().send_text(session, text, enter=enter)
                 if text.startswith("codex"):
                     self.screen = "\u203a ready\n"
-                elif text == "answer the task":
+                elif "answer the task" in text or "Read the file" in text:
                     self.screen = "\u203a answer the task\n\u2022 tui success\n\u203a \n"
 
             def read_visible(self, session) -> str:

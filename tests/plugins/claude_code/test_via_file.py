@@ -7,7 +7,7 @@ import os
 import unittest
 from pathlib import Path
 
-from agp.plugins.claude_code._via_file import (
+from agp.plugins._via_file import (
     build_task_file_content,
     cleanup_stale_task_files,
     cleanup_task_file,

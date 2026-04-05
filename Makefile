@@ -244,8 +244,8 @@ stop-runtime: ## Stop runtime worker
 	done
 	@echo "Runtime stopped."
 
-restart-runtime: ## Restart runtime workers (re-reads code changes)
-	@# Discover running runtimes BEFORE stopping them (sweeper deletes agents on death)
+restart-runtime: ## Restart CP + runtime workers (re-reads code changes, preserves DB)
+	@# 1. Discover running runtimes BEFORE stopping them (sweeper deletes agents on death)
 	@_agents=$$(ps -eo args= 2>/dev/null | awk '/[a]gp runtime-work-loop/ { \
 		for(i=1;i<=NF;i++) { if($$i=="--agent-id") print $$(i+1) } \
 	}' | sort -u); \
@@ -255,7 +255,8 @@ restart-runtime: ## Restart runtime workers (re-reads code changes)
 		echo "  make claude-reviewer &"; \
 		exit 0; \
 	fi; \
-	echo "Stopping runtimes..."; \
+	echo "1/6 Discovering agents: $$_agents"; \
+	echo "2/6 Stopping runtimes..."; \
 	for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \
 		kill $$pid 2>/dev/null || true; \
 	done; \
@@ -263,9 +264,13 @@ restart-runtime: ## Restart runtime workers (re-reads code changes)
 		ps -eo args= 2>/dev/null | grep -q '[a]gp runtime-work-loop' || break; \
 		sleep 0.5; \
 	done; \
-	echo "Reinstalling editable package..."; \
+	echo "3/6 Stopping control plane..."; \
+	$(MAKE) stop-cp; \
+	echo "4/6 Reinstalling editable package..."; \
 	uv pip install -e . -q 2>&1 | tail -1; \
-	echo "Restarting runtimes..."; \
+	echo "5/6 Starting control plane..."; \
+	$(MAKE) local-serve; \
+	echo "6/6 Restarting runtimes..."; \
 	for agent in $$_agents; do \
 		case "$$agent" in \
 			claude-*) _adapter=claude_code ;; \
@@ -286,7 +291,7 @@ restart-runtime: ## Restart runtime workers (re-reads code changes)
 			AGP_RUNTIME_CAPS="$$_caps" ADAPTER_KIND="$$_adapter" & \
 	done; \
 	sleep 5; \
-	echo "Runtimes restarted. Check: make status"
+	echo "Done. Check: make status"
 
 stop-docker: ## Stop docker compose stack
 	@if command -v docker >/dev/null 2>&1; then \

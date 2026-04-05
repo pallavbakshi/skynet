@@ -15,6 +15,12 @@ from agp.plugins._output_contracts import (
 )
 from agp.plugins._structured_output import select_structured_result
 from agp.plugins._provider_env import collect_provider_env
+from agp.plugins._via_file import (
+    build_task_file_content,
+    cleanup_task_file,
+    reference_string,
+    write_task_file,
+)
 from agp.runtime import (
     AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
     BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
@@ -753,9 +759,13 @@ class CodexAdapter(AgentAdapter):
         claimed: dict[str, Any],
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
-        if self.tui_mode:
-            return self._execute_run_tui(host=host, session=session, claimed=claimed, supervisor=supervisor)
-        return self._execute_run_marker(host=host, session=session, claimed=claimed, supervisor=supervisor)
+        run_id = claimed["run"]["run_id"]
+        try:
+            if self.tui_mode:
+                return self._execute_run_tui(host=host, session=session, claimed=claimed, supervisor=supervisor)
+            return self._execute_run_marker(host=host, session=session, claimed=claimed, supervisor=supervisor)
+        finally:
+            cleanup_task_file(run_id)
 
     def _execute_run_tui(
         self,
@@ -812,17 +822,23 @@ class CodexAdapter(AgentAdapter):
             message="runtime.tui_dispatch",
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
+        # Via-file delivery: write the full prompt + metadata to a temp file
+        # and send a short reference string. Avoids paste buffer corruption,
+        # CLI argument length limits, and special character mangling.
+        task_file_content = build_task_file_content(prompt=prompt, claimed=claimed)
+        task_file_path = write_task_file(run_id=run_id, content=task_file_content)
+        dispatch_text = reference_string(task_file_path)
         if host.kind == "tmux" and self.session_mode != "sticky":
             # Ephemeral on tmux: one-shot codex invocation per job.
             host.launch_command(
                 session,
-                command=f"{self.cli_command} {shlex.quote(prompt)}",
+                command=f"{self.cli_command} {shlex.quote(dispatch_text)}",
                 env=collect_provider_env(),
                 cwd=session.workspace_ref,
             )
         else:
             # Sticky (any host) or non-tmux: send prompt to persistent TUI.
-            host.send_text(session, prompt, enter=True)
+            host.send_text(session, dispatch_text, enter=True)
 
         def _poll_hook() -> None:
             supervisor.check_interrupt(claimed)
@@ -1051,6 +1067,7 @@ class CodexAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
+                ArtifactPayload(role="prompt", name="task-file.md", content=task_file_content),
                 ArtifactPayload(role="transcript_log", name="transcript.txt", content=_select_codex_tui_transcript(
                     _strip_ansi(host.read_scrollback(session)),
                     visible_output, last_good_screen, raw_output,
@@ -1059,7 +1076,8 @@ class CodexAdapter(AgentAdapter):
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],
-            summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui"},
+            summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui",
+                      "dispatch": "via_file"},
             diagnostics=extraction_diag.to_dict() if extraction_diag else None,
         )
 
@@ -1079,8 +1097,14 @@ class CodexAdapter(AgentAdapter):
         if not health.healthy:
             raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
 
+        # Via-file: write the task payload to a file and send a reference.
+        # The marker envelope includes the reference string instead of the
+        # full prompt, avoiding paste buffer issues for long prompts.
+        task_file_content = build_task_file_content(prompt=prompt, claimed=claimed)
+        task_file_path = write_task_file(run_id=run_id, content=task_file_content)
+        via_file_prompt = reference_string(task_file_path)
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
-        host.send_text(session, self._task_payload(run_id=run_id, prompt=prompt), enter=True)
+        host.send_text(session, self._task_payload(run_id=run_id, prompt=via_file_prompt), enter=True)
         transcript_parts: list[str] = [f"prompt={prompt}\n"]
         idle_count = 0
         timeout = self._idle_timeout_window()
@@ -1138,11 +1162,13 @@ class CodexAdapter(AgentAdapter):
                     return ExecutionResult(
                         artifacts=[
                             ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
+                            ArtifactPayload(role="prompt", name="task-file.md", content=task_file_content),
                             ArtifactPayload(role="transcript_log", name="transcript.txt", content=transcript),
                             ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                             ArtifactPayload(role="result", name="result.txt", content=result_text or json.dumps(payload, sort_keys=True)),
                         ],
-                        summary={"adapter": self.kind, "host": host.kind, "run_id": run_id},
+                        summary={"adapter": self.kind, "host": host.kind, "run_id": run_id,
+                                  "dispatch": "via_file"},
                     )
             else:
                 idle_count += 1

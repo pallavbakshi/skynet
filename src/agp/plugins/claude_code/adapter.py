@@ -31,7 +31,7 @@ from agp.plugins.claude_code._parse import (
     extract_last_response,
     parse_turns,
 )
-from agp.plugins.claude_code._via_file import (
+from agp.plugins._via_file import (
     build_task_file_content,
     cleanup_task_file,
     reference_string,
