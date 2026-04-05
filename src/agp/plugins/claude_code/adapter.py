@@ -420,6 +420,9 @@ class ClaudeCodeAdapter(AgentAdapter):
                         # were meaningful progress.
                         if _is_noise_line(stripped) or _is_status_continuation(stripped):
                             continue
+                        # A bare prompt glyph (❯) is not useful progress info.
+                        if stripped.rstrip() == PROMPT_PREFIX:
+                            continue
                         last_line = stripped[:80]
                         break
 

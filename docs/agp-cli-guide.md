@@ -121,6 +121,7 @@ agp wait <job_id> --timeout 600
 
 ```bash
 # Default: prefers transcript_log > result > exec_log
+# For jobs with output contracts (e.g. --review): prefers result > transcript_log
 agp result <job_id>
 
 # Specific artifact role
@@ -178,7 +179,16 @@ agp result job_bbb
 
 ## Automated Review Loops
 
-Run a structured review cycle: reviewer checks work, dev fixes findings, reviewer re-checks.
+**Prefer `agp review` over manual `agp send` for review tasks.** The built-in review loop enforces a structured JSON output contract, so reviewers return machine-readable findings instead of transcript-heavy prose. Manual `agp send` to a reviewer returns free-form text that you have to parse yourself.
+
+If you must use manual sends (e.g. to run two reviewers in parallel), add `--review` to get the same structured output:
+
+```bash
+agp send reviewer-a "Review this change" --review --detach
+agp send reviewer-b "Review this change" --review --detach
+```
+
+### Built-in review loop (recommended)
 
 ```bash
 # Basic review: reviewer checks the output of a dev job

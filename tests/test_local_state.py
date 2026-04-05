@@ -168,6 +168,72 @@ class LocalControlPlaneGuardTest(unittest.TestCase):
              patch("subprocess.run", return_value=completed):
             self.assertEqual(_process_cwd(123), Path("/tmp/example").resolve())
 
+    def test_tracked_pid_treated_as_cp_when_command_uninspectable(self) -> None:
+        """Safe-by-default: a pid-file PID that exists but whose command
+        cannot be inspected (PermissionError from ps -p) is assumed to be
+        a control plane — the guard must raise."""
+        with TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "control-plane.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+
+            with patch("agp._local_state._pid_exists", return_value=True), \
+                 patch("agp._local_state._process_command", return_value=None):
+                with self.assertRaises(RuntimeError) as ctx:
+                    ensure_local_control_plane_stopped(pid_file)
+
+        self.assertIn("pid 12345", str(ctx.exception))
+
+    def test_global_ps_scan_permission_error_does_not_crash(self) -> None:
+        """When the global ps -eo scan raises PermissionError, the guard
+        should still work using only the tracked-PID path (no crash)."""
+        with TemporaryDirectory() as tmpdir:
+            pid_file = Path(tmpdir) / "control-plane.pid"
+            pid_file.write_text("12345\n", encoding="utf-8")
+
+            def fake_subprocess_run(cmd, **kwargs):
+                # Discriminate by the ps flag that distinguishes the two calls:
+                # ps -eo ... (global scan) vs ps -p <pid> ... (per-PID lookup)
+                if "-eo" in cmd:
+                    raise PermissionError("ps: Operation not permitted")
+                # Per-PID lookup: return non-CP command
+                return type("Result", (), {"stdout": "sleep 30\n", "returncode": 0})()
+
+            with patch("agp._local_state._pid_exists", return_value=True), \
+                 patch("agp._local_state.subprocess.run", side_effect=fake_subprocess_run):
+                # Tracked PID has command "sleep 30" (not a CP) and global scan
+                # fails — should NOT raise
+                ensure_local_control_plane_stopped(pid_file)
+
+    def test_discovery_pid_excluded_when_follow_up_inspection_fails(self) -> None:
+        """Discovery path: ps -eo reports a CP-like command for a PID and
+        _process_cwd resolves to the repo root, but the follow-up per-PID
+        inspection via _process_command returns None.  With safe_default=False
+        the discovered PID must be excluded — guard should not raise."""
+        from agp._local_state import _candidate_control_plane_pids
+
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pid_file = root / "control-plane.pid"
+            # No tracked PID
+            pid_file.write_text("", encoding="utf-8")
+
+            global_scan_output = "99999 python -m agp.cli serve\n"
+
+            def fake_subprocess_run(cmd, **kwargs):
+                if "-eo" in cmd:
+                    # Global scan succeeds with a CP-like command
+                    return type("R", (), {"stdout": global_scan_output, "returncode": 0})()
+                # Per-PID follow-up: fails (e.g. process exited between scans)
+                raise PermissionError("ps: Operation not permitted")
+
+            with patch("agp._local_state._pid_exists", return_value=True), \
+                 patch("agp._local_state.subprocess.run", side_effect=fake_subprocess_run), \
+                 patch("agp._local_state._process_cwd", return_value=root):
+                candidates = _candidate_control_plane_pids(root=root, pid_file=pid_file)
+
+            # PID 99999 should NOT appear — uninspectable discovery PID is excluded
+            self.assertEqual(candidates, [])
+
     def test_reset_sqlite_database_refuses_to_delete_repo_db(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]
         original_database_url = settings.database_url

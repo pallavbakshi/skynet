@@ -1063,8 +1063,8 @@ class PollUntilDoneTest(unittest.TestCase):
 
     def test_tui_state_completed_shows_response_complete(self) -> None:
         lines = self._run_with_tui_state("completed")
-        matching = [l for l in lines if "response complete" in l]
-        self.assertTrue(matching, f"expected 'response complete' hint, got: {lines}")
+        matching = [l for l in lines if "finishing up" in l]
+        self.assertTrue(matching, f"expected 'finishing up' hint, got: {lines}")
 
     def test_tui_state_working_prefers_last_line(self) -> None:
         lines = self._run_with_tui_state("working", last_line="✳ Thinking…")

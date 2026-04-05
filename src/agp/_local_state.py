@@ -29,14 +29,18 @@ def _pid_exists(pid: int) -> bool:
     return True
 
 
-def _process_command(pid: int) -> str:
-    proc = subprocess.run(
-        ["ps", "-p", str(pid), "-o", "command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return proc.stdout.strip()
+def _process_command(pid: int) -> str | None:
+    """Return the command string for *pid*, or ``None`` if lookup fails."""
+    try:
+        proc = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, PermissionError):
+        return None
+    return proc.stdout.strip() or None
 
 
 def _process_cwd(pid: int) -> Path | None:
@@ -75,12 +79,19 @@ def _looks_like_control_plane_command(command: str) -> bool:
     return any(indicator in f" {normalized}" for indicator in indicators)
 
 
-def _is_local_control_plane_process(pid: int) -> bool:
+def _is_local_control_plane_process(pid: int, *, safe_default: bool = True) -> bool:
+    """Check whether *pid* looks like a local control-plane process.
+
+    When *safe_default* is True (used for tracked PIDs from the pid file),
+    an uninspectable process is assumed to be a CP — safe-by-default.
+    When False (used for discovery via the global ps scan), lack of evidence
+    means the process is not treated as a CP.
+    """
     if not _pid_exists(pid):
         return False
     command = _process_command(pid)
-    if not command:
-        return True
+    if command is None:
+        return safe_default
     return _looks_like_control_plane_command(command)
 
 
@@ -90,12 +101,15 @@ def _candidate_control_plane_pids(*, root: Path, pid_file: Path) -> list[int]:
     if tracked_pid is not None and _is_local_control_plane_process(tracked_pid):
         candidates.append(tracked_pid)
 
-    proc = subprocess.run(
-        ["ps", "-eo", "pid=,command="],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        proc = subprocess.run(
+            ["ps", "-eo", "pid=,command="],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, PermissionError):
+        return candidates
     for raw_line in proc.stdout.splitlines():
         line = raw_line.strip()
         if not line:
@@ -107,7 +121,7 @@ def _candidate_control_plane_pids(*, root: Path, pid_file: Path) -> list[int]:
             continue
         if not _looks_like_control_plane_command(_command):
             continue
-        if pid in candidates or not _is_local_control_plane_process(pid):
+        if pid in candidates or not _is_local_control_plane_process(pid, safe_default=False):
             continue
         proc_root = _process_cwd(pid)
         if proc_root == root:

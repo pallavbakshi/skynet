@@ -92,11 +92,15 @@ def test_screen_tail_upgrade_notification_filtered(corpus):
 
 def _pick_last_line(text: str) -> str:
     """Replicate the adapter's last_line selection logic."""
+    from agp.plugins.claude_code._markers import PROMPT_PREFIX
+
     for ln in reversed(text.splitlines()):
         stripped = ln.strip()
         if not stripped:
             continue
         if is_noise_line(stripped) or is_status_continuation(stripped):
+            continue
+        if stripped.rstrip() == PROMPT_PREFIX:
             continue
         return stripped[:80]
     return ""
@@ -143,6 +147,27 @@ def test_heartbeat_returns_content_through_noise():
         "                     16,418 tokens\n"
     )
     assert _pick_last_line(text) == "⏺ Working on it..."
+
+
+def test_heartbeat_skips_bare_prompt_glyph():
+    text = "⏺ Some response\n❯"
+    assert _pick_last_line(text) == "⏺ Some response"
+
+
+def test_heartbeat_skips_prompt_through_noise():
+    """Bare ❯ plus noise layers — should reach the content line."""
+    text = (
+        "⏺ Working on it...\n"
+        "❯\n"
+        "⏵⏵ bypass permissions on\n"
+        "  16,418 tokens\n"
+    )
+    assert _pick_last_line(text) == "⏺ Working on it..."
+
+
+def test_heartbeat_empty_when_only_prompt_and_noise():
+    text = "❯\n⏵⏵ bypass permissions on\n  16,418 tokens"
+    assert _pick_last_line(text) == ""
 
 
 def test_heartbeat_empty_when_all_noise():

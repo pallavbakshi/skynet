@@ -1398,6 +1398,7 @@ def send(
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
+    review: bool = typer.Option(False, "--review", help="Apply the standard review output contract (verdict + findings JSON)."),
     reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
     attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
 ) -> None:
@@ -1425,7 +1426,11 @@ def send(
     parsed_output_contract: dict | None = None
     conversation_id: str | None = None
     attachments: list[dict[str, str]] = []
-    if output_contract is not None:
+    if review and output_contract is not None:
+        raise typer.BadParameter("--review and --output-contract are mutually exclusive")
+    if review:
+        parsed_output_contract = _REVIEW_OUTPUT_CONTRACT
+    elif output_contract is not None:
         try:
             parsed_output_contract = json.loads(output_contract)
         except json.JSONDecodeError as exc:
@@ -1475,7 +1480,8 @@ def send(
             _print_detached(job_id, agent_id)
             return
 
-        # Smart detach: sync window with heartbeat
+        # Sync path: print job ID early so the caller can poll independently
+        typer.echo(f"JOB_ID:       {job_id}")
         _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, job_id, timeout)
@@ -1513,6 +1519,7 @@ def reply(
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
+    review: bool = typer.Option(False, "--review", help="Apply the standard review output contract (verdict + findings JSON)."),
     attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
 ) -> None:
     """Reply to an existing job, preserving its conversation context.
@@ -1535,7 +1542,11 @@ def reply(
         metadata["nudge_target"] = nudge_target
     parsed_output_contract: dict | None = None
     attachments: list[dict[str, str]] = []
-    if output_contract is not None:
+    if review and output_contract is not None:
+        raise typer.BadParameter("--review and --output-contract are mutually exclusive")
+    if review:
+        parsed_output_contract = _REVIEW_OUTPUT_CONTRACT
+    elif output_contract is not None:
         try:
             parsed_output_contract = json.loads(output_contract)
         except json.JSONDecodeError as exc:
@@ -1627,6 +1638,8 @@ def reply(
             _print_detached(new_job_id, agent_id)
             return
 
+        typer.echo(f"JOB_ID:       {new_job_id}")
+        _print_peek_tip(agent_id)
         try:
             job, timed_out = _poll_until_done(client, new_job_id, timeout)
         except KeyboardInterrupt:
@@ -1961,29 +1974,7 @@ def review_cmd(
                 else:
                     review_text = f"[Round {round_num}] Please re-review the changes. The developer was asked to fix issues from the previous review."
 
-            output_contract = {
-                "format": "json",
-                "json_schema": {
-                    "type": "object",
-                    "required": ["verdict", "summary"],
-                    "properties": {
-                        "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
-                        "summary": {"type": "string"},
-                        "findings": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "severity": {"type": "string", "enum": ["high", "medium", "low"]},
-                                    "description": {"type": "string"},
-                                    "file": {"type": "string"},
-                                    "line": {"type": "integer"},
-                                },
-                            },
-                        },
-                    },
-                },
-            }
+            output_contract = _REVIEW_OUTPUT_CONTRACT
 
             # Save state: about to send to reviewer
             _save_review_state(client, _build_review_state(
@@ -2639,11 +2630,35 @@ def _status_job(job_id: str, server_url: str | None) -> None:
         _status_job_from_data(job, client)
 
 
+_REVIEW_OUTPUT_CONTRACT: dict = {
+    "format": "json",
+    "json_schema": {
+        "type": "object",
+        "required": ["verdict", "summary"],
+        "properties": {
+            "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
+            "summary": {"type": "string"},
+            "findings": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "description": {"type": "string"},
+                        "file": {"type": "string"},
+                        "line": {"type": "integer"},
+                    },
+                },
+            },
+        },
+    },
+}
+
 _HEARTBEAT_STATE_LABELS = {
     "gate.auto": "dismissing prompt",
     "gate.fatal": "blocked: requires login",
     "ready": "idle",
-    "completed": "response complete",
+    "completed": "finishing up",
     "working": "working",
 }
 
@@ -2778,13 +2793,16 @@ def _format_duration(seconds: float) -> str:
 def result(
     job_id: str = typer.Argument(..., help="Job ID to fetch output for."),
     server_url: str = typer.Option(None, help="CP URL."),
-    role: str = typer.Option(None, "--role", help="Artifact role to fetch (default: transcript_log > result > exec_log)."),
+    role: str = typer.Option(None, "--role", help="Artifact role to fetch (default: transcript_log > result > exec_log, or result-first for jobs with output contracts)."),
 ) -> None:
     """Dump the clean output of a completed job.
 
     Fetches the transcript (or result artifact) and prints it to stdout
     with no envelope or plumbing.  Useful for piping agent output into
     other tools.
+
+    Jobs with output contracts (e.g. --review) prefer the result artifact
+    over transcript, since the result contains the structured output.
     """
     import httpx as _httpx
 
@@ -2795,10 +2813,39 @@ def result(
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
         items = arts.get("items", [])
-        # Preference order: explicit role > transcript_log > result > exec_log
+
+        # Check job metadata to adjust artifact preference.
+        job_data = None
+        has_output_contract = False
+        job_failed = False
+        if not role:
+            try:
+                job_data = client.get_job(job_id)
+                has_output_contract = bool(job_data.get("output_contract_json"))
+                job_failed = job_data.get("status") == "failed"
+            except Exception:
+                pass
+
         if role:
             candidates = [a for a in items if a.get("role") == role]
+        elif has_output_contract and job_failed:
+            # Failed contract job: the result artifact likely has non-conforming
+            # garbage. Prefer failure_evidence, then transcript, then result.
+            candidates = (
+                [a for a in items if a.get("role") == "failure_evidence"]
+                or [a for a in items if a.get("role") == "transcript_log"]
+                or [a for a in items if a.get("role") == "result"]
+                or [a for a in items if a.get("role") == "exec_log"]
+            )
+        elif has_output_contract:
+            # Successful contract job: result first (structured), then transcript
+            candidates = (
+                [a for a in items if a.get("role") == "result"]
+                or [a for a in items if a.get("role") == "transcript_log"]
+                or [a for a in items if a.get("role") == "exec_log"]
+            )
         else:
+            # Default: transcript_log > result > exec_log
             candidates = (
                 [a for a in items if a.get("role") == "transcript_log"]
                 or [a for a in items if a.get("role") == "result"]
@@ -2811,6 +2858,9 @@ def result(
                 typer.echo(f"Available roles: {', '.join(available)}", err=True)
             raise typer.Exit(1)
         art = candidates[-1]  # latest
+        if has_output_contract and job_failed and not role:
+            typer.echo(f"WARNING: Job failed (output contract violation). Showing {art.get('role', 'artifact')}.", err=True)
+            typer.echo("---", err=True)
         try:
             data = client.fetch_artifact(art["artifact_id"], content=True)
             typer.echo(data.get("content") or "(no content)")

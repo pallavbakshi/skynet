@@ -527,6 +527,19 @@ runtime-clean: ## Tear down ALL agents on the CP + kill local processes and sess
 runtime-deploy: ## Generate deploy script for a remote runtime
 	@$(RUN) skyops runtime deploy rtm_remote --format script
 
+# ── Orchestrator targets ─────────────────────────────────────────────
+
+CODEX_ORC_SCRATCH := /tmp/codex-orc-scratch
+
+codex-orc: ## Launch codex orchestrator (read-only sandbox, delegates to claude-dev)
+	@mkdir -p $(CODEX_ORC_SCRATCH)
+	codex \
+		-a never \
+		-s workspace-write \
+		-c 'sandbox_workspace_write.network_access=true' \
+		-C $(CODEX_ORC_SCRATCH) \
+		"$$(cat $(ROOT)/docs/codex-orc-exploration-prompt.md)"
+
 # ── Dev/test targets ─────────────────────────────────────────────────
 
 .PHONY: test lint test-parser capture
