@@ -43,6 +43,24 @@ def ensure_codex_config(base_url: str) -> None:
         return
     if existing.get("openai_base_url") == base_url:
         return
+    # Targeted replacement — only touch the top-level section (before any
+    # [table] header) to avoid mutating keys inside TOML tables.
+    import re
+    raw = config_path.read_text()
+    new_line = f'openai_base_url = "{base_url}"'
+    # Split at the first table header so we only modify the top-level section.
+    table_match = re.search(r'^\[', raw, flags=re.MULTILINE)
+    if table_match:
+        top, rest = raw[:table_match.start()], raw[table_match.start():]
+    else:
+        top, rest = raw, ""
+    top_updated, count = re.subn(
+        r'^openai_base_url\s*=\s*.*$', new_line, top, flags=re.MULTILINE,
+    )
+    if count == 0:
+        # Key not at top level; prepend it.
+        top_updated = top.rstrip('\n') + '\n' + new_line + '\n'
+    config_path.write_text(top_updated + rest)
 
 
 def collect_provider_env() -> dict[str, str]:

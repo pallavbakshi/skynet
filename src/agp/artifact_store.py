@@ -11,6 +11,14 @@ from uuid import uuid4
 from typing import Protocol
 
 
+try:
+    from botocore.exceptions import ClientError as _BotoClientError
+except ImportError:  # pragma: no cover
+    _BotoClientError = Exception  # type: ignore[assignment,misc]
+
+_S3_NOT_FOUND_CODES = frozenset(("404", "NoSuchBucket", "NoSuchKey"))
+
+
 def _load_boto3():
     try:
         import boto3
@@ -328,8 +336,9 @@ class S3ArtifactStore:
         try:
             self._client.head_bucket(Bucket=self.bucket)
             return
-        except Exception:
-            pass
+        except _BotoClientError as exc:
+            if exc.response["Error"]["Code"] not in _S3_NOT_FOUND_CODES:
+                raise
         kwargs: dict[str, object] = {"Bucket": self.bucket}
         if self.region and self.region != "us-east-1":
             kwargs["CreateBucketConfiguration"] = {"LocationConstraint": self.region}
@@ -384,8 +393,10 @@ class S3ArtifactStore:
         bucket, key = parsed
         try:
             response = self._client.get_object(Bucket=bucket, Key=key)
-        except Exception:
-            return None
+        except _BotoClientError as exc:
+            if exc.response["Error"]["Code"] in _S3_NOT_FOUND_CODES:
+                return None
+            raise
         body = response["Body"].read()
         return body.decode("utf-8")
 
@@ -397,8 +408,10 @@ class S3ArtifactStore:
         try:
             self._client.head_object(Bucket=bucket, Key=key)
             return True
-        except Exception:
-            return False
+        except _BotoClientError as exc:
+            if exc.response["Error"]["Code"] in _S3_NOT_FOUND_CODES:
+                return False
+            raise
 
 
 class HttpProxyArtifactStore:

@@ -101,15 +101,15 @@ def _active_lease_for_run(db: Session, run_id: str, lease_id: str) -> Lease:
         )
     )
     if lease is None:
-        raise ConflictError("active lease not found")
+        raise ConflictError(f"active lease not found (run_id={run_id!r}, lease_id={lease_id!r})")
     return lease
 
 
 def _assert_lease_owner(lease: Lease, runtime_id: str, fencing_token: int) -> None:
     if lease.runtime_id != runtime_id:
-        raise ConflictError("lease runtime mismatch")
+        raise ConflictError(f"lease runtime mismatch (lease_id={lease.lease_id!r}, expected_runtime={lease.runtime_id!r}, got={runtime_id!r})")
     if lease.fencing_token != fencing_token:
-        raise ConflictError("stale fencing token")
+        raise ConflictError(f"stale fencing token (lease_id={lease.lease_id!r}, expected={lease.fencing_token!r}, got={fencing_token!r})")
 
 
 def _validate_terminal_artifact_roles(artifacts: list, required_roles: set[str]) -> None:

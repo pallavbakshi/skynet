@@ -2232,14 +2232,25 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("inline result", content["content"])
 
     def test_s3_artifact_store_round_trip_uses_bucket_objects(self) -> None:
+        from agp.artifact_store import _BotoClientError
+
         class FakeS3Client:
+            class _FakeClientError(_BotoClientError):
+                def __init__(self, code: str, message: str) -> None:
+                    error_response = {'Error': {'Code': code, 'Message': message}}
+                    if _BotoClientError is Exception:
+                        super().__init__(message)
+                        self.response = error_response
+                    else:
+                        super().__init__(error_response, 'FakeOperation')
+
             def __init__(self) -> None:
                 self.buckets: set[str] = set()
                 self.objects: dict[tuple[str, str], dict[str, object]] = {}
 
             def head_bucket(self, *, Bucket: str) -> None:
                 if Bucket not in self.buckets:
-                    raise RuntimeError("missing bucket")
+                    raise FakeS3Client._FakeClientError('404', 'missing bucket')
 
             def create_bucket(self, **kwargs) -> None:
                 self.buckets.add(str(kwargs["Bucket"]))
@@ -2266,7 +2277,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
             def head_object(self, *, Bucket: str, Key: str) -> None:
                 if (Bucket, Key) not in self.objects:
-                    raise RuntimeError("missing object")
+                    raise FakeS3Client._FakeClientError('NoSuchKey', 'missing object')
 
         fake_client = FakeS3Client()
         with patch.object(S3ArtifactStore, "_make_client", return_value=fake_client):
