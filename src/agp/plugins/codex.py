@@ -25,8 +25,8 @@ from agp.plugins._via_file import (
     write_task_file,
 )
 from agp.runtime import (
-    AdapterExecutionFailed, AgentAdapter, ArtifactPayload, ExecutionResult,
-    BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
+    AdapterExecutionFailed, AgentAdapter, ArtifactPayload, AuthFailure,
+    ExecutionResult, BootstrapFailure, ExecutionTimeout, PaneDied, RecoverableExecutionError,
     StableButIndeterminate, TerminalHost, TerminalSession,
     _strip_ansi,
 )
@@ -479,6 +479,21 @@ class CodexAdapter(AgentAdapter):
         if os.environ.get("CODEX_PREFER_DEVICE_CODE", "").lower() in {"1", "true", "yes"}:
             return "2"
         return "1"
+
+    _FATAL_GATE_PATTERNS = (
+        "you've hit your usage limit",
+        "you have hit your usage limit",
+        "hit your usage limit",
+        "upgrade to pro",
+        "purchase more credits",
+    )
+
+    def _looks_like_fatal_gate(self, text: str) -> bool:
+        """Return True for gates that cannot be auto-dismissed (auth, usage limits)."""
+        lower = text.lower()
+        if self._looks_like_onboarding_prompt(text):
+            return True
+        return any(pat in lower for pat in self._FATAL_GATE_PATTERNS)
 
     def _looks_like_onboarding_prompt(self, text: str) -> bool:
         lower = text.lower()
@@ -986,7 +1001,7 @@ class CodexAdapter(AgentAdapter):
             now = monotonic()
             # Derive semantic tui_state for structured consumption.
             tui_state = "unknown"
-            if self._looks_like_onboarding_prompt(screen):
+            if self._looks_like_fatal_gate(screen):
                 tui_state = "gate.fatal"
             elif self._looks_like_gate_prompt(screen):
                 tui_state = "gate.auto"
@@ -1070,6 +1085,12 @@ class CodexAdapter(AgentAdapter):
                 if hasattr(host, "_get_pane_tty") and host._get_pane_tty(session) is not None and not host.shell_idle(session):
                     continue
                 raise PaneDied("codex cli exited during execution")
+            if self._looks_like_fatal_gate(screen):
+                _logger.warning("fatal gate detected: %s", self._screen_tail(screen)[-120:])
+                raise AuthFailure(
+                    "codex hit a fatal gate that cannot be auto-dismissed "
+                    "(usage limit, login required, or similar)"
+                )
             if self._looks_like_gate_prompt(screen):
                 # Only dismiss if the screen changed since the last dismiss
                 # to avoid spamming Enter on an unrecognised persistent dialog.
@@ -1131,15 +1152,25 @@ class CodexAdapter(AgentAdapter):
             if tui_active and self._visible_ends_with_prompt(screen):
                 break
 
-            # Exec mode fallback: codex exec exits after producing output,
-            # returning to the shell.  The visible screen may still show
-            # exec output (no › prompt, no shell markers visible) but the
-            # foreground process is back to the shell.
-            #
-            # shell_idle alone is not enough: the > redirect truncates the
-            # stdout file before codex starts, so a premature shell_idle
-            # detection would see a 0-byte file.  Require the stdout file
-            # to be non-empty as proof that codex actually finished.
+            # Exec mode: a non-empty stdout file IS proof that codex exec
+            # finished, regardless of shell detection or TUI state.  This
+            # check runs unconditionally — it must not be gated behind
+            # _looks_like_shell_returned() or tui_active, because exec
+            # mode may never produce TUI markers and the shell prompt can
+            # scroll off the visible screen when the JSON is large.
+            if exec_stdout_file:
+                try:
+                    sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                except Exception:
+                    sz = 0
+                if sz > 0:
+                    _logger.debug(
+                        "exec stdout file has %d bytes — treating as completed", sz,
+                    )
+                    break
+
+            # Exec mode + shell_idle fallback: if the stdout file is still
+            # empty but the shell is idle, codex may have failed.
             if schema_file and tui_active and host.shell_idle(session):
                 if exec_stdout_file:
                     try:
@@ -1184,6 +1215,21 @@ class CodexAdapter(AgentAdapter):
                 )
             # ~10 seconds of grace (5 polls × 2s) before escalating.
             if indeterminate_polls >= 5:
+                # Last-chance extraction: if this is a contract job, check
+                # whether the screen already contains valid JSON matching
+                # the output contract.  The TUI state detector failed, but
+                # the response may be right there on screen.
+                if json_contract:
+                    candidate = _extract_trailing_json_text(screen)
+                    if candidate:
+                        valid, _reason = validate_json_against_contract(candidate, claimed)
+                        if valid:
+                            _logger.info(
+                                "indeterminate state resolved: found valid "
+                                "contract JSON on screen (%d bytes)",
+                                len(candidate),
+                            )
+                            break
                 raise StableButIndeterminate(
                     "screen is stable but adapter cannot determine if the "
                     "agent completed, is waiting for input, or is stuck",

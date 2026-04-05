@@ -1670,7 +1670,7 @@ def review_cmd(
         "Review the attached output artifact for correctness, edge cases, and security. "
         "The artifact is the primary subject of review. "
         "If a git diff is also attached, it is supplementary context only — use it to verify or clarify claims in the artifact, but do not review unrelated files in the diff. "
-        "Respond with a JSON object: {\"verdict\": \"approved\" or \"changes_requested\", \"summary\": \"...\", \"findings\": [{\"severity\": \"high|medium|low\", \"description\": \"...\"}]}. "
+        "Respond with a JSON object: {\"verdict\": \"approved\" or \"changes_requested\", \"summary\": \"...\", \"findings\": [{\"severity\": \"high|medium|low\", \"description\": \"...\", \"file\": \"path/to/file or null\", \"line\": 42 or null}]}. "
         "Also write findings to /tmp/review-findings.md for reference.",
         "--prompt", help="Review prompt template.",
     ),

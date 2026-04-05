@@ -71,7 +71,10 @@ def get_artifact_content(
     artifact = db.get(Artifact, artifact_id)
     if artifact is None:
         raise HTTPException(status_code=404, detail=f"artifact not found: {artifact_id}")
-    content = _artifact_store().read_text(storage_ref=artifact.storage_ref)
+    try:
+        content = _artifact_store().read_text(storage_ref=artifact.storage_ref)
+    except Exception:
+        content = None
     payload: dict = {
         "artifact_id": artifact.artifact_id,
         "storage_ref": artifact.storage_ref,

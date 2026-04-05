@@ -15,7 +15,7 @@ import logging
 
 import httpx
 
-from agp.artifact_store import ArtifactStore, get_artifact_store
+from agp.artifact_store import ArtifactStore, _BotoClientError, get_artifact_store
 from agp.client._runtime import RuntimeClient, RuntimeIdentity
 from agp.config import settings
 from agp.logs import append_jsonl_log
@@ -208,7 +208,10 @@ class RuntimeSupervisor:
             artifact_id = str(item.get("artifact_id") or "").strip()
             if not name or not storage_ref:
                 continue
-            content = self.artifact_store.read_text(storage_ref=storage_ref)
+            try:
+                content = self.artifact_store.read_text(storage_ref=storage_ref)
+            except _BotoClientError:
+                content = None
             if content is None and artifact_id:
                 artifact = self.client.fetch_artifact_content(artifact_id)
                 content = artifact.get("content")

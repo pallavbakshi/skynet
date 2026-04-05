@@ -120,7 +120,12 @@ def _validate_terminal_artifact_roles(artifacts: list, required_roles: set[str])
 
 
 def _validate_artifact_store_refs(artifacts: list) -> None:
-    missing_refs = [item.storage_ref for item in artifacts if not _artifact_store().exists(storage_ref=item.storage_ref)]
+    def _ref_missing(ref: str) -> bool:
+        try:
+            return not _artifact_store().exists(storage_ref=ref)
+        except Exception:
+            return True  # treat unreachable store as missing
+    missing_refs = [item.storage_ref for item in artifacts if _ref_missing(item.storage_ref)]
     if missing_refs:
         raise BadRequestError(f"missing durable artifacts: {', '.join(missing_refs)}")
 
@@ -134,7 +139,10 @@ def validate_output_contract_completion(*, job: Job, artifacts: list) -> None:
     if result_artifact is None:
         raise BadRequestError("missing result artifact for output contract validation")
 
-    raw_content = _artifact_store().read_text(storage_ref=result_artifact.storage_ref)
+    try:
+        raw_content = _artifact_store().read_text(storage_ref=result_artifact.storage_ref)
+    except Exception:
+        raw_content = None
     if raw_content is None:
         raise BadRequestError(f"unable to read result artifact for output contract validation: {result_artifact.storage_ref}")
 

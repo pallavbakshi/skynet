@@ -135,6 +135,14 @@ def restore_and_recover_snapshot(
     }
 
 
+def _safe_exists(store, ref: str) -> bool:
+    """Call store.exists, returning False on transient errors."""
+    try:
+        return store.exists(storage_ref=ref)
+    except Exception:
+        return False
+
+
 def validate_restored_state(*, limit: int | None = None) -> dict:
     artifact_store = get_artifact_store(settings.artifact_backend, settings.artifact_root)
     session = SessionLocal()
@@ -152,7 +160,7 @@ def validate_restored_state(*, limit: int | None = None) -> dict:
                 "kind": artifact.kind,
             }
             for artifact in artifacts
-            if not artifact_store.exists(storage_ref=artifact.storage_ref)
+            if not _safe_exists(artifact_store, artifact.storage_ref)
         ]
         return {
             "checked_artifacts": len(artifacts),
