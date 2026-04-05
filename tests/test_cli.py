@@ -1470,7 +1470,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         return ctx
 
     @patch("agp.cli._make_client")
-    def test_result_default_prefers_transcript(self, mock_make: MagicMock) -> None:
+    def test_result_default_prefers_result_over_transcript(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {
             "items": [
@@ -1479,13 +1479,13 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
             ]
         }
         fake_client.get_job.return_value = {"status": "completed", "output_contract_json": None}
-        fake_client.fetch_artifact.return_value = {"content": "transcript content"}
+        fake_client.fetch_artifact.return_value = {"content": "result content"}
         mock_make.return_value = self._make_ctx(fake_client)
 
         result = runner.invoke(app, ["result", "job_123"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        fake_client.fetch_artifact.assert_called_once_with("art_transcript", content=True)
+        fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
 
     @patch("agp.cli._make_client")
     def test_result_contract_job_prefers_result(self, mock_make: MagicMock) -> None:

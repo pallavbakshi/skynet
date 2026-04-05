@@ -944,14 +944,69 @@ class CodexAdapter(AgentAdapter):
             # Ephemeral on tmux: one-shot codex invocation per job.
             if schema_file:
                 # Use exec mode with --output-schema for API-level JSON enforcement.
-                # Insert "exec" after the codex binary and add --output-schema.
-                parts = shlex.split(self.cli_command)
-                parts.insert(1, "exec")
-                base_cmd = " ".join(shlex.quote(p) for p in parts)
-                cmd = (f"{base_cmd}"
-                       f" --output-schema {shlex.quote(schema_file)}"
-                       f" {shlex.quote(dispatch_text)}"
-                       f" > {shlex.quote(exec_stdout_file)}")
+                # Insert "exec" after the codex invocation token and append
+                # --output-schema, the dispatch reference, and stdout redirect.
+                #
+                # Supported cli_command shapes:
+                #   Direct:  "codex --full-auto", "python -m codex --full-auto",
+                #            "/usr/bin/codex --full-auto"
+                #   Shell wrapper:  "bash -lc 'codex --full-auto'",
+                #                   "sh -c 'codex --full-auto'"
+                #
+                # Unsupported: deeply nested wrappers, env prefixes, or
+                # commands where "codex" doesn't appear as a recognizable
+                # token.  These fall back to appending "exec" after the
+                # first token.
+                _SHELL_NAMES = {"bash", "sh", "zsh", "dash"}
+
+                def _find_codex_idx(argv: list[str]) -> int | None:
+                    """Find the index of the codex invocation token in an argv.
+
+                    Matches bare 'codex' or paths ending in '/codex'
+                    (e.g. /usr/bin/codex).  Returns None if no match.
+                    """
+                    for i, tok in enumerate(argv):
+                        if os.path.basename(tok) == "codex":
+                            return i
+                    return None
+
+                def _rewrite_argv(argv: list[str]) -> list[str]:
+                    """Insert 'exec' + extra args after the codex token."""
+                    idx = _find_codex_idx(argv)
+                    if idx is None:
+                        # Conservative fallback: insert after first token.
+                        idx = 0
+                    return (
+                        argv[: idx + 1]
+                        + ["exec"]
+                        + argv[idx + 1 :]
+                        + ["--output-schema", schema_file, dispatch_text]
+                    )
+
+                outer = shlex.split(self.cli_command)
+
+                # Detect shell-wrapper: [SHELL, -c/-lc/-xc/etc., INNER]
+                # Only match short flags where 'c' is the last character
+                # (e.g. -c, -lc, -xc), not arbitrary flags containing 'c'.
+                import re as _re
+                is_shell_wrapper = (
+                    len(outer) >= 3
+                    and os.path.basename(outer[0]) in _SHELL_NAMES
+                    and any(_re.fullmatch(r'-\w*c', f) for f in outer[1:-1])
+                )
+
+                if is_shell_wrapper:
+                    inner_argv = shlex.split(outer[-1])
+                    rewritten = _rewrite_argv(inner_argv)
+                    inner_cmd = " ".join(shlex.quote(t) for t in rewritten)
+                    # Stdout redirect is shell syntax — append inside inner.
+                    inner_cmd += f" > {shlex.quote(exec_stdout_file)}"
+                    outer_prefix = outer[:-1]
+                    cmd = " ".join(shlex.quote(t) for t in outer_prefix) + " " + shlex.quote(inner_cmd)
+                else:
+                    rewritten = _rewrite_argv(outer)
+                    cmd = " ".join(shlex.quote(t) for t in rewritten)
+                    cmd += f" > {shlex.quote(exec_stdout_file)}"
             else:
                 cmd = f"{self.cli_command} {shlex.quote(dispatch_text)}"
             host.launch_command(

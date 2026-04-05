@@ -961,6 +961,12 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
         now = time.monotonic()
         if now - last_heartbeat >= heartbeat_interval:
             elapsed = int(now - start)
+            # Show queued status when agent hasn't claimed the job yet
+            if job["status"] in ("queued", "accepted"):
+                typer.echo(f"[..] Queued, waiting for agent... ({elapsed}s elapsed)")
+                last_heartbeat = now
+                time.sleep(2)
+                continue
             hint = ""
             try:
                 events_data = client.get_job_events(job_id, limit=200)
@@ -2848,10 +2854,10 @@ def result(
                 or [a for a in items if a.get("role") == "exec_log"]
             )
         else:
-            # Default: transcript_log > result > exec_log
+            # Default: result (clean extracted answer) > transcript_log > exec_log
             candidates = (
-                [a for a in items if a.get("role") == "transcript_log"]
-                or [a for a in items if a.get("role") == "result"]
+                [a for a in items if a.get("role") == "result"]
+                or [a for a in items if a.get("role") == "transcript_log"]
                 or [a for a in items if a.get("role") == "exec_log"]
             )
         if not candidates:

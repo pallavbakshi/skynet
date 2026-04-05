@@ -4828,3 +4828,152 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         with self.assertRaises(AdapterExecutionFailed) as ctx:
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertIn("empty", str(ctx.exception).lower())
+
+    def test_codex_ephemeral_tmux_contract_wrapper_command_inserts_exec_correctly(self) -> None:
+        """For wrapper commands like 'python -m codex --full-auto', exec must be
+        inserted after the codex token, not after position 0."""
+
+        class TmuxCapture(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launched_commands: list[str] = []
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.launched_commands.append(command)
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex" in text:
+                    response = json.dumps({"verdict": "approved", "summary": "ok"})
+                    self._history.setdefault(session.session_id, []).append(
+                        f"\u203a task\n\u2022 {response}\n\n\u203a \n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_wrap"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        contract = {
+            "format": "json",
+            "json_schema": {"type": "object", "properties": {"verdict": {"type": "string"}}},
+        }
+
+        # Test wrapper: "python -m codex --full-auto"
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="python -m codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxCapture()
+        session = host.get_or_create_session(agent_id="agt_wrap")
+        claimed = {
+            "agent_id": "agt_wrap",
+            "job": {"job_id": "job_wrap", "output_contract_json": contract},
+            "run": {"run_id": "run_wrapper_test"},
+            "message": {"text": "review"},
+        }
+
+        adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+        self.assertTrue(host.launched_commands)
+        cmd = host.launched_commands[-1]
+        # "codex exec" must appear as a unit, after "python -m"
+        self.assertIn("python -m codex exec", cmd,
+                       f"'exec' should follow 'codex' in wrapper command: {cmd}")
+        self.assertIn("--output-schema", cmd)
+
+    def test_codex_ephemeral_tmux_contract_shell_wrapper_inserts_exec_inside(self) -> None:
+        """For shell wrappers like bash -lc 'codex --full-auto', exec and extra
+        args must be inserted inside the inner command quotes."""
+
+        class TmuxCapture(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launched_commands: list[str] = []
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.launched_commands.append(command)
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex" in text:
+                    response = json.dumps({"verdict": "approved", "summary": "ok"})
+                    self._history.setdefault(session.session_id, []).append(
+                        f"\u203a task\n\u2022 {response}\n\n\u203a \n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_sh"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        contract = {
+            "format": "json",
+            "json_schema": {"type": "object", "properties": {"verdict": {"type": "string"}}},
+        }
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="bash -lc 'codex --full-auto'",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxCapture()
+        session = host.get_or_create_session(agent_id="agt_sh")
+        claimed = {
+            "agent_id": "agt_sh",
+            "job": {"job_id": "job_sh", "output_contract_json": contract},
+            "run": {"run_id": "run_shell_wrapper_test"},
+            "message": {"text": "review"},
+        }
+
+        adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+        self.assertTrue(host.launched_commands)
+        cmd = host.launched_commands[-1]
+        # "exec" and "--output-schema" must be inside the quotes
+        self.assertIn("codex exec", cmd,
+                       f"'exec' should follow 'codex': {cmd}")
+        self.assertIn("--output-schema", cmd)
+        # The closing quote must come AFTER the extra args, not before
+        self.assertTrue(cmd.rstrip().endswith("'"),
+                        f"shell wrapper closing quote should be at the end: {cmd}")
+        # --output-schema must appear before the closing quote
+        last_quote_idx = cmd.rstrip().rfind("'")
+        schema_idx = cmd.find("--output-schema")
+        self.assertLess(schema_idx, last_quote_idx,
+                        f"--output-schema must be inside wrapper quotes: {cmd}")
