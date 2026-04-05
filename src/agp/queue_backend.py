@@ -387,19 +387,17 @@ class DeliveryTableQueueBackend:
     ) -> dict[str, int]:
         now = utc_now()
         stale_cutoff = now.timestamp() - visibility_timeout_seconds
+        stale_cutoff_db = datetime.fromtimestamp(stale_cutoff, tz=UTC)
         stale = db.scalars(
             select(QueueDeliveryRecord).where(
                 QueueDeliveryRecord.state == "delivered",
                 QueueDeliveryRecord.last_delivered_at.is_not(None),
+                QueueDeliveryRecord.last_delivered_at <= stale_cutoff_db,
             )
         ).all()
         redriven = 0
         dead_lettered = 0
         for record in stale:
-            if record.last_delivered_at is None:
-                continue
-            if record.last_delivered_at.timestamp() > stale_cutoff:
-                continue
             if record.delivery_attempt >= max_delivery_attempts:
                 record.state = "dead_lettered"
                 record.dead_lettered_at = now

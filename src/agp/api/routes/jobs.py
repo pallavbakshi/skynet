@@ -206,4 +206,5 @@ def unblock_job(job_id: str, reason: str = Query(default="operator_unblocked"), 
 def handoff_job(job_id: str, request: HandoffRequest, db: Session = Depends(get_db)) -> dict:
     source_job = _require_job(db, job_id)
     result = execute_handoff(db, source_job=source_job, targets=request.targets, message_payload=request.message, artifact_ids=request.artifact_ids)
+    db.commit()
     return _ok(result)

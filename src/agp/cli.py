@@ -2861,6 +2861,9 @@ def result(
                 or [a for a in items if a.get("role") == "exec_log"]
             )
         if not candidates:
+            job_status = str((job_data or {}).get("status") or "").strip().lower()
+            if job_status in {"cancelled", "interrupt_requested"}:
+                typer.echo("Job was cancelled/interrupted before a result was captured.", err=True)
             typer.echo(f"No output artifact found for job {job_id}", err=True)
             available = [a.get("role") for a in items]
             if available:

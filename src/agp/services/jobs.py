@@ -339,5 +339,4 @@ def execute_handoff(
         body={"handoff_id": handoff.handoff_id, "source_job_id": source_job.job_id, "source_artifact_ids": artifact_ids, "created_job_ids": child_job_ids},
         related_jobs=[(source_job.job_id, "source"), *[(cid, "child") for cid in child_job_ids]],
     )
-    db.commit()
     return {"handoff_id": handoff.handoff_id, "source_job_id": source_job.job_id, "child_job_ids": child_job_ids}

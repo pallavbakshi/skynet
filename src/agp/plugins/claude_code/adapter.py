@@ -243,14 +243,15 @@ class ClaudeCodeAdapter(AgentAdapter):
         while monotonic() < deadline:
             sleep(self.idle_poll_seconds)
             screen = _strip_ansi(host.read_visible(session))
-            gate_kind = _classify_gate(screen)
+            tail = _screen_tail(screen)
+            gate_kind = _classify_gate(tail)
             if gate_kind != GateKind.NONE:
                 if gate_kind == GateKind.FATAL:
                     raise AuthFailure(
                         "claude code requires interactive login — complete OAuth "
                         "setup in the container and re-commit the image"
                     )
-                host.send_text(session, _gate_response(screen), enter=True)
+                host.send_text(session, _gate_response(tail), enter=True)
                 gate_dismissals += 1
                 if gate_dismissals <= max_gate_dismissals:
                     deadline = max(deadline, monotonic() + 30.0)
@@ -403,7 +404,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 if new_count > accumulated_turns_above_baseline:
                     accumulated_turns_above_baseline = new_count
 
-            gate_kind = _classify_gate(screen)
+            gate_kind = _classify_gate(tail)
 
             now = monotonic()
             if changed or now - last_heartbeat_at >= heartbeat_interval:
@@ -503,7 +504,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                         "setup in the container and re-commit the image"
                     )
                 if snap != prev_screen:
-                    response = _gate_response(screen)
+                    response = _gate_response(tail)
                     _dbg({**_dbg_ctx, "action": "gate_dismiss", "gate_kind": gate_kind.name, "response": response})
                     host.send_text(session, response, enter=True)
                 prev_screen = snap

@@ -65,6 +65,11 @@ class RecoverableExecutionError(Exception):
 class PaneDied(RecoverableExecutionError):
     """Raised when the terminal pane or foreground CLI died."""
 
+    def __init__(self, message: str, *, snapshot_text: str = "", visible_text: str = "") -> None:
+        super().__init__(message)
+        self.snapshot_text = snapshot_text
+        self.visible_text = visible_text
+
 
 class ExecutionTimeout(RecoverableExecutionError):
     """Raised when execution or readiness polling timed out."""

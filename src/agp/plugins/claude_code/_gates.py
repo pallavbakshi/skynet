@@ -46,7 +46,7 @@ AUTO_GATE_PATTERNS = (
     "claude install",
     "native installer",
     "switched from npm",
-    "update available",
+    "claude code update",
 )
 
 FATAL_GATE_PATTERNS = (
@@ -83,7 +83,21 @@ def classify_gate(text: str) -> GateKind:
 
     Returns GateKind.FATAL for prompts requiring user action,
     GateKind.AUTO for auto-dismissable prompts, or GateKind.NONE.
+
+    If the screen ends with an idle prompt (❯), the TUI has moved
+    past any gate — pattern matches in the response body are ignored.
     """
+    # Gate prompts block the TUI before the ❯ prompt appears.
+    # If there's a completed turn (user prompt → response) AND the screen
+    # ends with an idle ❯ prompt, any gate-like text is response content,
+    # not a real gate.  We check for answered turns to distinguish from
+    # system-level gates (like the feedback survey) that also show ❯.
+    from agp.plugins.claude_code._classify import ends_with_prompt
+    from agp.plugins.claude_code._parse import parse_turns
+    if ends_with_prompt(text):
+        turns = parse_turns(text)
+        if any(t.response for t in turns):
+            return GateKind.NONE
     lower = text.lower()
     if any(pat in lower for pat in FATAL_GATE_PATTERNS):
         return GateKind.FATAL

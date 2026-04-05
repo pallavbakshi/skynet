@@ -1809,6 +1809,49 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         with self.assertRaises(PaneDied) as ctx:
             adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         self.assertIn("codex cli exited during execution", str(ctx.exception))
+        self.assertIn("PREVIOUS_OK", ctx.exception.snapshot_text)
+        self.assertEqual(ctx.exception.visible_text.strip(), "$")
+
+    def test_codex_pane_died_failure_result_uses_salvaged_snapshot_artifacts(self) -> None:
+        class BrokenPaneHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def snapshot(self, session):
+                raise RuntimeError("pane already gone")
+
+            def read_visible(self, session):
+                raise RuntimeError("pane already gone")
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_tmux_pane_died"})()})()
+
+        adapter = CodexAdapter()
+        host = BrokenPaneHost()
+        session = host.get_or_create_session(agent_id="agt_tmux_pane_died")
+        result = adapter.build_failure_result(
+            host=host,
+            session=session,
+            claimed={
+                "agent_id": "agt_tmux_pane_died",
+                "job": {"job_id": "job_tmux_pane_died"},
+                "run": {"run_id": "run_tmux_pane_died"},
+                "message": {"text": "review this"},
+            },
+            error=PaneDied(
+                "codex cli exited during execution",
+                snapshot_text="captured pane output\n",
+                visible_text="visible tail\n",
+            ),
+            supervisor=SupervisorStub(),
+        )
+
+        pane_artifact = next(a for a in result.artifacts if a.name == "tmux-pane.txt")
+        visible_artifact = next(a for a in result.artifacts if a.name == "tmux-visible.txt")
+        self.assertEqual(pane_artifact.content, "captured pane output\n")
+        self.assertEqual(visible_artifact.content, "visible tail\n")
 
     def test_codex_adapter_tui_ignores_stale_completed_turns_from_prior_prompt(self) -> None:
         class StalePromptHost(InProcessTerminalHost):

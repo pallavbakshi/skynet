@@ -796,20 +796,26 @@ class CodexAdapter(AgentAdapter):
         session: TerminalSession,
         error: Exception,
     ) -> list[ArtifactPayload]:
-        if not isinstance(error, ExecutionTimeout):
+        if not isinstance(error, (ExecutionTimeout, PaneDied)):
             return []
         artifacts: list[ArtifactPayload] = []
         snapshot_text = ""
-        try:
-            snapshot = host.snapshot(session)
-        except Exception:  # noqa: BLE001
-            snapshot = {}
-        else:
-            snapshot_text = _strip_ansi(str(snapshot.get("text") or snapshot.get("accumulated_text") or ""))
-        try:
-            visible = _strip_ansi(host.read_visible(session))
-        except Exception:  # noqa: BLE001
-            visible = ""
+        visible = ""
+        if isinstance(error, PaneDied):
+            snapshot_text = _strip_ansi(getattr(error, "snapshot_text", "") or "")
+            visible = _strip_ansi(getattr(error, "visible_text", "") or "")
+        if not snapshot_text:
+            try:
+                snapshot = host.snapshot(session)
+            except Exception:  # noqa: BLE001
+                snapshot = {}
+            else:
+                snapshot_text = _strip_ansi(str(snapshot.get("text") or snapshot.get("accumulated_text") or ""))
+        if not visible:
+            try:
+                visible = _strip_ansi(host.read_visible(session))
+            except Exception:  # noqa: BLE001
+                visible = ""
         pane_text = snapshot_text if snapshot_text.strip() else visible
         if pane_text.strip():
             artifacts.append(
@@ -828,6 +834,33 @@ class CodexAdapter(AgentAdapter):
                 )
             )
         return artifacts
+
+    def _build_pane_died(
+        self,
+        *,
+        host: TerminalHost,
+        session: TerminalSession,
+        message: str,
+        current_text: str = "",
+    ) -> PaneDied:
+        snapshot_text = ""
+        visible_text = ""
+        try:
+            snapshot = host.snapshot(session)
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        else:
+            snapshot_text = _strip_ansi(str(snapshot.get("text") or snapshot.get("accumulated_text") or ""))
+        try:
+            visible_text = _strip_ansi(host.read_visible(session))
+        except Exception:  # noqa: BLE001
+            visible_text = ""
+        current_text = _strip_ansi(current_text)
+        if current_text:
+            snapshot_text = current_text
+        if not visible_text and current_text:
+            visible_text = current_text
+        return PaneDied(message, snapshot_text=snapshot_text, visible_text=visible_text)
 
     def execute_run(
         self,
@@ -896,7 +929,7 @@ class CodexAdapter(AgentAdapter):
 
         health = host.health(session)
         if not health.healthy:
-            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
+            raise self._build_pane_died(host=host, session=session, message=f"session unhealthy at dispatch: {health.reason}")
 
         cursor = session.metadata.pop("restored_cursor", None) or host.create_cursor(session)
         startup_settled_event = session.metadata.get("startup_settled_event") or getattr(
@@ -1139,7 +1172,12 @@ class CodexAdapter(AgentAdapter):
                 # supports it (_get_pane_tty returns a TTY).
                 if hasattr(host, "_get_pane_tty") and host._get_pane_tty(session) is not None and not host.shell_idle(session):
                     continue
-                raise PaneDied("codex cli exited during execution")
+                raise self._build_pane_died(
+                    host=host,
+                    session=session,
+                    message="codex cli exited during execution",
+                    current_text=last_good_screen or baseline_screen or screen,
+                )
             if self._looks_like_fatal_gate(screen):
                 _logger.warning("fatal gate detected: %s", self._screen_tail(screen)[-120:])
                 raise AuthFailure(
@@ -1439,7 +1477,7 @@ class CodexAdapter(AgentAdapter):
 
         health = host.health(session)
         if not health.healthy:
-            raise PaneDied(f"session unhealthy at dispatch: {health.reason}")
+            raise self._build_pane_died(host=host, session=session, message=f"session unhealthy at dispatch: {health.reason}")
 
         # Via-file: write the task payload to a file and send a reference.
         # The marker envelope includes the reference string instead of the
@@ -1463,7 +1501,12 @@ class CodexAdapter(AgentAdapter):
             if self.health_check_interval_polls > 0 and attempt > 0 and attempt % self.health_check_interval_polls == 0:
                 h = host.health(session)
                 if not h.healthy:
-                    raise PaneDied(f"session lost during execution at poll {attempt}: {h.reason}")
+                    raise self._build_pane_died(
+                        host=host,
+                        session=session,
+                        message=f"session lost during execution at poll {attempt}: {h.reason}",
+                        current_text=read.full_text,
+                    )
 
             read = host.read_output(session, cursor)
             cursor = read.cursor

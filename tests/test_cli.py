@@ -1542,3 +1542,16 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
         # get_job should NOT be called when --role is explicit
         fake_client.get_job.assert_not_called()
+
+    @patch("agp.cli._make_client")
+    def test_result_cancelled_job_reports_interrupted_message_before_generic_missing_artifact(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.list_job_artifacts.return_value = {"items": []}
+        fake_client.get_job.return_value = {"status": "cancelled", "output_contract_json": None}
+        mock_make.return_value = self._make_ctx(fake_client)
+
+        result = runner.invoke(app, ["result", "job_123"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("Job was cancelled/interrupted before a result was captured.", result.output)
+        self.assertIn("No output artifact found for job job_123", result.output)
