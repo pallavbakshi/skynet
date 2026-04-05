@@ -1385,7 +1385,7 @@ def send(
         except UnicodeDecodeError:
             raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
         attachments.append({"name": path.name, "role": role, "content": content})
-    if task is None:
+    if task is None or task == "-":
         if sys.stdin.isatty():
             typer.echo("[..] Reading task from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
         task = sys.stdin.read().strip()
@@ -1469,7 +1469,7 @@ def reply(
             raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
         if not isinstance(parsed_output_contract, dict):
             raise typer.BadParameter("--output-contract must decode to a JSON object")
-    if task is None:
+    if task is None or task == "-":
         task = sys.stdin.read().strip()
     if not task:
         raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
