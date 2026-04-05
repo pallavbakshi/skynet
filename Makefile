@@ -408,7 +408,7 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 		AGP_CLAUDE_CODE_IDLE_POLL_SECONDS=2.0 \
 		AGP_CLAUDE_CODE_IDLE_AFTER=3 \
 		AGP_CLAUDE_CODE_IDLE_TIMEOUT_SECONDS=180.0 \
-		AGP_CLAUDE_CODE_SESSION_MODE=ephemeral) \
+		AGP_CLAUDE_CODE_SESSION_MODE=sticky) \
 	$(RUN) agp runtime-work-loop $(AGP_RUNTIME_ID) \
 		--server-url http://127.0.0.1:$(AGP_PORT) \
 		--host-kind tmux \
