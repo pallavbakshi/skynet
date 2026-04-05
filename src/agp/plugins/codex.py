@@ -127,6 +127,54 @@ def _repair_json_string(text: str) -> str:
     return repaired
 
 
+def _extract_exec_response(text: str) -> str:
+    """Extract the final model response from ``codex exec`` output.
+
+    ``codex exec`` writes tool-use traces (file reads, command outputs)
+    interleaved with model responses.  The model's final response
+    appears after a bare ``codex`` marker line.  A duplicate of the JSON
+    also appears as the very last non-empty line (clean stdout).
+
+    We try multiple strategies in order of reliability:
+    1. Find the ``codex`` marker line and return the text after it
+    2. Find the last valid JSON object near the end of output
+    3. Return a narrow tail for downstream extraction
+    """
+    stripped = _strip_ansi(text)
+    lines = stripped.splitlines()
+
+    # Strategy 1: find the last bare "codex" marker line and return
+    # the text between it and the next section/end.
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == "codex":
+            response_lines: list[str] = []
+            for j in range(i + 1, len(lines)):
+                ln = lines[j].strip()
+                if ln in ("exec", "user", "tokens used"):
+                    break
+                response_lines.append(lines[j])
+            result = "\n".join(response_lines).strip()
+            if result:
+                return result
+
+    # Strategy 2: the last non-empty line of codex exec stdout is the
+    # JSON response (duplicated from the interactive log).  Scan the
+    # last ~20 lines backwards, looking for a line that is valid JSON.
+    for i in range(len(lines) - 1, max(len(lines) - 20, -1), -1):
+        ln = lines[i].strip()
+        if not ln:
+            continue
+        if ln.startswith("{"):
+            try:
+                json.loads(ln)
+                return ln
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+    # Strategy 3: return a narrow tail for extract_trailing_json.
+    return stripped[-4096:].strip()
+
+
 def _extract_trailing_json_text(text: str) -> str | None:
     stripped = text.strip()
     if not stripped:
@@ -781,11 +829,12 @@ class CodexAdapter(AgentAdapter):
             return self._execute_run_marker(host=host, session=session, claimed=claimed, supervisor=supervisor)
         finally:
             cleanup_task_file(run_id)
-            # Clean up schema file written for --output-schema.
+            # Clean up schema + stdout files written for --output-schema.
             try:
                 import os as _os
-                schema_path = f"/tmp/agp-schemas-{_os.getuid()}/agp-schema-{run_id}.json"
-                __import__("pathlib").Path(schema_path).unlink(missing_ok=True)
+                schema_dir = f"/tmp/agp-schemas-{_os.getuid()}"
+                for fname in (f"agp-schema-{run_id}.json", f"agp-stdout-{run_id}.json"):
+                    __import__("pathlib").Path(f"{schema_dir}/{fname}").unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -867,6 +916,15 @@ class CodexAdapter(AgentAdapter):
                 json.dumps(schema_content), encoding="utf-8",
             )
 
+        # For exec mode, capture stdout to a file.  codex exec prints the
+        # JSON response to stdout and the interactive session log (tool traces,
+        # "codex" marker, "tokens used") to stderr.  tmux merges both into the
+        # pane, making it hard to extract the JSON from the scrollback.
+        # Redirecting stdout gives us a clean, reliable source.
+        exec_stdout_file = None
+        if schema_file:
+            exec_stdout_file = f"{os.path.dirname(schema_file)}/agp-stdout-{run_id}.json"
+
         if host.kind == "tmux" and self.session_mode != "sticky":
             # Ephemeral on tmux: one-shot codex invocation per job.
             if schema_file:
@@ -877,7 +935,8 @@ class CodexAdapter(AgentAdapter):
                 base_cmd = " ".join(shlex.quote(p) for p in parts)
                 cmd = (f"{base_cmd}"
                        f" --output-schema {shlex.quote(schema_file)}"
-                       f" {shlex.quote(dispatch_text)}")
+                       f" {shlex.quote(dispatch_text)}"
+                       f" > {shlex.quote(exec_stdout_file)}")
             else:
                 cmd = f"{self.cli_command} {shlex.quote(dispatch_text)}"
             host.launch_command(
@@ -977,11 +1036,18 @@ class CodexAdapter(AgentAdapter):
                 ):
                     break
                 # For exec mode (JSON contract jobs), the process exits after
-                # producing output to stdout.  The result may also be in
-                # result_file.  Either way, shell-return is expected — not
-                # a crash.  The downstream result extraction will read from
-                # scrollback or the result file.
+                # producing output to stdout.  The stdout redirect creates
+                # the file (0 bytes) before codex starts, so we must check
+                # that the file has content before concluding completion.
                 if schema_file:
+                    if exec_stdout_file:
+                        try:
+                            sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                        except Exception:
+                            sz = 0
+                        if sz > 0:
+                            break
+                        continue  # file still empty — keep polling
                     break
                 # Guard against false positives during CLI startup: the
                 # visible buffer may still show the pre-launch shell
@@ -1051,6 +1117,28 @@ class CodexAdapter(AgentAdapter):
             if tui_active and self._visible_ends_with_prompt(screen):
                 break
 
+            # Exec mode fallback: codex exec exits after producing output,
+            # returning to the shell.  The visible screen may still show
+            # exec output (no › prompt, no shell markers visible) but the
+            # foreground process is back to the shell.
+            #
+            # shell_idle alone is not enough: the > redirect truncates the
+            # stdout file before codex starts, so a premature shell_idle
+            # detection would see a 0-byte file.  Require the stdout file
+            # to be non-empty as proof that codex actually finished.
+            if schema_file and tui_active and host.shell_idle(session):
+                if exec_stdout_file:
+                    try:
+                        sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                    except Exception:
+                        sz = 0
+                    if sz > 0:
+                        break
+                    # File still empty — codex may still be running
+                    # (shell_idle false positive). Continue polling.
+                    continue
+                break
+
             # None of the checks could determine the state.  The screen is
             # stable, the agent isn't visibly working, but we can't tell if
             # it completed, is waiting for input, or is stuck.  Give it a
@@ -1090,42 +1178,103 @@ class CodexAdapter(AgentAdapter):
         # up containing transient status lines instead of the final answer.
         # Also use last_good_screen as a candidate because the TUI may exit
         # between the loop break and this read_visible call.
+        if schema_file:
+            # Exec mode: give tmux a moment to flush the final stdout line
+            # (the JSON response).  codex exec prints tool traces to stderr
+            # and the JSON result to stdout; the stdout line may not be in
+            # the scrollback yet when shell_idle fires.
+            sleep(0.5)
         visible_output = _strip_ansi(host.read_visible(session))
         read = host.read_output(session, cursor)
         raw_output = _strip_ansi(read.full_text)
+        # For exec mode, also read the full scrollback — the cursor-based
+        # delta may have missed the final JSON line.
+        full_scrollback = ""
+        if schema_file:
+            try:
+                full_scrollback = _strip_ansi(host.read_scrollback(session))
+            except Exception:
+                pass
         # Preserve the updated cursor so the next sticky run starts from
         # this point instead of creating a fresh baseline.
         session.metadata["restored_cursor"] = read.cursor
-        cleaned = _extract_codex_tui_result(
-            visible_output,
-            last_good_screen,
-            raw_output,
-            baseline_last_response=baseline_last_response,
-        )
         extraction_diag = None
-        if json_contract:
-            # Build cleaned sources for the shared pipeline.
-            # Codex-specific: include bullet-line extraction as additional sources.
-            cleaned_sources: list[tuple[str, str]] = [
-                ("cleaned", cleaned),
-            ]
-            if raw_output:
-                raw_cleaned = _clean_codex_tui_output(raw_output)
-                if raw_cleaned:
-                    cleaned_sources.append(("raw_cleaned", raw_cleaned))
-            for tag, src in [("visible", visible_output), ("last_good", last_good_screen), ("raw", raw_output)]:
+        if schema_file:
+            # Exec mode: codex exec outputs tool traces (file reads, command
+            # outputs — potentially huge diffs) followed by the JSON response.
+            # The TUI parsing pipeline (_clean_codex_tui_output) expects › / •
+            # markers that don't exist in exec mode, so it falls back to
+            # returning ALL non-noise lines including tool output.  This feeds
+            # hundreds of lines of code with { and [ to extract_trailing_json
+            # which then picks up the wrong JSON fragment.
+            #
+            # Primary source: the stdout capture file.  codex exec prints
+            # its JSON response to stdout; we redirected it to a file to
+            # avoid losing it in the tmux scrollback noise.
+            # Retry a few times — the OS may not have flushed the write yet
+            # even though the process has exited (shell_idle = True).
+            exec_stdout = ""
+            if exec_stdout_file:
+                for _attempt in range(5):
+                    try:
+                        raw = __import__("pathlib").Path(exec_stdout_file).read_text(encoding="utf-8").strip()
+                        if raw:
+                            exec_stdout = raw
+                            break
+                    except Exception:
+                        pass
+                    sleep(0.5)
+
+            # Fallback: extract from scrollback/visible using the "codex"
+            # marker line or by finding the last valid JSON near the end.
+            exec_response = _extract_exec_response(
+                full_scrollback or raw_output or visible_output,
+            )
+            cleaned_sources: list[tuple[str, str]] = []
+            # stdout capture is the most reliable source
+            if exec_stdout:
+                cleaned_sources.append(("exec_stdout", exec_stdout))
+            cleaned_sources.append(("exec_response", exec_response))
+            # Also try the narrow tail of each source
+            for tag, src in [("scrollback", full_scrollback), ("raw", raw_output), ("visible", visible_output)]:
                 if src:
-                    cleaned_sources.append((f"{tag}_tui_cleaned", _clean_codex_tui_output(src)))
-                    bullet_text = "\n".join(_collect_bullet_lines(_strip_ansi(src).splitlines()))
-                    if bullet_text:
-                        cleaned_sources.append((f"{tag}_bullets", bullet_text))
+                    cleaned_sources.append((f"{tag}_tail", src[-4096:]))
             selected, extraction_diag = select_structured_result(
                 result_file=result_file,
                 cleaned_sources=cleaned_sources,
                 claimed=claimed,
             )
-            if selected:
-                cleaned = selected
+            cleaned = selected or exec_response
+        else:
+            cleaned = _extract_codex_tui_result(
+                visible_output,
+                last_good_screen,
+                raw_output,
+                baseline_last_response=baseline_last_response,
+            )
+            if json_contract:
+                # TUI mode with output contract: build cleaned sources from
+                # TUI-parsed content for the shared extraction pipeline.
+                cleaned_sources = [
+                    ("cleaned", cleaned),
+                ]
+                if raw_output:
+                    raw_cleaned = _clean_codex_tui_output(raw_output)
+                    if raw_cleaned:
+                        cleaned_sources.append(("raw_cleaned", raw_cleaned))
+                for tag, src in [("visible", visible_output), ("last_good", last_good_screen), ("raw", raw_output)]:
+                    if src:
+                        cleaned_sources.append((f"{tag}_tui_cleaned", _clean_codex_tui_output(src)))
+                        bullet_text = "\n".join(_collect_bullet_lines(_strip_ansi(src).splitlines()))
+                        if bullet_text:
+                            cleaned_sources.append((f"{tag}_bullets", bullet_text))
+                selected, extraction_diag = select_structured_result(
+                    result_file=result_file,
+                    cleaned_sources=cleaned_sources,
+                    claimed=claimed,
+                )
+                if selected:
+                    cleaned = selected
         transcript_output = _select_codex_tui_transcript(
             visible_output,
             last_good_screen,

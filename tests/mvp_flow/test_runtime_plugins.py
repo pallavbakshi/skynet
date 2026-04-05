@@ -4523,3 +4523,197 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
                 tui_state=state,
             )
             self.assertEqual(sup.progress[0]["details"]["tui_state"], state)
+
+    def test_extract_exec_response_finds_codex_marker_json(self) -> None:
+        """_extract_exec_response should extract JSON after the 'codex' marker line."""
+        from agp.plugins.codex import _extract_exec_response
+        exec_output = (
+            "OpenAI Codex v0.117.0\n"
+            "--------\n"
+            "workdir: /Users/pb/projects/skynet\n"
+            "model: gpt-5.4\n"
+            "--------\n"
+            "user\n"
+            "Read the task file and follow it.\n"
+            "exec\n"
+            "/bin/zsh -lc \"git diff HEAD~1\"\n"
+            " succeeded in 0ms:\n"
+            "diff --git a/src/foo.py b/src/foo.py\n"
+            "--- a/src/foo.py\n"
+            "+++ b/src/foo.py\n"
+            "@@ -1,5 +1,7 @@\n"
+            " import json\n"
+            "+import logging\n"
+            " def foo():\n"
+            '     return {"key": "value"}\n'
+            "+    _logger = logging.getLogger(__name__)\n"
+            "codex\n"
+            '{"verdict":"approved","summary":"looks good","findings":[]}\n'
+            "tokens used\n"
+            "14,309\n"
+            '{"verdict":"approved","summary":"looks good","findings":[]}\n'
+        )
+        result = _extract_exec_response(exec_output)
+        self.assertEqual(
+            json.loads(result),
+            {"verdict": "approved", "summary": "looks good", "findings": []},
+        )
+
+    def test_extract_exec_response_skips_tool_output_with_braces(self) -> None:
+        """Tool output containing { and [ should not be returned as the response."""
+        from agp.plugins.codex import _extract_exec_response
+        # Simulate exec output where tool output is hundreds of lines of Python
+        tool_output_lines = []
+        for i in range(200):
+            tool_output_lines.append(f'    if data[{i}] == {{"key": {i}}}:')
+        tool_output = "\n".join(tool_output_lines)
+        exec_output = (
+            "user\n"
+            "Review the diff\n"
+            "exec\n"
+            "/bin/zsh -lc \"git diff\"\n"
+            " succeeded in 0ms:\n"
+            f"{tool_output}\n"
+            "codex\n"
+            '{"verdict":"changes_requested","summary":"found issues","findings":[]}\n'
+            "tokens used\n"
+            "60,518\n"
+            '{"verdict":"changes_requested","summary":"found issues","findings":[]}\n'
+        )
+        result = _extract_exec_response(exec_output)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["verdict"], "changes_requested")
+
+    def test_extract_exec_response_no_codex_marker_finds_last_json_line(self) -> None:
+        """When codex marker scrolled off, find JSON as last non-prompt line."""
+        from agp.plugins.codex import _extract_exec_response
+        # Simulate scrollback where 'codex' marker is missing
+        exec_output = (
+            "exec\n"
+            '/bin/zsh -lc "git diff"\n'
+            " succeeded in 0ms:\n"
+            "diff --git a/foo.py b/foo.py\n"
+            '+import logging\n'
+            '{"verdict":"approved","summary":"ok","findings":[]}\n'
+            "tokens used\n"
+            "14,309\n"
+            '{"verdict":"approved","summary":"ok","findings":[]}\n'
+            "\n"
+            "~/projects/skynet spin at 18:26:52\n"
+            "\u276f \n"
+        )
+        result = _extract_exec_response(exec_output)
+        parsed = json.loads(result)
+        self.assertEqual(parsed["verdict"], "approved")
+
+    def test_codex_exec_mode_extracts_json_not_tool_traces(self) -> None:
+        """Exec mode result extraction should find JSON response, not tool trace content."""
+
+        class TmuxExecHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._poll_count = 0
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                # Simulate exec mode output: tool traces with code, then JSON
+                tool_output = "\n".join(
+                    f'    if data[{i}] == {{"key": {i}}}:'
+                    for i in range(100)
+                )
+                exec_output = (
+                    "OpenAI Codex v0.117.0\n"
+                    "--------\n"
+                    "user\n"
+                    "Review the diff\n"
+                    "exec\n"
+                    '/bin/zsh -lc "git diff"\n'
+                    " succeeded in 0ms:\n"
+                    f"{tool_output}\n"
+                    "codex\n"
+                    '{"verdict":"approved","summary":"all good","findings":[]}\n'
+                    "tokens used\n"
+                    "14,309\n"
+                    '{"verdict":"approved","summary":"all good","findings":[]}\n'
+                )
+                self._history.setdefault(session.session_id, []).append(exec_output)
+                # Simulate the stdout redirect: write the JSON to the stdout file
+                # that the adapter created (extract from the > redirect in the command).
+                if ">" in command:
+                    stdout_path = command.split(">")[-1].strip().strip("'\"")
+                    Path(stdout_path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(stdout_path).write_text(
+                        '{"verdict":"approved","summary":"all good","findings":[]}\n',
+                        encoding="utf-8",
+                    )
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def read_visible(self, session):
+                # After a few polls, simulate shell return (exec exits)
+                self._poll_count += 1
+                if self._poll_count >= 2:
+                    return "$ "
+                return super().read_visible(session)
+
+            def _get_pane_tty(self, session):
+                return None
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_exec_json"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        expected_schema = {
+            "type": "object",
+            "required": ["verdict", "summary", "findings"],
+            "additionalProperties": False,
+            "properties": {
+                "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
+                "summary": {"type": "string"},
+                "findings": {"type": "array", "items": {"type": "object",
+                    "required": ["severity", "description", "file", "line"],
+                    "additionalProperties": False,
+                    "properties": {
+                        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+                        "description": {"type": "string"},
+                        "file": {"type": ["string", "null"]},
+                        "line": {"type": ["integer", "null"]},
+                    }}},
+            },
+        }
+        contract = {"format": "json", "json_schema": expected_schema}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxExecHost()
+        session = host.get_or_create_session(agent_id="agt_exec_json")
+
+        claimed = {
+            "agent_id": "agt_exec_json",
+            "job": {"job_id": "job_ej", "output_contract_json": contract},
+            "run": {"run_id": "run_exec_json_test"},
+            "message": {"text": "review"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        result_content = result.artifacts[-1].content
+        parsed = json.loads(result_content)
+        self.assertEqual(parsed["verdict"], "approved")
+        self.assertEqual(parsed["summary"], "all good")
