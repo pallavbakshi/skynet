@@ -4717,3 +4717,114 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         parsed = json.loads(result_content)
         self.assertEqual(parsed["verdict"], "approved")
         self.assertEqual(parsed["summary"], "all good")
+
+    def test_codex_looks_like_working_not_blocked_by_noise_filter(self) -> None:
+        """_looks_like_working must detect 'Working (' even though it's in _NOISE_PREFIXES."""
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        # Screen where "Working (" is the last meaningful line
+        screen = (
+            "\u203a Review the diff\n"
+            "\n"
+            "Working (3s \u00b7 esc to interrupt)\n"
+        )
+        self.assertTrue(adapter._looks_like_working(screen))
+
+    def test_codex_looks_like_working_with_noise_around(self) -> None:
+        """Working indicator should be found even when surrounded by noise lines."""
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        screen = (
+            "\u203a Do something\n"
+            "\n"
+            "Working (12s \u00b7 esc to interrupt)\n"
+            "Token usage: 1,234 tokens\n"
+            "\n"
+        )
+        self.assertTrue(adapter._looks_like_working(screen))
+
+    def test_codex_tui_state_reports_working(self) -> None:
+        """tui_state should report 'working' when the Working indicator is visible."""
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        screen = (
+            "\u203a Review the diff\n"
+            "\n"
+            "Working (3s \u00b7 esc to interrupt)\n"
+        )
+        # _looks_like_working should return True
+        self.assertTrue(adapter._looks_like_working(screen))
+        # And it should NOT match completed or ready (which would preempt working in the tui_state cascade)
+        self.assertFalse(adapter._looks_like_completed_turn(
+            screen, baseline_answered_turns=0, baseline_last_response=None,
+        ))
+
+    def test_codex_exec_mode_raises_on_empty_stdout_after_shell_return(self) -> None:
+        """Exec mode should raise AdapterExecutionFailed when stdout stays empty after shell returns."""
+        from agp.runtime import AdapterExecutionFailed
+
+        class TmuxExecFailHost(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self._poll_count = 0
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self._history.setdefault(session.session_id, []).append("")
+                # Create the stdout file but leave it EMPTY (simulating exec failure)
+                if ">" in command:
+                    stdout_path = command.split(">")[-1].strip().strip("'\"")
+                    Path(stdout_path).parent.mkdir(parents=True, exist_ok=True)
+                    Path(stdout_path).write_text("", encoding="utf-8")
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def read_visible(self, session):
+                self._poll_count += 1
+                if self._poll_count >= 2:
+                    return "$ "  # shell returned
+                return super().read_visible(session)
+
+            def _get_pane_tty(self, session):
+                return None
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_fail"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        expected_schema = {
+            "type": "object",
+            "required": ["result"],
+            "properties": {"result": {"type": "string"}},
+        }
+        contract = {"format": "json", "json_schema": expected_schema}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=2.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxExecFailHost()
+        session = host.get_or_create_session(agent_id="agt_exec_fail")
+
+        claimed = {
+            "agent_id": "agt_exec_fail",
+            "job": {"job_id": "job_ef", "output_contract_json": contract},
+            "run": {"run_id": "run_exec_fail_test"},
+            "message": {"text": "review"},
+        }
+
+        with self.assertRaises(AdapterExecutionFailed) as ctx:
+            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+        self.assertIn("empty", str(ctx.exception).lower())

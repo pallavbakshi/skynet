@@ -624,28 +624,28 @@ class CodexAdapter(AgentAdapter):
 
         Only scans the BOTTOM of the screen (last ~5 meaningful lines) to avoid
         false positives from response content that quotes working indicators.
+
+        Note: "Working (" is in _NOISE_PREFIXES for content extraction, but it
+        IS the primary signal here.  We check for it BEFORE noise filtering so
+        it doesn't get silently discarded.
         """
-        # Collect the last few meaningful lines from the bottom of the screen.
-        # Working indicators always appear at or near the bottom — scanning
-        # the full screen would match quoted code in response content.
-        meaningful: list[str] = []
+        meaningful = 0
         for line in reversed(text.splitlines()):
             s = line.strip()
             if not s:
                 continue
-            if _is_noise_line(line):
-                continue
-            meaningful.append(s)
-            if len(meaningful) >= 5:
-                break
-
-        for s in meaningful:
-            # "Working (3s • esc to interrupt)" is the genuine active-work
-            # indicator.
+            # Check working indicators BEFORE noise filtering — "Working ("
+            # is classified as noise for content extraction but is the exact
+            # signal this function needs to detect.
             if s.startswith("Working ("):
                 return True
             if "esc to interrupt" in s.lower():
                 return True
+            if _is_noise_line(line):
+                continue
+            meaningful += 1
+            if meaningful >= 5:
+                break
         return False
 
     @staticmethod
@@ -967,6 +967,7 @@ class CodexAdapter(AgentAdapter):
         poll_count = 0
         accumulated_turns_above_baseline = 0
         last_good_screen = ""  # last screen that had meaningful TUI content
+        exec_empty_shell_polls = 0  # consecutive polls where shell returned but stdout is 0 bytes
         while monotonic() < idle_deadline:
             poll_count += 1
             sleep(self.idle_poll_seconds)
@@ -1047,7 +1048,19 @@ class CodexAdapter(AgentAdapter):
                             sz = 0
                         if sz > 0:
                             break
-                        continue  # file still empty — keep polling
+                        # Shell returned but stdout file is empty — codex may
+                        # still be starting (> truncates first) or it failed.
+                        exec_empty_shell_polls += 1
+                        if exec_empty_shell_polls >= 5:
+                            # 5 consecutive polls (~10s) with shell back and
+                            # 0-byte stdout → exec command failed.
+                            raise AdapterExecutionFailed(
+                                "codex exec exited without producing output "
+                                "(stdout file is empty after shell returned)",
+                                transcript="",
+                                output=screen,
+                            )
+                        continue
                     break
                 # Guard against false positives during CLI startup: the
                 # visible buffer may still show the pre-launch shell
@@ -1074,6 +1087,7 @@ class CodexAdapter(AgentAdapter):
             else:
                 unchanged = 0
                 indeterminate_polls = 0
+                exec_empty_shell_polls = 0
                 tui_active = True
                 # Only extend idle deadline on actual content progress
                 # (tail changes), not on full-screen diffs from TUI
@@ -1134,8 +1148,16 @@ class CodexAdapter(AgentAdapter):
                         sz = 0
                     if sz > 0:
                         break
-                    # File still empty — codex may still be running
-                    # (shell_idle false positive). Continue polling.
+                    # Shell idle but stdout file empty — same counter as
+                    # shell_returned path to detect exec failure.
+                    exec_empty_shell_polls += 1
+                    if exec_empty_shell_polls >= 5:
+                        raise AdapterExecutionFailed(
+                            "codex exec exited without producing output "
+                            "(stdout file is empty after shell idle)",
+                            transcript="",
+                            output=screen,
+                        )
                     continue
                 break
 
