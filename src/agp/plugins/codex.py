@@ -1,10 +1,13 @@
 """Codex CLI agent adapter plugin."""
 from __future__ import annotations
 import json
+import logging
 import os
 import shlex
 from time import monotonic, sleep
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 from agp.plugins._output_contracts import (
     apply_output_contract_instruction,
@@ -923,7 +926,9 @@ class CodexAdapter(AgentAdapter):
             now = monotonic()
             # Derive semantic tui_state for structured consumption.
             tui_state = "unknown"
-            if self._looks_like_gate_prompt(screen):
+            if self._looks_like_onboarding_prompt(screen):
+                tui_state = "gate.fatal"
+            elif self._looks_like_gate_prompt(screen):
                 tui_state = "gate.auto"
             elif self._looks_like_completed_turn(
                 screen,
@@ -1056,11 +1061,9 @@ class CodexAdapter(AgentAdapter):
                 continue
             indeterminate_polls += 1
             if indeterminate_polls == 1:
-                import logging as _logging
-                _log = _logging.getLogger(__name__)
                 turns = _parse_codex_turns(screen)
                 answered = [t for t in turns if t["response"]]
-                _log.warning(
+                _logger.warning(
                     "indeterminate state entered: turns=%d answered=%d "
                     "baseline_turns=%d accumulated_scrollback=%d "
                     "tui_active=%s visible_prompt=%s tail=%r",
