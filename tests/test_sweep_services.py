@@ -10,7 +10,7 @@ from datetime import timedelta
 
 from agp.db import SessionLocal
 from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
-from agp.models import Agent, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
+from agp.models import Agent, Event, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.queue_backend import reset_queue_backend_state
 from agp.services.sweep import (
     sweep_draining_runtimes,
@@ -106,6 +106,23 @@ class SweepStaleAgentsTest(AgpTestCase):
         finally:
             session.close()
 
+    def test_stale_idle_agent_deleted_event_retains_agent_id(self) -> None:
+        from sqlalchemy import select
+        session = SessionLocal()
+        try:
+            now = utc_now()
+            ag = Agent(agent_id="agt_evt", capabilities=["python"], metadata_json={}, queue_id="agent:agt_evt", status=AgentStatus.IDLE.value, last_heartbeat_at=now - timedelta(seconds=999), created_at=now, updated_at=now)
+            session.add(ag)
+            session.commit()
+            sweep_stale_agents(session, heartbeat_grace_seconds=10)
+            evt = session.execute(
+                select(Event).where(Event.event_type == "agent.deleted", Event.agent_id == "agt_evt")
+            ).scalar_one_or_none()
+            self.assertIsNotNone(evt, "agent.deleted event should exist")
+            self.assertEqual(evt.agent_id, "agt_evt")
+        finally:
+            session.close()
+
 
 class SweepStaleRuntimesTest(AgpTestCase):
     def test_stale_runtime_goes_offline(self) -> None:
@@ -132,6 +149,13 @@ class SweepDrainingTest(AgpTestCase):
             result = sweep_stale_agents(session)
             self.assertEqual(result["deleted_drained"], 1)
             self.assertIsNone(session.get(Agent, "agt_dr"))
+            # The agent.deleted event must retain its agent_id
+            from sqlalchemy import select
+            evt = session.execute(
+                select(Event).where(Event.event_type == "agent.deleted", Event.agent_id == "agt_dr")
+            ).scalar_one_or_none()
+            self.assertIsNotNone(evt, "agent.deleted event should exist for drained agent")
+            self.assertEqual(evt.agent_id, "agt_dr")
         finally:
             session.close()
 

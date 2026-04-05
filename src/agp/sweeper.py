@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from threading import Event
 from time import sleep
 from typing import Any
+
+_logger = logging.getLogger(__name__)
 
 
 class SweeperService:
@@ -27,16 +30,20 @@ class SweeperService:
         *,
         max_iterations: int | None = None,
         stop_event: Event | None = None,
-    ) -> list[dict[str, int]]:
+    ) -> list[dict[str, Any]]:
         stop_event = stop_event or Event()
         iterations = 0
-        results: list[dict[str, int]] = []
+        results: list[dict[str, Any]] = []
         while not stop_event.is_set():
             if max_iterations is not None and iterations >= max_iterations:
                 break
             session = self._session_factory()
             try:
-                results.append(self._sweep_fn(session))
+                result = self._sweep_fn(session)
+                results.append(result)
+            except Exception as exc:
+                _logger.exception("sweep iteration failed")
+                results.append({"error": str(exc)})
             finally:
                 session.close()
             iterations += 1

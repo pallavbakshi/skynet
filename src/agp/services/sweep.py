@@ -188,11 +188,11 @@ def sweep_stale_agents(
             {"aid": agent.agent_id, "cutoff": cutoff},
         )
         if result.rowcount:
+            _nullify_agent_references(db, agent.agent_id)
             _create_event(
                 db, agent_id=agent.agent_id, event_type="agent.deleted",
                 body={"reason": "heartbeat_timeout", "grace_seconds": grace},
             )
-            _nullify_agent_references(db, agent.agent_id)
             db.expire(agent)
             deleted += 1
 
@@ -249,11 +249,11 @@ def sweep_stale_agents(
             {"aid": agent.agent_id},
         )
         if result.rowcount:
+            _nullify_agent_references(db, agent.agent_id)
             _create_event(
                 db, agent_id=agent.agent_id, event_type="agent.deleted",
                 body={"reason": "drain_complete"},
             )
-            _nullify_agent_references(db, agent.agent_id)
             db.expire(agent)
             drained += 1
 
