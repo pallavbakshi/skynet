@@ -4150,3 +4150,244 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         )
         result_log = next(a for a in result.artifacts if a.name == "result.txt")
         self.assertIn("Hi there", result_log.content)
+
+    # ── Codex ephemeral tmux output-schema tests ────────────────────────
+
+    def test_codex_ephemeral_tmux_contract_uses_exec_with_output_schema(self) -> None:
+        """For JSON contract jobs on ephemeral tmux, launch_command should use
+        'codex exec --output-schema <file>' instead of plain 'codex'."""
+
+        class TmuxCapture(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launched_commands: list[str] = []
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.launched_commands.append(command)
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex" in text:
+                    response = json.dumps({"verdict": "approved", "summary": "ok"})
+                    self._history.setdefault(session.session_id, []).append(
+                        f"\u203a task\n\u2022 {response}\n\n\u203a \n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_schema"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxCapture()
+        session = host.get_or_create_session(agent_id="agt_schema")
+
+        contract = {
+            "format": "json",
+            "json_schema": {
+                "type": "object",
+                "required": ["verdict", "summary"],
+                "properties": {
+                    "verdict": {"type": "string"},
+                    "summary": {"type": "string"},
+                },
+            },
+        }
+        claimed = {
+            "agent_id": "agt_schema",
+            "job": {"job_id": "job_schema", "output_contract_json": contract},
+            "run": {"run_id": "run_schema_test"},
+            "message": {"text": "review this code"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+        # (1) Verify 'codex exec' was used, not plain 'codex'
+        self.assertTrue(host.launched_commands, "expected at least one launch_command call")
+        cmd = host.launched_commands[-1]
+        self.assertIn("exec", cmd, f"expected 'exec' in command: {cmd}")
+        self.assertIn("--output-schema", cmd, f"expected '--output-schema' in command: {cmd}")
+
+        # (2) The schema file should contain the json_schema from the contract
+        # Extract the schema file path from the command
+        parts = shlex.split(cmd)
+        schema_idx = parts.index("--output-schema")
+        schema_path = parts[schema_idx + 1]
+        # Schema file is cleaned up in execute_run's finally block, so we verify
+        # indirectly: the path pattern must match the expected format
+        self.assertIn("agp-schema-run_schema_test", schema_path)
+
+        # (3) Result should contain the structured JSON
+        result_artifact = next(a for a in result.artifacts if a.role == "result")
+        parsed = json.loads(result_artifact.content)
+        self.assertEqual(parsed["verdict"], "approved")
+
+        # (4) Schema file should be cleaned up
+        from pathlib import Path
+        self.assertFalse(Path(schema_path).exists(), "schema file should be cleaned up after execute_run")
+
+    def test_codex_ephemeral_tmux_no_contract_uses_plain_codex(self) -> None:
+        """Without an output contract, ephemeral tmux should launch plain 'codex'
+        (no exec, no --output-schema)."""
+
+        class TmuxCapture(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.launched_commands: list[str] = []
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                self.launched_commands.append(command)
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex" in text:
+                    self._history.setdefault(session.session_id, []).append(
+                        "\u203a task\n\u2022 done\n\n\u203a \n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_no_schema"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex --full-auto",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxCapture()
+        session = host.get_or_create_session(agent_id="agt_no_schema")
+
+        claimed = {
+            "agent_id": "agt_no_schema",
+            "job": {"job_id": "job_no_schema"},
+            "run": {"run_id": "run_no_schema_test"},
+            "message": {"text": "What is 2 + 2?"},
+        }
+
+        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+        # Plain codex: no 'exec', no '--output-schema'
+        self.assertTrue(host.launched_commands, "expected at least one launch_command call")
+        cmd = host.launched_commands[-1]
+        self.assertNotIn("exec", cmd, f"plain codex should not use 'exec': {cmd}")
+        self.assertNotIn("--output-schema", cmd, f"plain codex should not use '--output-schema': {cmd}")
+        self.assertIn("codex --full-auto", cmd)
+
+    def test_codex_ephemeral_tmux_schema_file_written_with_correct_content(self) -> None:
+        """Verify the schema file contents match the job's json_schema before cleanup."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch as _patch
+
+        captured_schema_content: list[str] = []
+
+        class TmuxSchemaCapture(InProcessTerminalHost):
+            @property
+            def kind(self) -> str:
+                return "tmux"
+
+            def __init__(self) -> None:
+                super().__init__()
+
+            def reset_session(self, session):
+                return super().reset_session(session)
+
+            def launch_command(self, session, *, command, env=None, cwd=None):
+                # Read the schema file before the finally block cleans it up
+                parts = shlex.split(command)
+                if "--output-schema" in parts:
+                    idx = parts.index("--output-schema")
+                    schema_path = parts[idx + 1]
+                    content = Path(schema_path).read_text(encoding="utf-8")
+                    captured_schema_content.append(content)
+                self.send_text(session, command, enter=True)
+                return subprocess.Popen(["true"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            def send_text(self, session, text: str, *, enter: bool = True) -> None:
+                super().send_text(session, text, enter=enter)
+                if "codex" in text:
+                    response = json.dumps({"verdict": "approved", "summary": "lgtm"})
+                    self._history.setdefault(session.session_id, []).append(
+                        f"\u203a task\n\u2022 {response}\n\n\u203a \n"
+                    )
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_schema_content"})()})()
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                return {"status": "ok"}
+
+        expected_schema = {
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {"verdict": {"type": "string", "enum": ["approved", "changes_requested"]}},
+        }
+        contract = {"format": "json", "json_schema": expected_schema}
+
+        adapter = CodexAdapter(
+            tui_mode=True,
+            cli_command="codex",
+            idle_poll_seconds=0.0,
+            idle_after=2,
+            idle_timeout_seconds=1.0,
+            session_mode="ephemeral",
+        )
+        host = TmuxSchemaCapture()
+        session = host.get_or_create_session(agent_id="agt_schema_content")
+
+        claimed = {
+            "agent_id": "agt_schema_content",
+            "job": {"job_id": "job_sc", "output_contract_json": contract},
+            "run": {"run_id": "run_schema_content_test"},
+            "message": {"text": "review"},
+        }
+
+        adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
+
+        # (2) Schema file contents must match the json_schema from the contract
+        self.assertEqual(len(captured_schema_content), 1, "expected exactly one schema file write")
+        written = json.loads(captured_schema_content[0])
+        self.assertEqual(written, expected_schema)

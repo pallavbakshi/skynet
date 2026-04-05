@@ -766,6 +766,13 @@ class CodexAdapter(AgentAdapter):
             return self._execute_run_marker(host=host, session=session, claimed=claimed, supervisor=supervisor)
         finally:
             cleanup_task_file(run_id)
+            # Clean up schema file written for --output-schema.
+            try:
+                import os as _os
+                schema_path = f"/tmp/agp-schemas-{_os.getuid()}/agp-schema-{run_id}.json"
+                __import__("pathlib").Path(schema_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _execute_run_tui(
         self,
@@ -828,11 +835,39 @@ class CodexAdapter(AgentAdapter):
         task_file_content = build_task_file_content(prompt=prompt, claimed=claimed)
         task_file_path = write_task_file(run_id=run_id, content=task_file_content)
         dispatch_text = reference_string(task_file_path)
+
+        # For JSON contract jobs in ephemeral mode, write the schema to a
+        # temp file and use `codex exec --output-schema` to enforce structured
+        # output at the API level.  Appending "respond with JSON" to the prompt
+        # doesn't work — codex's system prompt overrides user-level instructions,
+        # but --output-schema sets strict JSON mode via the Responses API.
+        schema_file = None
+        if json_contract and host.kind == "tmux" and self.session_mode != "sticky":
+            import os as _os
+            schema_dir = f"/tmp/agp-schemas-{_os.getuid()}"
+            _os.makedirs(schema_dir, mode=0o700, exist_ok=True)
+            schema_file = f"{schema_dir}/agp-schema-{run_id}.json"
+            schema_content = contract.get("json_schema") or {}
+            __import__("pathlib").Path(schema_file).write_text(
+                json.dumps(schema_content), encoding="utf-8",
+            )
+
         if host.kind == "tmux" and self.session_mode != "sticky":
             # Ephemeral on tmux: one-shot codex invocation per job.
+            if schema_file:
+                # Use exec mode with --output-schema for API-level JSON enforcement.
+                # Insert "exec" after the codex binary and add --output-schema.
+                parts = shlex.split(self.cli_command)
+                parts.insert(1, "exec")
+                base_cmd = " ".join(shlex.quote(p) for p in parts)
+                cmd = (f"{base_cmd}"
+                       f" --output-schema {shlex.quote(schema_file)}"
+                       f" {shlex.quote(dispatch_text)}")
+            else:
+                cmd = f"{self.cli_command} {shlex.quote(dispatch_text)}"
             host.launch_command(
                 session,
-                command=f"{self.cli_command} {shlex.quote(dispatch_text)}",
+                command=cmd,
                 env=collect_provider_env(),
                 cwd=session.workspace_ref,
             )
@@ -908,6 +943,13 @@ class CodexAdapter(AgentAdapter):
                     baseline_answered_turns=len(baseline_turns),
                     baseline_last_response=baseline_last_response,
                 ):
+                    break
+                # For exec mode (JSON contract jobs), the process exits after
+                # producing output to stdout.  The result may also be in
+                # result_file.  Either way, shell-return is expected — not
+                # a crash.  The downstream result extraction will read from
+                # scrollback or the result file.
+                if schema_file:
                     break
                 # Guard against false positives during CLI startup: the
                 # visible buffer may still show the pre-launch shell

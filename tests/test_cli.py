@@ -531,6 +531,69 @@ class ReplyCommandTest(unittest.TestCase):
         ])
         self.assertEqual(result.exit_code, 0, result.output)
 
+    @patch("agp.cli._make_client")
+    def test_send_review_flag_applies_output_contract(self, mock_make: MagicMock) -> None:
+        """send --review should set output_contract to _REVIEW_OUTPUT_CONTRACT."""
+        from agp.cli import _REVIEW_OUTPUT_CONTRACT
+
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(app, ["send", "agent_x", "review this", "--review", "--detach"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        kwargs = fake_client.send.call_args.kwargs
+        self.assertEqual(kwargs["output_contract"], _REVIEW_OUTPUT_CONTRACT)
+        props = kwargs["output_contract"]["json_schema"]["properties"]
+        self.assertIn("verdict", props)
+        self.assertIn("findings", props)
+
+    @patch("agp.cli._make_client")
+    def test_reply_review_flag_applies_output_contract(self, mock_make: MagicMock) -> None:
+        """reply --review should set output_contract to _REVIEW_OUTPUT_CONTRACT."""
+        from agp.cli import _REVIEW_OUTPUT_CONTRACT
+
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(app, ["reply", "job_src", "review this", "--review", "--detach"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        kwargs = fake_client.send.call_args.kwargs
+        self.assertEqual(kwargs["output_contract"], _REVIEW_OUTPUT_CONTRACT)
+        props = kwargs["output_contract"]["json_schema"]["properties"]
+        self.assertIn("verdict", props)
+        self.assertIn("findings", props)
+
+    def test_send_review_and_output_contract_mutually_exclusive(self) -> None:
+        """send --review and --output-contract cannot be used together."""
+        result = runner.invoke(app, [
+            "send", "agent_x", "task",
+            "--review", "--output-contract", '{"format":"json"}',
+            "--detach",
+        ])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("mutually exclusive", result.output)
+
 
 class ReviewCommandTest(unittest.TestCase):
     @patch("agp.cli._poll_until_done")
@@ -1395,3 +1458,87 @@ class DiagnoseAgentTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["runtime"]["runtime_id"], "custom-runtime-xyz")
+
+
+class ResultArtifactPreferenceTest(unittest.TestCase):
+    """Tests for the result command's smart artifact preference logic."""
+
+    def _make_ctx(self, fake_client):
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        return ctx
+
+    @patch("agp.cli._make_client")
+    def test_result_default_prefers_transcript(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.list_job_artifacts.return_value = {
+            "items": [
+                {"artifact_id": "art_transcript", "role": "transcript_log"},
+                {"artifact_id": "art_result", "role": "result"},
+            ]
+        }
+        fake_client.get_job.return_value = {"status": "completed", "output_contract_json": None}
+        fake_client.fetch_artifact.return_value = {"content": "transcript content"}
+        mock_make.return_value = self._make_ctx(fake_client)
+
+        result = runner.invoke(app, ["result", "job_123"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.fetch_artifact.assert_called_once_with("art_transcript", content=True)
+
+    @patch("agp.cli._make_client")
+    def test_result_contract_job_prefers_result(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.list_job_artifacts.return_value = {
+            "items": [
+                {"artifact_id": "art_transcript", "role": "transcript_log"},
+                {"artifact_id": "art_result", "role": "result"},
+            ]
+        }
+        fake_client.get_job.return_value = {"status": "completed", "output_contract_json": {"format": "json"}}
+        fake_client.fetch_artifact.return_value = {"content": "result content"}
+        mock_make.return_value = self._make_ctx(fake_client)
+
+        result = runner.invoke(app, ["result", "job_123"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
+
+    @patch("agp.cli._make_client")
+    def test_result_failed_contract_prefers_failure_evidence(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.list_job_artifacts.return_value = {
+            "items": [
+                {"artifact_id": "art_failure", "role": "failure_evidence"},
+                {"artifact_id": "art_result", "role": "result"},
+                {"artifact_id": "art_transcript", "role": "transcript_log"},
+            ]
+        }
+        fake_client.get_job.return_value = {"status": "failed", "output_contract_json": {"format": "json"}}
+        fake_client.fetch_artifact.return_value = {"content": "failure details"}
+        mock_make.return_value = self._make_ctx(fake_client)
+
+        result = runner.invoke(app, ["result", "job_123"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.fetch_artifact.assert_called_once_with("art_failure", content=True)
+
+    @patch("agp.cli._make_client")
+    def test_result_explicit_role_overrides_preference(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.list_job_artifacts.return_value = {
+            "items": [
+                {"artifact_id": "art_transcript", "role": "transcript_log"},
+                {"artifact_id": "art_result", "role": "result"},
+            ]
+        }
+        fake_client.fetch_artifact.return_value = {"content": "result content"}
+        mock_make.return_value = self._make_ctx(fake_client)
+
+        result = runner.invoke(app, ["result", "job_123", "--role", "result"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
+        # get_job should NOT be called when --role is explicit
+        fake_client.get_job.assert_not_called()

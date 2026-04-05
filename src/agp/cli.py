@@ -2634,7 +2634,8 @@ _REVIEW_OUTPUT_CONTRACT: dict = {
     "format": "json",
     "json_schema": {
         "type": "object",
-        "required": ["verdict", "summary"],
+        "required": ["verdict", "summary", "findings"],
+        "additionalProperties": False,
         "properties": {
             "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
             "summary": {"type": "string"},
@@ -2642,11 +2643,13 @@ _REVIEW_OUTPUT_CONTRACT: dict = {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "required": ["severity", "description", "file", "line"],
+                    "additionalProperties": False,
                     "properties": {
                         "severity": {"type": "string", "enum": ["high", "medium", "low"]},
                         "description": {"type": "string"},
-                        "file": {"type": "string"},
-                        "line": {"type": "integer"},
+                        "file": {"type": ["string", "null"]},
+                        "line": {"type": ["integer", "null"]},
                     },
                 },
             },
