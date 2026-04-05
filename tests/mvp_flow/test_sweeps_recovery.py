@@ -581,7 +581,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=DefaultAgentAdapter(execute=execute, recover=recover),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
 
         try:
@@ -825,7 +825,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
                     client,
                     host=InProcessTerminalHost(),
                     adapter=DefaultAgentAdapter(),
-                    artifact_root=".agp-artifacts-tests",
+                    artifact_root=str(settings.artifact_root),
                 )
                 self.calls = 0
 

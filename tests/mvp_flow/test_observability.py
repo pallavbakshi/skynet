@@ -29,7 +29,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=DefaultAgentAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
         try:
             payload = worker.run_once(agent_id="agt_trace")
@@ -66,7 +66,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=DefaultAgentAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
         try:
             payload = worker.run_once(agent_id="agt_logs")
@@ -120,7 +120,7 @@ class MvpFlowObservabilityTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=DefaultAgentAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
         try:
             payload = worker.run_once(agent_id="agt_runtime_logs")

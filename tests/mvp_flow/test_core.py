@@ -518,7 +518,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             client,
             host=host,
             adapter=WaitingAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
 
         with patch("httpx.Client", FakeHeartbeatHttpClient):
@@ -654,7 +654,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             client,
             host=host,
             adapter=adapter,
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
 
         with patch("httpx.Client", FakeHeartbeatHttpClient):
@@ -1535,7 +1535,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=DefaultAgentAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
         try:
             payload = worker.run_once(agent_id="agt_runtime")
@@ -1551,7 +1551,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_runtime_worker_stages_job_attachments_into_workspace(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            artifact_store = get_artifact_store("localfs", str(settings.artifact_root))
             stored = artifact_store.write_text(
                 namespace="control-plane",
                 job_id="job_attach",
@@ -1567,7 +1567,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 runtime_client,
                 host=InProcessTerminalHost(),
                 adapter=DefaultAgentAdapter(),
-                artifact_root=".agp-artifacts-tests",
+                artifact_root=str(settings.artifact_root),
                 artifact_store=artifact_store,
             )
             session = TerminalSession(session_id="sess_attach", agent_id="agt_runtime_attach", workspace_ref=tmpdir)
@@ -1602,7 +1602,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 runtime_client,
                 host=InProcessTerminalHost(),
                 adapter=DefaultAgentAdapter(),
-                artifact_root=".agp-artifacts-tests",
+                artifact_root=str(settings.artifact_root),
                 artifact_store=NoReadArtifactStore(),
             )
             fetch_calls: list[str] = []
@@ -1641,7 +1641,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 runtime_client,
                 host=InProcessTerminalHost(),
                 adapter=DefaultAgentAdapter(),
-                artifact_root=".agp-artifacts-tests",
+                artifact_root=str(settings.artifact_root),
             )
             staged_root = Path(tmpdir) / ".agp-tmp" / "attachments" / "art_cleanup"
             staged_root.mkdir(parents=True)
@@ -1661,7 +1661,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
     def test_runtime_worker_staging_does_not_overwrite_workspace_files_with_same_basename(self) -> None:
         with TemporaryDirectory() as tmpdir:
-            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            artifact_store = get_artifact_store("localfs", str(settings.artifact_root))
             stored = artifact_store.write_text(
                 namespace="control-plane",
                 job_id="job_attach_same_name",
@@ -1679,7 +1679,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 runtime_client,
                 host=InProcessTerminalHost(),
                 adapter=DefaultAgentAdapter(),
-                artifact_root=".agp-artifacts-tests",
+                artifact_root=str(settings.artifact_root),
                 artifact_store=artifact_store,
             )
             session = TerminalSession(session_id="sess_attach_same_name", agent_id="agt_runtime_attach_same_name", workspace_ref=tmpdir)
@@ -1752,7 +1752,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 return {"job_status": "failed"}
 
         with TemporaryDirectory() as tmpdir:
-            artifact_store = get_artifact_store("localfs", ".agp-artifacts-tests")
+            artifact_store = get_artifact_store("localfs", str(settings.artifact_root))
             original_read_text = artifact_store.read_text
 
             def _raising_read_text(*, storage_ref: str) -> str | None:
@@ -1766,7 +1766,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 client,
                 host=AttachmentHost(tmpdir),
                 adapter=DefaultAgentAdapter(),
-                artifact_root=".agp-artifacts-tests",
+                artifact_root=str(settings.artifact_root),
                 artifact_store=artifact_store,
             )
             outcome = worker.run_once(agent_id="agt_stage_fail")

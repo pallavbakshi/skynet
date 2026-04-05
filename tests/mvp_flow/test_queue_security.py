@@ -673,7 +673,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             runtime_client,
             host=InProcessTerminalHost(),
             adapter=SlowAdapter(),
-            artifact_root=".agp-artifacts-tests",
+            artifact_root=str(settings.artifact_root),
         )
         holder: dict[str, object] = {}
 

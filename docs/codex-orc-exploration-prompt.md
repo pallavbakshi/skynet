@@ -81,7 +81,7 @@ grep -rn 'def send' /Users/pb/projects/skynet/src/agp/cli.py
 
 # Recent changes and test state
 git -C /Users/pb/projects/skynet log --oneline -20
-cd /Users/pb/projects/skynet && python -m pytest tests/ -x -q --ignore=tests/mvp_flow 2>&1 | tail -20
+cd /Users/pb/projects/skynet && python -m pytest tests/ -x -q --ignore=tests/mvp_flow --ignore=tests/test_mvp_flow.py 2>&1 | tail -20
 ```
 
 Look for: missing test coverage, unclear error messages, code that could be cleaner, TODO comments, inconsistencies.
