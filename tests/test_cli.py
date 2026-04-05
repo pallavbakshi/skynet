@@ -290,6 +290,73 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("task is required", result.output)
         mock_make.assert_not_called()
 
+    @patch("agp.cli._make_client")
+    def test_reply_passes_timeout_seconds_and_attachments(self, mock_make: MagicMock) -> None:
+        """reply --timeout-seconds and --attach are wired through to client.send()."""
+        import tempfile
+
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("attachment content")
+            tmp_path = f.name
+        try:
+            result = runner.invoke(app, [
+                "reply", "job_src", "fix this",
+                "--timeout-seconds", "120",
+                "--attach", f"{tmp_path}:context",
+                "--detach",
+            ])
+        finally:
+            import os
+            os.unlink(tmp_path)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        kwargs = fake_client.send.call_args.kwargs
+        self.assertEqual(kwargs["timeout_seconds"], 120)
+        self.assertEqual(len(kwargs["attachments"]), 1)
+        self.assertEqual(kwargs["attachments"][0]["role"], "context")
+
+    @patch("agp.cli._make_client")
+    def test_reply_poll_timeout_alias(self, mock_make: MagicMock) -> None:
+        """reply --poll-timeout is an alias for --timeout."""
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+        fake_client.get_job.side_effect = [
+            fake_client.get_job.return_value,
+        ]
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(app, [
+            "reply", "job_src", "follow up",
+            "--poll-timeout", "5",
+            "--detach",
+        ])
+        self.assertEqual(result.exit_code, 0, result.output)
+
 
 class ReviewCommandTest(unittest.TestCase):
     @patch("agp.cli._poll_until_done")
@@ -547,6 +614,21 @@ class ReviewResumeTest(unittest.TestCase):
         mock_poll.assert_not_called()
         # Should NOT have sent any new messages (reviewer already approved)
         fake_client.send.assert_not_called()
+
+
+    def test_review_resume_without_positional_args(self) -> None:
+        """review --resume should not require dummy positional args."""
+        # Just check it doesn't crash with a Typer parse error —
+        # it should reach the _cli_client and fail there, not at arg parsing.
+        result = runner.invoke(app, ["review", "--resume", "job_src"])
+        # Should NOT be exit code 2 (Typer usage error)
+        self.assertNotEqual(result.exit_code, 2, f"Typer rejected the args: {result.output}")
+
+    def test_review_requires_positional_args_without_resume(self) -> None:
+        """review without --resume must require job_id and reviewer_id."""
+        result = runner.invoke(app, ["review"])
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("JOB_ID is required", result.output)
 
 
 class CaptureGitDiffTest(unittest.TestCase):

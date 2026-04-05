@@ -1142,7 +1142,7 @@ def down(
             typer.echo(f"  agp down {agent_id} --force")
             raise typer.Exit(1)
 
-        # Determine mode — force for active-work agents, drain for idle
+        # Force-delete in both cases: busy agents had --force, idle agents have no work to drain.
         if agent_status in _HAS_ACTIVE_WORK:
             typer.echo(f"[..] WARNING: Agent is {agent_status.upper()}.")
             typer.echo("[..] Aborting active jobs and clearing queue...")
@@ -1445,9 +1445,11 @@ def reply(
     task: str | None = typer.Argument(None, help="Reply text to send; if omitted, read from stdin."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
-    timeout: int = typer.Option(90, help="Sync window in seconds before auto-detach (default: 90)."),
+    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="How long the CLI waits before auto-detaching (seconds). The agent keeps running after detach."),
+    timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
+    attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
 ) -> None:
     """Reply to an existing job, preserving its conversation context.
 
@@ -1462,6 +1464,7 @@ def reply(
     if nudge_target:
         metadata["nudge_target"] = nudge_target
     parsed_output_contract: dict | None = None
+    attachments: list[dict[str, str]] = []
     if output_contract is not None:
         try:
             parsed_output_contract = json.loads(output_contract)
@@ -1469,7 +1472,20 @@ def reply(
             raise typer.BadParameter(f"invalid JSON for --output-contract: {exc.msg}") from exc
         if not isinstance(parsed_output_contract, dict):
             raise typer.BadParameter("--output-contract must decode to a JSON object")
+    for item in attach or []:
+        path, role = _parse_attachment_option(item)
+        try:
+            content = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise typer.BadParameter(f"attachment not found: {path}") from None
+        except (PermissionError, OSError) as exc:
+            raise typer.BadParameter(f"cannot read attachment {path}: {exc}") from None
+        except UnicodeDecodeError:
+            raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
+        attachments.append({"name": path.name, "role": role, "content": content})
     if task is None or task == "-":
+        if sys.stdin.isatty():
+            typer.echo("[..] Reading reply from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
         task = sys.stdin.read().strip()
     if not task:
         raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
@@ -1528,6 +1544,8 @@ def reply(
                 output_contract=parsed_output_contract,
                 conversation_id=conversation_id,
                 reply_to_message_id=message_id,
+                timeout_seconds=timeout_seconds,
+                attachments=attachments,
                 idempotency_key=_cli_idempotency_key("cli-reply"),
             )
         except _httpx.HTTPStatusError as exc:
@@ -1561,8 +1579,8 @@ def reply(
 
 @app.command(name="review")
 def review_cmd(
-    job_id: str = typer.Argument(..., help="Source job ID whose result should be reviewed."),
-    reviewer_id: str = typer.Argument(..., help="Agent ID of the reviewer."),
+    job_id: str = typer.Argument(None, help="Source job ID whose result should be reviewed."),
+    reviewer_id: str = typer.Argument(None, help="Agent ID of the reviewer."),
     max_rounds: int = typer.Option(3, "--max-rounds", help="Maximum review rounds."),
     dev_id: str = typer.Option(None, "--dev", help="Agent ID of the developer (defaults to the source job's agent)."),
     prompt: str = typer.Option(
@@ -1635,6 +1653,12 @@ def review_cmd(
             idempotency_key=f"fix-{job_id}-r{round_num}-{review_attempt_id}",
         )
         return fix_result
+
+    if not resume:
+        if not job_id:
+            raise typer.BadParameter("JOB_ID is required (use --resume to resume a session)")
+        if not reviewer_id:
+            raise typer.BadParameter("REVIEWER_ID is required (use --resume to resume a session)")
 
     with _cli_client(server_url) as client:
         # ── Resume path ──────────────────────────────────────────
@@ -2635,7 +2659,7 @@ def _format_duration(seconds: float) -> str:
 def result(
     job_id: str = typer.Argument(..., help="Job ID to fetch output for."),
     server_url: str = typer.Option(None, help="CP URL."),
-    role: str = typer.Option(None, "--role", help="Artifact role to fetch (default: transcript_log, falls back to result)."),
+    role: str = typer.Option(None, "--role", help="Artifact role to fetch (default: transcript_log > result > exec_log)."),
 ) -> None:
     """Dump the clean output of a completed job.
 
@@ -2657,8 +2681,8 @@ def result(
             candidates = [a for a in items if a.get("role") == role]
         else:
             candidates = (
-                [a for a in items if a.get("role") == "result"]
-                or [a for a in items if a.get("role") == "transcript_log"]
+                [a for a in items if a.get("role") == "transcript_log"]
+                or [a for a in items if a.get("role") == "result"]
                 or [a for a in items if a.get("role") == "exec_log"]
             )
         if not candidates:
