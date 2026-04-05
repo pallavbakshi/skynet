@@ -657,6 +657,7 @@ class CodexAdapter(AgentAdapter):
         extra: dict[str, Any] | None = None,
         output_chars: int = 0,
         output_delta: str = "",
+        tui_state: str = "",
     ) -> float:
         if changed or now - last_heartbeat_at >= heartbeat_interval:
             self._emit_progress_heartbeat(
@@ -669,6 +670,7 @@ class CodexAdapter(AgentAdapter):
                 extra=extra,
                 output_chars=output_chars,
                 output_delta=output_delta,
+                tui_state=tui_state,
             )
             return now
         return last_heartbeat_at
@@ -685,6 +687,7 @@ class CodexAdapter(AgentAdapter):
         extra: dict[str, Any] | None = None,
         output_chars: int = 0,
         output_delta: str = "",
+        tui_state: str = "",
     ) -> None:
         details = {
             "adapter": self.kind,
@@ -701,10 +704,19 @@ class CodexAdapter(AgentAdapter):
         if output_delta:
             for ln in reversed(output_delta.splitlines()):
                 stripped = _strip_ansi(ln).strip()
-                if stripped:
-                    last_line = stripped[:80]
-                    break
+                if not stripped:
+                    continue
+                # Skip noise lines (status bar, token counts, etc.) so
+                # downstream consumers (e.g. agp wait) see real progress.
+                if _is_noise_line(stripped):
+                    continue
+                # A bare prompt marker is not useful progress info.
+                if stripped == _PROMPT_MARKER:
+                    continue
+                last_line = stripped[:80]
+                break
         details["last_line"] = last_line
+        details["tui_state"] = tui_state
         supervisor.emit_progress(
             claimed,
             message="runtime.progress_heartbeat",
@@ -909,6 +921,20 @@ class CodexAdapter(AgentAdapter):
             tail = self._screen_tail(screen)
             changed = bool(read.changed or snap != prev_screen or tail != prev_tail)
             now = monotonic()
+            # Derive semantic tui_state for structured consumption.
+            tui_state = "unknown"
+            if self._looks_like_gate_prompt(screen):
+                tui_state = "gate.auto"
+            elif self._looks_like_completed_turn(
+                screen,
+                baseline_answered_turns=len(baseline_turns),
+                baseline_last_response=baseline_last_response,
+            ):
+                tui_state = "completed"
+            elif self._looks_like_working(screen):
+                tui_state = "working"
+            elif self._visible_ends_with_prompt(screen):
+                tui_state = "ready"
             last_heartbeat_at = self._maybe_emit_progress_heartbeat(
                 supervisor=supervisor,
                 claimed=claimed,
@@ -925,6 +951,7 @@ class CodexAdapter(AgentAdapter):
                 },
                 output_chars=len(read.full_text),
                 output_delta=read.text,
+                tui_state=tui_state,
             )
             # Only check for shell return after the TUI has had time to
             # render.  During the first few seconds the old shell prompt
@@ -956,7 +983,7 @@ class CodexAdapter(AgentAdapter):
                 # prompt while the CLI is loading.  Use process-based
                 # detection as a tiebreaker — but only when the host
                 # supports it (_get_pane_tty returns a TTY).
-                if host._get_pane_tty(session) is not None and not host.shell_idle(session):
+                if hasattr(host, "_get_pane_tty") and host._get_pane_tty(session) is not None and not host.shell_idle(session):
                     continue
                 raise PaneDied("codex cli exited during execution")
             if self._looks_like_gate_prompt(screen):

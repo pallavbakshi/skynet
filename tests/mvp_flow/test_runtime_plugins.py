@@ -4391,3 +4391,135 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
         self.assertEqual(len(captured_schema_content), 1, "expected exactly one schema file write")
         written = json.loads(captured_schema_content[0])
         self.assertEqual(written, expected_schema)
+
+    def test_codex_tui_heartbeat_filters_noise_from_last_line(self) -> None:
+        """Codex heartbeat last_line should skip noise lines like status bar text."""
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_noise"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        session = type("S", (), {"session_id": "s1", "metadata": {}, "workspace_ref": None})()
+        sup = SupervisorStub()
+        claimed = {
+            "agent_id": "agt_noise",
+            "job": {"job_id": "job_noise"},
+            "run": {"run_id": "run_noise"},
+            "message": {"text": "explain code"},
+        }
+
+        # Token usage line should be filtered, returning the real content
+        adapter._emit_progress_heartbeat(
+            supervisor=sup,
+            claimed=claimed,
+            session=session,
+            stage="tui",
+            changed=True,
+            poll=1,
+            output_chars=100,
+            output_delta="real content\nToken usage: 500 \u00b7 context left 80%\n",
+            tui_state="working",
+        )
+        hb = sup.progress[0]["details"]
+        self.assertEqual(hb["last_line"], "real content")
+        self.assertEqual(hb["tui_state"], "working")
+
+        # Working status line should also be filtered
+        sup.progress.clear()
+        adapter._emit_progress_heartbeat(
+            supervisor=sup,
+            claimed=claimed,
+            session=session,
+            stage="tui",
+            changed=True,
+            poll=2,
+            output_chars=200,
+            output_delta="thinking about the problem\nWorking (5s \u00b7 esc to interrupt)\n",
+            tui_state="working",
+        )
+        self.assertEqual(sup.progress[0]["details"]["last_line"], "thinking about the problem")
+
+    def test_codex_tui_heartbeat_skips_bare_prompt_marker(self) -> None:
+        """Heartbeat last_line should not be a bare \u203a prompt marker."""
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_prompt"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        session = type("S", (), {"session_id": "s1", "metadata": {}, "workspace_ref": None})()
+        sup = SupervisorStub()
+        claimed = {
+            "agent_id": "agt_p",
+            "job": {"job_id": "job_p"},
+            "run": {"run_id": "run_p"},
+            "message": {"text": "test"},
+        }
+        adapter._emit_progress_heartbeat(
+            supervisor=sup,
+            claimed=claimed,
+            session=session,
+            stage="tui",
+            changed=True,
+            poll=1,
+            output_chars=10,
+            output_delta="actual content\n\u203a \n",
+            tui_state="ready",
+        )
+        self.assertEqual(sup.progress[0]["details"]["last_line"], "actual content")
+
+    def test_codex_tui_heartbeat_emits_tui_state(self) -> None:
+        """Codex TUI heartbeats should include tui_state for CLI consumption."""
+
+        class SupervisorStub:
+            def __init__(self) -> None:
+                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_state"})()})()
+                self.progress: list[dict] = []
+
+            def check_interrupt(self, claimed):
+                return None
+
+            def emit_progress(self, claimed, *, message, details=None):
+                self.progress.append({"message": message, "details": details or {}})
+                return {"status": "ok"}
+
+        adapter = CodexAdapter(tui_mode=True, cli_command="codex")
+        session = type("S", (), {"session_id": "s1", "metadata": {}, "workspace_ref": None})()
+        sup = SupervisorStub()
+        claimed = {
+            "agent_id": "agt_s",
+            "job": {"job_id": "job_s"},
+            "run": {"run_id": "run_s"},
+            "message": {"text": "test"},
+        }
+        for state in ("working", "completed", "ready", "gate.auto", ""):
+            sup.progress.clear()
+            adapter._emit_progress_heartbeat(
+                supervisor=sup,
+                claimed=claimed,
+                session=session,
+                stage="tui",
+                changed=True,
+                poll=1,
+                output_chars=10,
+                output_delta="line\n",
+                tui_state=state,
+            )
+            self.assertEqual(sup.progress[0]["details"]["tui_state"], state)
