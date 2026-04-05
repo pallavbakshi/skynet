@@ -562,6 +562,14 @@ class ClaudeCodeAdapter(AgentAdapter):
             if (
                 tui_active
                 and _ends_with_prompt(screen)
+                and not _is_working(screen)
+            ):
+                _dbg({**_dbg_ctx, "action": "completed", "path": "working_then_prompt",
+                      "elapsed": round(monotonic() - dispatch_time, 1)})
+                break
+            if (
+                tui_active
+                and _ends_with_prompt(screen)
                 and last_good_screen
                 and _is_completed_turn(
                     last_good_screen,

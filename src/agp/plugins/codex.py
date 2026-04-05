@@ -127,6 +127,18 @@ def _repair_json_string(text: str) -> str:
     return repaired
 
 
+def _looks_like_json(text: str) -> bool:
+    """Return True if text looks like valid JSON (starts with { or [)."""
+    s = text.strip()
+    if not s or s[0] not in "{[":
+        return False
+    try:
+        json.loads(s)
+        return True
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
 def _extract_exec_response(text: str) -> str:
     """Extract the final model response from ``codex exec`` output.
 
@@ -835,6 +847,34 @@ class CodexAdapter(AgentAdapter):
             )
         return artifacts
 
+    def _try_scrollback_recovery(
+        self,
+        host: TerminalHost,
+        session: TerminalSession,
+        exec_stdout_file: str,
+        *,
+        label: str = "",
+    ) -> bool:
+        """Try to recover exec JSON from scrollback when stdout file is empty.
+
+        Returns True if valid JSON was recovered and written to the stdout file.
+        """
+        try:
+            sb = _strip_ansi(host.read_scrollback(session)) if hasattr(host, "read_scrollback") else ""
+            if not sb:
+                sb = _strip_ansi(host.read_visible(session))
+            extracted = _extract_exec_response(sb)
+            if extracted and _looks_like_json(extracted):
+                _logger.info(
+                    "exec stdout empty (%s) but recovered %d bytes from scrollback",
+                    label, len(extracted),
+                )
+                __import__("pathlib").Path(exec_stdout_file).write_text(extracted)
+                return True
+        except Exception:  # noqa: BLE001
+            _logger.debug("scrollback extraction attempt failed", exc_info=True)
+        return False
+
     def _build_pane_died(
         self,
         *,
@@ -1153,7 +1193,14 @@ class CodexAdapter(AgentAdapter):
                             break
                         # Shell returned but stdout file is empty — codex may
                         # still be starting (> truncates first) or it failed.
+                        # Before counting as empty, try extracting from scrollback.
                         exec_empty_shell_polls += 1
+                        if exec_empty_shell_polls >= 3:
+                            recovered = self._try_scrollback_recovery(
+                                host, session, exec_stdout_file, label="shell_returned",
+                            )
+                            if recovered:
+                                break
                         if exec_empty_shell_polls >= 5:
                             # 5 consecutive polls (~10s) with shell back and
                             # 0-byte stdout → exec command failed.
@@ -1275,6 +1322,12 @@ class CodexAdapter(AgentAdapter):
                     # Shell idle but stdout file empty — same counter as
                     # shell_returned path to detect exec failure.
                     exec_empty_shell_polls += 1
+                    if exec_empty_shell_polls >= 3:
+                        recovered = self._try_scrollback_recovery(
+                            host, session, exec_stdout_file, label="shell_idle",
+                        )
+                        if recovered:
+                            break
                     if exec_empty_shell_polls >= 5:
                         raise AdapterExecutionFailed(
                             "codex exec exited without producing output "

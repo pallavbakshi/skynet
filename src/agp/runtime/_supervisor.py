@@ -925,10 +925,14 @@ class RuntimeSupervisor:
                 failure_result.artifacts.extend(self._failure_snapshot_payloads(session=session, error=exc))
             except Exception:  # noqa: BLE001
                 _logger.warning("Failed to collect failure snapshots for run %s", run["run_id"], exc_info=True)
-            artifacts = [
-                self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
-                for payload in failure_result.artifacts
-            ]
+            try:
+                artifacts = [
+                    self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
+                    for payload in failure_result.artifacts
+                ]
+            except Exception:  # noqa: BLE001
+                _logger.warning("Failed to write failure artifacts for run %s", run["run_id"], exc_info=True)
+                artifacts = []
             if lease_lost.is_set():
                 _append_runtime_log(
                     self.client.identity.runtime_id,

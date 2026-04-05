@@ -9,7 +9,9 @@ from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStat
 from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.services._helpers import _new_id, _queue_backend, _require_agent
 from agp.services.events import _create_event
-from agp.services.exceptions import ConflictError
+from agp.services.exceptions import BadRequestError, ConflictError
+
+_VALID_DOWN_MODES = ("drain", "force")
 
 # All non-terminal job statuses that force-down must cancel.
 _CANCELLABLE_JOB_STATUSES = [
@@ -174,6 +176,8 @@ def agent_down_service(db: Session, *, agent_id: str, mode: str) -> dict:
     mode=drain: transition to draining, sweeper deletes when queue empty.
     mode=force: cancel all work and delete the agent record immediately.
     """
+    if mode not in _VALID_DOWN_MODES:
+        raise BadRequestError(f"invalid mode {mode!r}, must be one of {_VALID_DOWN_MODES}")
     agent = _require_agent(db, agent_id)
     now = utc_now()
     previous_status = agent.status
