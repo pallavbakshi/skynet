@@ -306,12 +306,19 @@ class RuntimeSupervisor:
         restart_attempts = 0
         stop_event = stop_event or Event()
 
-        # Startup cleanup: remove stale result files from previous runs
+        # Startup cleanup: remove stale result files and task files from previous runs
         try:
             from agp.runtime._attachments import cleanup_stale_result_files
             n = cleanup_stale_result_files()
             if n:
                 _logger.info("startup cleanup: removed %d stale result files", n)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            from agp.plugins.claude_code._via_file import cleanup_stale_task_files
+            n = cleanup_stale_task_files()
+            if n:
+                _logger.info("startup cleanup: removed %d stale task files", n)
         except Exception:  # noqa: BLE001
             pass
 

@@ -31,6 +31,12 @@ from agp.plugins.claude_code._parse import (
     extract_last_response,
     parse_turns,
 )
+from agp.plugins.claude_code._via_file import (
+    build_task_file_content,
+    cleanup_task_file,
+    reference_string,
+    write_task_file,
+)
 from agp.plugins._output_contracts import (
     apply_output_contract_instruction,
     is_json_contract,
@@ -147,6 +153,36 @@ class ClaudeCodeAdapter(AgentAdapter):
             baseline_last_response=baseline_last_response,
         )
 
+    @staticmethod
+    def _resolve_attachment_paths(
+        session: TerminalSession, claimed: dict[str, Any],
+    ) -> list[dict[str, Any]] | None:
+        """Enrich attachment metadata with staged file paths (if available)."""
+        items = claimed.get("job_attachments") or []
+        if not items:
+            return None
+        from agp.runtime._attachments import staged_attachment_relative_path
+        from urllib.parse import unquote, urlparse
+        workspace = session.workspace_ref or ""
+        # Normalize file:// URIs the same way the supervisor does
+        if "://" in workspace:
+            parsed = urlparse(workspace)
+            if parsed.scheme == "file":
+                workspace = unquote(parsed.path)
+        enriched = []
+        for item in items:
+            entry = dict(item)
+            # Try to resolve the staged path from workspace
+            name = str(item.get("name", ""))
+            artifact_id = str(item.get("artifact_id", ""))
+            if workspace and name and artifact_id:
+                rel = staged_attachment_relative_path(artifact_id=artifact_id, name=name)
+                candidate = Path(workspace) / rel
+                if candidate.exists():
+                    entry["staged_path"] = str(candidate)
+            enriched.append(entry)
+        return enriched if enriched else None
+
     def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
         cleaned = _clean_claude_code_output(text)
         screen = _strip_ansi(text)
@@ -241,7 +277,13 @@ class ClaudeCodeAdapter(AgentAdapter):
         claimed: dict[str, Any],
         supervisor: "RuntimeSupervisor",
     ) -> ExecutionResult:
-        return self._execute_run_tui(host=host, session=session, claimed=claimed, supervisor=supervisor)
+        run_id = claimed["run"]["run_id"]
+        try:
+            return self._execute_run_tui(host=host, session=session, claimed=claimed, supervisor=supervisor)
+        finally:
+            # Clean up the via-file task file on all exit paths (success,
+            # timeout, pane death, indeterminate, etc.)
+            cleanup_task_file(run_id)
 
     def _execute_run_tui(
         self,
@@ -300,8 +342,23 @@ class ClaudeCodeAdapter(AgentAdapter):
             details={"adapter": self.kind, "session_id": session.session_id, "run_id": run_id},
         )
 
-        host.send_text(session, prompt, enter=True)
+        # Via-file delivery: write the full prompt + metadata to a temp file
+        # and send a short reference string to the TUI. This avoids paste
+        # buffer corruption, size limits, and special character mangling.
+        task_file_content = build_task_file_content(
+            prompt=prompt,
+            claimed=claimed,
+            attachments=self._resolve_attachment_paths(session, claimed),
+        )
+        task_file_path = write_task_file(run_id=run_id, content=task_file_content)
+        dispatch_text = reference_string(task_file_path)
+        host.send_text(session, dispatch_text, enter=True)
         _dbg = getattr(supervisor, "debug_log", None) or (lambda entry: None)
+        _dbg({"kind": "adapter_dispatch", "run_id": run_id,
+              "action": "via_file_dispatch",
+              "task_file": task_file_path,
+              "task_file_size": len(task_file_content),
+              "dispatch_text": dispatch_text})
         _dbg_ctx = {"kind": "adapter_poll", "run_id": run_id, "session_id": session.session_id}
 
         def _poll_hook() -> None:
@@ -605,11 +662,13 @@ class ClaudeCodeAdapter(AgentAdapter):
         return ExecutionResult(
             artifacts=[
                 ArtifactPayload(role="prompt", name="prompt.txt", content=prompt),
+                ArtifactPayload(role="prompt", name="task-file.md", content=task_file_content),
                 ArtifactPayload(role="transcript_log", name="transcript.txt", content=full_scrollback),
                 ArtifactPayload(role="exec_log", name="exec.txt", content=read.full_text),
                 ArtifactPayload(role="result", name="result.txt", content=cleaned),
             ],
-            summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui"},
+            summary={"adapter": self.kind, "host": host.kind, "run_id": run_id, "mode": "tui",
+                      "dispatch": "via_file"},
             diagnostics=extraction_diag.to_dict() if extraction_diag else None,
         )
 

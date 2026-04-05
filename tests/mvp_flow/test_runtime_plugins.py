@@ -438,9 +438,14 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
         result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
         sent = host.sent[-1]
-        self.assertIn("IMPORTANT: You must respond with valid JSON matching this schema:", sent)
-        self.assertIn('"required": ["status"]', sent)
-        self.assertIn("Do not include markdown fences, prose, or any text outside the JSON object.", sent)
+        # Via-file: the TUI receives a reference string, not the full prompt
+        self.assertIn("Read the file", sent)
+        self.assertIn("agp-task-run_cc_contract.md", sent)
+        # The task file artifact should contain the output contract
+        task_file_artifact = [a for a in result.artifacts if a.name == "task-file.md"]
+        self.assertEqual(len(task_file_artifact), 1)
+        self.assertIn("Output Contract", task_file_artifact[0].content)
+        self.assertIn('"required"', task_file_artifact[0].content)
         self.assertEqual(result.artifacts[-1].content, '{"status":"ok"}')
 
     def test_claude_code_contract_falls_back_to_terminal_json_when_result_file_is_invalid(self) -> None:
@@ -3167,7 +3172,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if self._phase == "bootstrap" and "task prompt" in text:
+                if self._phase == "bootstrap" and ("task prompt" in text or "Read the file" in text):
                     self._phase = "response"
                     self._history.setdefault(session.session_id, []).append(
                         "\u276f task prompt\n"
@@ -3239,7 +3244,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if self._phase == "bootstrap" and "task prompt" in text:
+                if self._phase == "bootstrap" and ("task prompt" in text or "Read the file" in text):
                     self._phase = "response"
                     self._history.setdefault(session.session_id, []).append(
                         "\u276f task prompt\n"
@@ -3306,7 +3311,8 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text: str, *, enter: bool = True) -> None:
                 super().send_text(session, text, enter=enter)
-                if self._phase == "bootstrap" and "task prompt" in text:
+                # Via-file: the adapter sends a reference string, not the raw prompt
+                if self._phase == "bootstrap" and ("task prompt" in text or "Read the file" in text):
                     self._phase = "prompt_only"
 
             def read_visible(self, session):
@@ -4021,7 +4027,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text, *, enter=True):
                 super().send_text(session, text, enter=enter)
-                if self._phase == "bootstrap" and "review the adapter" in text:
+                if self._phase == "bootstrap" and ("review the adapter" in text or "Read the file" in text):
                     self._phase = "response"
 
             def read_visible(self, session):
@@ -4098,7 +4104,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
 
             def send_text(self, session, text, *, enter=True):
                 super().send_text(session, text, enter=enter)
-                if self._phase == "bootstrap" and "hello" in text:
+                if self._phase == "bootstrap" and ("hello" in text or "Read the file" in text):
                     self._phase = "response"
 
             def read_visible(self, session):
