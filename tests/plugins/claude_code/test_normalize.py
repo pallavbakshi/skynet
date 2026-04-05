@@ -83,3 +83,68 @@ def test_screen_tail_upgrade_notification_filtered(corpus):
     tail = screen_tail(text)
     assert "claude install" not in tail.lower()
     assert "native installer" not in tail.lower()
+
+
+# ── Heartbeat last_line filtering ────────────────────────────────────
+# These test the same filtering logic the adapter uses (adapter.py:412)
+# to select last_line for progress heartbeats.
+
+
+def _pick_last_line(text: str) -> str:
+    """Replicate the adapter's last_line selection logic."""
+    for ln in reversed(text.splitlines()):
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        if is_noise_line(stripped) or is_status_continuation(stripped):
+            continue
+        return stripped[:80]
+    return ""
+
+
+def test_heartbeat_skips_status_bar():
+    text = "⏺ The answer is 4.\n⏵⏵ bypass permissions on (shift+tab to cycle)"
+    assert _pick_last_line(text) == "⏺ The answer is 4."
+
+
+def test_heartbeat_skips_token_count():
+    text = "⏺ Some response\n                     16,418 tokens"
+    assert _pick_last_line(text) == "⏺ Some response"
+
+
+def test_heartbeat_skips_separator():
+    text = "⏺ Some response\n" + "─" * 40
+    assert _pick_last_line(text) == "⏺ Some response"
+
+
+def test_heartbeat_skips_status_continuation():
+    text = "⏺ Some response\n  esc to interrupt\n  shift+tab to cycle"
+    assert _pick_last_line(text) == "⏺ Some response"
+
+
+def test_heartbeat_skips_upgrade_notification():
+    text = "⏺ Some response\nClaude Code has switched from npm to native installer."
+    assert _pick_last_line(text) == "⏺ Some response"
+
+
+def test_heartbeat_returns_thinking_line():
+    text = "⏺ Previous response\n✳ Thinking…\n⏵⏵ bypass permissions on"
+    assert _pick_last_line(text) == "✳ Thinking…"
+
+
+def test_heartbeat_returns_content_through_noise():
+    """Content line followed by multiple noise layers — still reachable."""
+    text = (
+        "❯ do something\n"
+        "⏺ Working on it...\n"
+        "─" * 40 + "\n"
+        "⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+        "  esc to interrupt\n"
+        "                     16,418 tokens\n"
+    )
+    assert _pick_last_line(text) == "⏺ Working on it..."
+
+
+def test_heartbeat_empty_when_all_noise():
+    text = "⏵⏵ bypass permissions on\n  shift+tab to cycle\n  16,418 tokens"
+    assert _pick_last_line(text) == ""

@@ -252,6 +252,76 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("Three findings need fixes", sent_task)
 
     @patch("agp.cli._make_client")
+    def test_reply_accepts_unknown_option_like_tokens_in_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            ["reply", "job_src", "Please", "investigate", "--resume", "job_123", "--detach"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(
+            fake_client.send.call_args.args[2],
+            "Please investigate --resume job_123",
+        )
+
+    @patch("agp.cli._make_client")
+    def test_reply_uses_double_dash_for_known_option_names_inside_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.get_job.return_value = {
+            "job_id": "job_src",
+            "message_id": "msg_123",
+            "conversation_id": "conv_123",
+            "target_agent_id": "agt_reply",
+        }
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            ["reply", "job_src", "--detach", "--", "Explain", "--timeout", "semantics"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[2], "Explain --timeout semantics")
+
+    @patch("agp.cli._make_client")
+    def test_reply_rejects_option_like_job_id(self, mock_make: MagicMock) -> None:
+        result = runner.invoke(app, ["reply", "--detatch", "job_src", "task"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("job_id looks like an option", result.output)
+        mock_make.assert_not_called()
+
+    @patch("agp.cli._make_client")
+    def test_reply_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
+        result = runner.invoke(app, ["reply", "job_src", "task", "--detatch"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("did you mean", result.output)
+        self.assertIn("--detach", result.output)
+        mock_make.assert_not_called()
+
+    @patch("agp.cli._make_client")
     def test_send_accepts_unquoted_multi_word_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.send.return_value = {"job_id": "job_new"}
@@ -268,6 +338,110 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         sent_task = fake_client.send.call_args.args[2]
         self.assertIn("Analyze the code", sent_task)
+
+    @patch("agp.cli._make_client")
+    def test_send_accepts_unknown_option_like_tokens_in_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            ["send", "agent_x", "Review", "this", "--resume", "job_123", "--detach"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[2], "Review this --resume job_123")
+
+    @patch("agp.cli._make_client")
+    def test_send_uses_double_dash_for_known_option_names_inside_task(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            ["send", "agent_x", "--detach", "--", "Explain", "--detach", "semantics"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[2], "Explain --detach semantics")
+
+    @patch("agp.cli._make_client")
+    def test_send_preserves_known_flags_while_absorbing_unknown_option_like_tokens(self, mock_make: MagicMock) -> None:
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            [
+                "send",
+                "agent_x",
+                "Review",
+                "--resume",
+                "job_123",
+                "--timeout-seconds",
+                "45",
+                "--detach",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[2], "Review --resume job_123")
+        self.assertEqual(fake_client.send.call_args.kwargs["timeout_seconds"], 45)
+
+    @patch("agp.cli._make_client")
+    def test_send_passes_short_flags_and_no_prefix_flags_in_task(self, mock_make: MagicMock) -> None:
+        """Short flags (-v, -xvs) and --no-* flags in task text are passed through."""
+        fake_client = MagicMock()
+        fake_client.send.return_value = {"job_id": "job_new"}
+
+        ctx = MagicMock()
+        ctx.__enter__ = MagicMock(return_value=fake_client)
+        ctx.__exit__ = MagicMock(return_value=False)
+        mock_make.return_value = ctx
+
+        result = runner.invoke(
+            app,
+            ["send", "agent_x", "run", "pytest", "-xvs", "--no-cache", "--detach"],
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        fake_client.send.assert_called_once()
+        self.assertEqual(fake_client.send.call_args.args[2], "run pytest -xvs --no-cache")
+
+    @patch("agp.cli._make_client")
+    def test_send_rejects_option_like_agent_id(self, mock_make: MagicMock) -> None:
+        result = runner.invoke(app, ["send", "--detatch", "agent_x", "task"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("agent_id looks like an option", result.output)
+        mock_make.assert_not_called()
+
+    @patch("agp.cli._make_client")
+    def test_send_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
+        result = runner.invoke(app, ["send", "agent_x", "task", "--detatch"])
+
+        self.assertEqual(result.exit_code, 2, result.output)
+        self.assertIn("did you mean", result.output)
+        self.assertIn("--detach", result.output)
+        mock_make.assert_not_called()
 
     @patch("agp.cli._make_client")
     @patch("agp.cli.sys.stdin.read", side_effect=AssertionError("stdin should not be read"))
@@ -844,6 +1018,83 @@ class PollUntilDoneTest(unittest.TestCase):
         echo_calls = [c.args[0] for c in mock_echo.call_args_list]
         stalled = [c for c in echo_calls if "stalled" in c]
         self.assertTrue(stalled, f"expected (stalled) hint, got: {echo_calls}")
+
+    # ── tui_state rendering tests ────────────────────────────────────
+
+    def _run_with_tui_state(self, tui_state: str, last_line: str = "", output_chars: int = 0) -> list[str]:
+        """Helper: run _poll_until_done with a given tui_state and return echo output lines."""
+        from datetime import datetime, timezone
+
+        now_ts = datetime.now(timezone.utc).isoformat()
+        details: dict = {"tui_state": tui_state, "output_chars": output_chars}
+        if last_line:
+            details["last_line"] = last_line
+        client = self._make_client(
+            job_sequence=[
+                {"status": "running"},
+                {"status": "running"},
+                {"status": "completed", "result": "done"},
+            ],
+            events_data={"items": [
+                {"body": {"message": "runtime.progress_heartbeat", "details": details}, "created_at": now_ts},
+            ]},
+        )
+        with patch("time.monotonic") as mock_mono, \
+             patch("time.sleep"), \
+             patch("agp.cli.typer.echo") as mock_echo:
+            mock_mono.side_effect = [0, 0, 0, 11, 11, 12]
+            _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+        return [c.args[0] for c in mock_echo.call_args_list]
+
+    def test_tui_state_gate_auto_shows_dismissing(self) -> None:
+        lines = self._run_with_tui_state("gate.auto")
+        matching = [l for l in lines if "dismissing prompt" in l]
+        self.assertTrue(matching, f"expected 'dismissing prompt' hint, got: {lines}")
+
+    def test_tui_state_gate_fatal_shows_blocked(self) -> None:
+        lines = self._run_with_tui_state("gate.fatal")
+        matching = [l for l in lines if "blocked: requires login" in l]
+        self.assertTrue(matching, f"expected 'blocked: requires login' hint, got: {lines}")
+
+    def test_tui_state_ready_shows_idle(self) -> None:
+        lines = self._run_with_tui_state("ready")
+        matching = [l for l in lines if "idle" in l]
+        self.assertTrue(matching, f"expected 'idle' hint, got: {lines}")
+
+    def test_tui_state_completed_shows_response_complete(self) -> None:
+        lines = self._run_with_tui_state("completed")
+        matching = [l for l in lines if "response complete" in l]
+        self.assertTrue(matching, f"expected 'response complete' hint, got: {lines}")
+
+    def test_tui_state_working_prefers_last_line(self) -> None:
+        lines = self._run_with_tui_state("working", last_line="✳ Thinking…")
+        matching = [l for l in lines if "Thinking" in l]
+        self.assertTrue(matching, f"expected last_line content for working state, got: {lines}")
+        # Should NOT show the literal word "working" as a label
+        label_only = [l for l in lines if "\u2014 working" in l]
+        self.assertFalse(label_only, f"working state should prefer last_line over label, got: {lines}")
+
+    def test_tui_state_working_without_last_line_falls_back(self) -> None:
+        lines = self._run_with_tui_state("working", last_line="")
+        matching = [l for l in lines if "working" in l.lower()]
+        self.assertTrue(matching, f"expected 'working' fallback, got: {lines}")
+
+    def test_tui_state_unknown_falls_through_to_last_line(self) -> None:
+        lines = self._run_with_tui_state("unknown", last_line="Running tests")
+        matching = [l for l in lines if "Running tests" in l]
+        self.assertTrue(matching, f"expected last_line fallback for unknown state, got: {lines}")
+
+    def test_no_tui_state_falls_through_to_last_line(self) -> None:
+        """Backward compat: older runtimes that don't emit tui_state."""
+        lines = self._run_with_tui_state("", last_line="Some output")
+        matching = [l for l in lines if "Some output" in l]
+        self.assertTrue(matching, f"expected last_line fallback when no tui_state, got: {lines}")
+
+    def test_status_bar_in_last_line_passes_through(self) -> None:
+        """CLI does not double-filter: if status bar text leaks past the adapter, it is shown as-is."""
+        lines = self._run_with_tui_state("", last_line="⏵⏵ bypass permissions on (shift+tab to cycle)")
+        matching = [l for l in lines if "bypass permissions" in l]
+        self.assertTrue(matching, f"CLI should pass through last_line without re-filtering, got: {lines}")
 
 
 class ClaudeCodeWorkingDetectionTest(unittest.TestCase):

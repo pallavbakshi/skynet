@@ -46,6 +46,15 @@ You don't need to quote the task. Extra words after the agent ID are joined:
 agp send <agent_id> Read the file src/main.py and find bugs
 ```
 
+If the task text contains `send`/`reply` option-looking tokens, unknown ones
+are treated as task text, but known flags for that command still need `--` to
+terminate option parsing. Near-miss typos of real flags (for example
+`--detatch`) are rejected so they don't get silently swallowed into the task:
+
+```bash
+agp send <agent_id> -- Explain how --detach differs from auto-detach
+```
+
 ### Fire-and-forget
 
 ```bash
@@ -262,6 +271,32 @@ Send a human message to an orchestrator agent's terminal:
 ```bash
 agp nudge <agent_id> "Please prioritize the auth fix"
 ```
+
+### Diagnosing slow or stalled jobs
+
+When a job appears stuck, **diagnose before attributing the stall to the agent.** Most stalls are caused by infrastructure — permission gates, TUI prompts, network delays — not agent quality.
+
+```bash
+# 1. Check what the agent is actually doing
+agp status <job_id>
+# ACTIVITY shows the semantic state: "working", "dismissing prompt",
+# "blocked: requires login", "idle", or the last content line.
+# LAST_SEEN shows heartbeat freshness — >30s suggests a real stall.
+
+# 2. Deep-dive if needed
+agp diagnose agent <agent_id>
+
+# 3. Check the raw terminal (for tmux-hosted agents)
+tmux capture-pane -t <pane_name> -p -S -50
+```
+
+**Common causes of apparent stalls:**
+- **Permission gate**: The runtime auto-dismisses these, but each one adds ~5-10s. Multiple consecutive gates (trust folder, tool approval) can look like a long stall.
+- **Status bar misread**: Text like `⏵⏵ bypass permissions on (shift+tab to cycle)` is the TUI's permission mode indicator — it is always visible and does NOT mean the agent is stuck on a prompt.
+- **Context window compaction**: Long sessions trigger compaction (`✻ Conversation compacted`) which pauses output for several seconds.
+- **Network/API latency**: The model may take 30-60s on complex queries. Check LAST_SEEN — if heartbeats are fresh, the agent is alive.
+
+**Do not conclude an agent is "unreliable" or "drifting" based solely on it not returning results in your expected time window.** Use `agp status` and `agp diagnose` to establish the actual cause first.
 
 ## Workflow Recipes
 

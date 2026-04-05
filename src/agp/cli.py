@@ -18,11 +18,24 @@ import re as _re
 import sys
 import time
 import uuid
+from difflib import get_close_matches
 from pathlib import Path
 
 import typer
 
 app = typer.Typer(help="AGP agent CLI.")
+
+_SEND_REPLY_OPTION_NAMES = {
+    "--attach",
+    "--detach",
+    "--nudge",
+    "--output-contract",
+    "--poll-timeout",
+    "--reply-to",
+    "--server-url",
+    "--timeout",
+    "--timeout-seconds",
+}
 
 
 def _require_server_extra() -> None:
@@ -80,6 +93,33 @@ def _heartbeat_age_seconds(iso_timestamp: str | None) -> float | None:
 
 def _cli_idempotency_key(prefix: str) -> str:
     return f"{prefix}-{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:12]}"
+
+
+def _validate_send_reply_target(name: str, value: str) -> None:
+    if value.startswith("-"):
+        raise typer.BadParameter(
+            f"{name} looks like an option: {value}. "
+            "If your task text starts with option-like tokens, insert -- before the task."
+        )
+
+
+def _reject_suspicious_task_options(ctx: typer.Context, *, task: str | None) -> None:
+    task_prefix = (task or "").split()
+    candidate_tokens = [*task_prefix[:1], *ctx.args]
+    for token in candidate_tokens:
+        if not token.startswith("-"):
+            continue
+        if token == "--":
+            continue
+        if token in _SEND_REPLY_OPTION_NAMES:
+            continue
+        match = get_close_matches(token, sorted(_SEND_REPLY_OPTION_NAMES), n=1, cutoff=0.75)
+        if not match:
+            continue
+        raise typer.BadParameter(
+            f"unrecognized option-like token {token!r}; did you mean {match[0]!r}? "
+            "If this is literal task text, insert -- before the task."
+        )
 
 
 def _repair_json_string(text: str) -> str:
@@ -933,9 +973,15 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
                         break
                 if progress_ev:
                     details = (progress_ev.get("body") or {}).get("details") or {}
+                    tui_state = (details.get("tui_state") or "").strip()
                     last_line = (details.get("last_line") or "").strip()
                     output_chars = details.get("output_chars")
-                    if last_line:
+                    # Prefer semantic tui_state over raw last_line
+                    if tui_state and tui_state != "unknown":
+                        hint = f" \u2014 {_HEARTBEAT_STATE_LABELS.get(tui_state, tui_state)}"
+                        if tui_state == "working" and last_line:
+                            hint = f" \u2014 {last_line[:60]}"
+                    elif last_line:
                         hint = f" \u2014 {last_line[:60]}"
                     elif output_chars:
                         hint = f" \u2014 {output_chars:,} chars output"
@@ -1335,7 +1381,13 @@ def _interrupt_job(client, job_id: str) -> None:
 # ── 1. send ──────────────────────────────────────────────────────────
 
 
-@app.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": True})
+@app.command(
+    context_settings={
+        "allow_extra_args": True,
+        "allow_interspersed_args": True,
+        "ignore_unknown_options": True,
+    }
+)
 def send(
     ctx: typer.Context,
     agent_id: str = typer.Argument(..., help="Target agent ID."),
@@ -1355,7 +1407,13 @@ def send(
     Use --detach for fire-and-forget.  Use --poll-timeout to adjust the sync window.
     Use --nudge <orc_id> to get a push notification when the task finishes.
     Task text can be passed as unquoted words after the agent ID.
+    Unknown flags in the task (e.g. --resume, --no-cache) are passed through.
+    If the task text must contain this command's own option names (--detach,
+    --timeout, etc.), insert ``--`` before the task to stop option parsing:
+    ``agp send myagent --detach -- fix the --timeout bug``
     """
+    _validate_send_reply_target("agent_id", agent_id)
+    _reject_suspicious_task_options(ctx, task=task)
     # Absorb extra positional tokens into task (unquoted multi-word support)
     if ctx.args:
         parts = [task] if task else []
@@ -1438,7 +1496,13 @@ def send(
         _print_detached(job_id, agent_id)
 
 
-@app.command(context_settings={"allow_extra_args": True, "allow_interspersed_args": True})
+@app.command(
+    context_settings={
+        "allow_extra_args": True,
+        "allow_interspersed_args": True,
+        "ignore_unknown_options": True,
+    }
+)
 def reply(
     ctx: typer.Context,
     job_id: str = typer.Argument(..., help="Source job ID to reply to."),
@@ -1454,7 +1518,13 @@ def reply(
     """Reply to an existing job, preserving its conversation context.
 
     Reply text can be passed as unquoted words after the job ID.
+    Unknown flags in the reply (e.g. --resume, --no-cache) are passed through.
+    If the reply text must contain this command's own option names (--detach,
+    --timeout, etc.), insert ``--`` before the reply to stop option parsing:
+    ``agp reply job_x --detach -- fix the --timeout bug``
     """
+    _validate_send_reply_target("job_id", job_id)
+    _reject_suspicious_task_options(ctx, task=task)
     # Absorb extra positional tokens into task (unquoted multi-word support)
     if ctx.args:
         parts = [task] if task else []
@@ -2569,6 +2639,54 @@ def _status_job(job_id: str, server_url: str | None) -> None:
         _status_job_from_data(job, client)
 
 
+_HEARTBEAT_STATE_LABELS = {
+    "gate.auto": "dismissing prompt",
+    "gate.fatal": "blocked: requires login",
+    "ready": "idle",
+    "completed": "response complete",
+    "working": "working",
+}
+
+
+def _status_show_heartbeat(job_id: str, client) -> None:
+    """Show the latest progress heartbeat for a running job."""
+    try:
+        events_data = client.get_job_events(job_id, limit=200)
+        items = events_data.get("items") or []
+        for ev in reversed(items):
+            body = ev.get("body") or {}
+            if body.get("message") != "runtime.progress_heartbeat":
+                continue
+            details = body.get("details") or {}
+            tui_state = (details.get("tui_state") or "").strip()
+            last_line = (details.get("last_line") or "").strip()
+            output_chars = details.get("output_chars")
+            label = _HEARTBEAT_STATE_LABELS.get(tui_state, tui_state) if tui_state else ""
+            activity = ""
+            if tui_state == "working" and last_line:
+                activity = last_line[:60]
+            elif label and label != "unknown":
+                activity = label
+            elif last_line:
+                activity = last_line[:60]
+            elif output_chars:
+                activity = f"{output_chars:,} chars output"
+            if activity:
+                typer.echo(f"ACTIVITY:     {activity}")
+            # Show heartbeat freshness
+            created_at = ev.get("created_at", "")
+            if created_at:
+                ev_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                age = (datetime.now(timezone.utc) - ev_time).total_seconds()
+                if age > 30:
+                    typer.echo(f"LAST_SEEN:    {int(age)}s ago (possibly stalled)")
+                else:
+                    typer.echo(f"LAST_SEEN:    {int(age)}s ago")
+            return
+    except Exception:
+        pass
+
+
 def _status_job_from_data(job: dict, client) -> None:
     retry_count = job.get("retry_count", 0)
     max_retries = job.get("max_retries", 3)
@@ -2585,6 +2703,7 @@ def _status_job_from_data(job: dict, client) -> None:
     typer.echo(f"UPDATED:      {job.get('updated_at', '?')}")
 
     if job["status"] in ("queued", "accepted", "leased", "running"):
+        _status_show_heartbeat(job_id, client)
         _print_peek_tip(job.get("target_agent_id", ""))
 
     # Show result/failure artifact if terminal

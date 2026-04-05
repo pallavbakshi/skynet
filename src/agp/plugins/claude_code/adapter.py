@@ -24,6 +24,8 @@ from agp.plugins.claude_code._gates import (
 )
 from agp.plugins.claude_code._markers import PROMPT_PREFIX
 from agp.plugins.claude_code._normalize import (
+    is_noise_line as _is_noise_line,
+    is_status_continuation as _is_status_continuation,
     normalize_screen as _normalize_screen,
     screen_tail as _screen_tail,
 )
@@ -401,6 +403,8 @@ class ClaudeCodeAdapter(AgentAdapter):
                 if new_count > accumulated_turns_above_baseline:
                     accumulated_turns_above_baseline = new_count
 
+            gate_kind = _classify_gate(screen)
+
             now = monotonic()
             if changed or now - last_heartbeat_at >= heartbeat_interval:
                 output_chars = len(read.full_text)
@@ -408,9 +412,37 @@ class ClaudeCodeAdapter(AgentAdapter):
                 if read.text:
                     for ln in reversed(read.text.splitlines()):
                         stripped = _strip_ansi(ln).strip()
-                        if stripped:
-                            last_line = stripped[:80]
-                            break
+                        if not stripped:
+                            continue
+                        # Skip status bar / noise lines — they confuse
+                        # downstream consumers (e.g. agp wait) who would
+                        # display "⏵⏵ bypass permissions on …" as if it
+                        # were meaningful progress.
+                        if _is_noise_line(stripped) or _is_status_continuation(stripped):
+                            continue
+                        last_line = stripped[:80]
+                        break
+
+                # Derive semantic TUI state for structured consumption.
+                # Gate sub-kinds let consumers distinguish auto-dismissable
+                # prompts (trust folder, tool approval) from fatal ones
+                # (OAuth login required).
+                tui_state = "unknown"
+                if gate_kind == GateKind.FATAL:
+                    tui_state = "gate.fatal"
+                elif gate_kind == GateKind.AUTO:
+                    tui_state = "gate.auto"
+                elif _is_working(screen):
+                    tui_state = "working"
+                elif _is_completed_turn(
+                    screen,
+                    baseline_answered_turns=len(baseline_turns),
+                    baseline_last_response=baseline_last_response,
+                ):
+                    tui_state = "completed"
+                elif _ends_with_prompt(screen):
+                    tui_state = "ready"
+
                 supervisor.emit_progress(
                     claimed,
                     message="runtime.progress_heartbeat",
@@ -422,6 +454,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                         "changed": changed,
                         "output_chars": output_chars,
                         "last_line": last_line,
+                        "tui_state": tui_state,
                     },
                 )
                 last_heartbeat_at = now
@@ -458,7 +491,6 @@ class ClaudeCodeAdapter(AgentAdapter):
                       "elapsed": round(monotonic() - dispatch_time, 1)})
                 raise PaneDied("claude code cli exited during execution")
 
-            gate_kind = _classify_gate(screen)
             if gate_kind != GateKind.NONE:
                 if gate_kind == GateKind.FATAL:
                     raise AuthFailure(
