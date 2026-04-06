@@ -123,14 +123,14 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, request.runtime_id)
     if runtime.health_status == HealthStatus.UNREACHABLE.value:
         raise HTTPException(status_code=409, detail="runtime is unreachable")
+    # Health degradation is distinct from scheduler state, so reject it
+    # separately before evaluating status-based availability.
     if runtime.health_status == HealthStatus.DEGRADED.value:
         raise HTTPException(status_code=409, detail="runtime is degraded")
     if runtime.status == RuntimeStatus.DRAINING.value:
         raise HTTPException(status_code=409, detail="runtime is draining")
     if runtime.status == RuntimeStatus.BUSY.value:
         raise HTTPException(status_code=409, detail="runtime is busy")
-    if runtime.status == RuntimeStatus.DEGRADED.value:
-        raise HTTPException(status_code=409, detail="runtime is degraded")
 
     # Idle polling is still a liveness signal. Refresh runtime freshness
     # before we try to claim work so the sweeper does not mark an active

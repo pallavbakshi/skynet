@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shlex
+from pathlib import Path
 from time import monotonic, sleep
 from typing import Any
 
@@ -869,7 +870,7 @@ class CodexAdapter(AgentAdapter):
                     "exec stdout empty (%s) but recovered %d bytes from scrollback",
                     label, len(extracted),
                 )
-                __import__("pathlib").Path(exec_stdout_file).write_text(extracted)
+                Path(exec_stdout_file).write_text(extracted)
                 return True
         except Exception:  # noqa: BLE001
             _logger.debug("scrollback extraction attempt failed", exc_info=True)
@@ -922,7 +923,7 @@ class CodexAdapter(AgentAdapter):
                 import os as _os
                 schema_dir = f"/tmp/agp-schemas-{_os.getuid()}"
                 for fname in (f"agp-schema-{run_id}.json", f"agp-stdout-{run_id}.json"):
-                    __import__("pathlib").Path(f"{schema_dir}/{fname}").unlink(missing_ok=True)
+                    Path(f"{schema_dir}/{fname}").unlink(missing_ok=True)
             except Exception:
                 pass
 
@@ -944,7 +945,7 @@ class CodexAdapter(AgentAdapter):
         # Pre-delete any stale file from a prior attempt so we don't read old data.
         if result_file:
             try:
-                __import__("pathlib").Path(result_file).unlink(missing_ok=True)
+                Path(result_file).unlink(missing_ok=True)
             except Exception:
                 pass
         prompt = apply_output_contract_instruction(
@@ -1000,7 +1001,7 @@ class CodexAdapter(AgentAdapter):
             _os.makedirs(schema_dir, mode=0o700, exist_ok=True)
             schema_file = f"{schema_dir}/agp-schema-{run_id}.json"
             schema_content = contract.get("json_schema") or {}
-            __import__("pathlib").Path(schema_file).write_text(
+            Path(schema_file).write_text(
                 json.dumps(schema_content), encoding="utf-8",
             )
 
@@ -1186,7 +1187,7 @@ class CodexAdapter(AgentAdapter):
                 if schema_file:
                     if exec_stdout_file:
                         try:
-                            sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                            sz = Path(exec_stdout_file).stat().st_size
                         except Exception:
                             sz = 0
                         if sz > 0:
@@ -1300,7 +1301,7 @@ class CodexAdapter(AgentAdapter):
             # scroll off the visible screen when the JSON is large.
             if exec_stdout_file:
                 try:
-                    sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                    sz = Path(exec_stdout_file).stat().st_size
                 except Exception:
                     sz = 0
                 if sz > 0:
@@ -1314,7 +1315,7 @@ class CodexAdapter(AgentAdapter):
             if schema_file and tui_active and host.shell_idle(session):
                 if exec_stdout_file:
                     try:
-                        sz = __import__("pathlib").Path(exec_stdout_file).stat().st_size
+                        sz = Path(exec_stdout_file).stat().st_size
                     except Exception:
                         sz = 0
                     if sz > 0:
@@ -1431,7 +1432,7 @@ class CodexAdapter(AgentAdapter):
             if exec_stdout_file:
                 for _attempt in range(5):
                     try:
-                        raw = __import__("pathlib").Path(exec_stdout_file).read_text(encoding="utf-8").strip()
+                        raw = Path(exec_stdout_file).read_text(encoding="utf-8").strip()
                         if raw:
                             exec_stdout = raw
                             break

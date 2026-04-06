@@ -982,13 +982,13 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
                     tui_state = (details.get("tui_state") or "").strip()
                     last_line = (details.get("last_line") or "").strip()
                     output_chars = details.get("output_chars")
-                    # Prefer semantic tui_state over raw last_line
-                    if tui_state and tui_state != "unknown":
-                        hint = f" \u2014 {_HEARTBEAT_STATE_LABELS.get(tui_state, tui_state)}"
-                        if tui_state == "working" and last_line:
-                            hint = f" \u2014 {last_line[:60]}"
-                    elif last_line:
+                    # Show last_line when available for any state — it has
+                    # the most useful info (e.g. "Read(src/agp/cli.py)").
+                    # Fall back to the semantic label when no last_line.
+                    if last_line:
                         hint = f" \u2014 {last_line[:60]}"
+                    elif tui_state and tui_state != "unknown":
+                        hint = f" \u2014 {_HEARTBEAT_STATE_LABELS.get(tui_state, tui_state)}"
                     elif output_chars:
                         hint = f" \u2014 {output_chars:,} chars output"
                     created_at = progress_ev.get("created_at", "")
@@ -1397,23 +1397,45 @@ def _interrupt_job(client, job_id: str) -> None:
 def send(
     ctx: typer.Context,
     agent_id: str = typer.Argument(..., help="Target agent ID."),
-    task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted)."),
+    task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted or '-')."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
     timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="How long the CLI waits before auto-detaching (seconds). The agent keeps running after detach."),
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
-    review: bool = typer.Option(False, "--review", help="Apply the standard review output contract (verdict + findings JSON)."),
+    review: bool = typer.Option(False, "--review", help=(
+        'Apply the standard review output contract. '
+        'The agent returns JSON: {"verdict": "approved"|"changes_requested", '
+        '"summary": "...", "findings": [{"severity": "high"|"medium"|"low", '
+        '"description": "...", "file": "...", "line": N}]}. '
+        'Filter with jq: agp result <id> | jq \'.findings[] | select(.severity == "high")\'.'
+    )),
     reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
     attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
+    via_file: str | None = typer.Option(None, "--via-file", help="Read task text from a file. Avoids shell quoting issues with complex prompts."),
 ) -> None:
     """Send a task to an agent with smart detach.
 
     Default: waits up to 90s for completion, then auto-detaches.
     Use --detach for fire-and-forget.  Use --poll-timeout to adjust the sync window.
     Use --nudge <orc_id> to get a push notification when the task finishes.
-    Task text can be passed as unquoted words after the agent ID.
+
+    Task input (in priority order):
+
+      --via-file PATH   Read the task from a file (best for complex prompts
+                        with code, shell metacharacters, or multiple lines).
+      <task> argument   Inline text after the agent ID (supports unquoted words).
+      stdin             Pipe or redirect: echo "..." | agp send agent
+                        or: agp send agent - < prompt.md
+
+    Examples:
+
+      agp send claude-dev "fix the bug in cli.py"
+      agp send claude-dev --via-file /tmp/detailed-task.md --detach
+      agp send claude-reviewer --review --via-file task.md --timeout 300
+      echo "what is 2+2?" | agp send claude-dev
+
     Unknown flags in the task (e.g. --resume, --no-cache) are passed through.
     If the task text must contain this command's own option names (--detach,
     --timeout, etc.), insert ``--`` before the task to stop option parsing:
@@ -1454,12 +1476,27 @@ def send(
         except UnicodeDecodeError:
             raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
         attachments.append({"name": path.name, "role": role, "content": content})
-    if task is None or task == "-":
+    # --via-file takes priority over inline task and stdin.
+    if via_file is not None:
+        if task and task != "-":
+            raise typer.BadParameter("cannot combine --via-file with an inline task argument")
+        fpath = Path(via_file)
+        if not fpath.is_file():
+            raise typer.BadParameter(f"--via-file: file not found: {via_file}")
+        try:
+            task = fpath.read_text(encoding="utf-8").strip()
+        except (PermissionError, OSError) as exc:
+            raise typer.BadParameter(f"--via-file: cannot read {via_file}: {exc}") from None
+        except UnicodeDecodeError:
+            raise typer.BadParameter(f"--via-file: file is not valid UTF-8: {via_file}") from None
+        if not task:
+            raise typer.BadParameter(f"--via-file: file is empty: {via_file}")
+    elif task is None or task == "-":
         if sys.stdin.isatty():
             typer.echo("[..] Reading task from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
         task = sys.stdin.read().strip()
     if not task:
-        raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
+        raise typer.BadParameter("task is required (pass as argument, --via-file, or pipe via stdin)")
 
     import httpx as _httpx
 
@@ -1525,12 +1562,20 @@ def reply(
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
-    review: bool = typer.Option(False, "--review", help="Apply the standard review output contract (verdict + findings JSON)."),
+    review: bool = typer.Option(False, "--review", help=(
+        'Apply the standard review output contract. '
+        'The agent returns JSON: {"verdict": "approved"|"changes_requested", '
+        '"summary": "...", "findings": [{"severity": "high"|"medium"|"low", '
+        '"description": "...", "file": "...", "line": N}]}. '
+        'Filter with jq: agp result <id> | jq \'.findings[] | select(.severity == "high")\'.'
+    )),
     attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
+    via_file: str | None = typer.Option(None, "--via-file", help="Read reply text from a file. Avoids shell quoting issues with complex prompts."),
 ) -> None:
     """Reply to an existing job, preserving its conversation context.
 
-    Reply text can be passed as unquoted words after the job ID.
+    Reply text can be passed as unquoted words after the job ID, via --via-file,
+    or piped through stdin.
     Unknown flags in the reply (e.g. --resume, --no-cache) are passed through.
     If the reply text must contain this command's own option names (--detach,
     --timeout, etc.), insert ``--`` before the reply to stop option parsing:
@@ -1570,12 +1615,27 @@ def reply(
         except UnicodeDecodeError:
             raise typer.BadParameter(f"attachment is not valid UTF-8: {path}") from None
         attachments.append({"name": path.name, "role": role, "content": content})
-    if task is None or task == "-":
+    # --via-file takes priority over inline task and stdin.
+    if via_file is not None:
+        if task and task != "-":
+            raise typer.BadParameter("cannot combine --via-file with an inline task argument")
+        fpath = Path(via_file)
+        if not fpath.is_file():
+            raise typer.BadParameter(f"--via-file: file not found: {via_file}")
+        try:
+            task = fpath.read_text(encoding="utf-8").strip()
+        except (PermissionError, OSError) as exc:
+            raise typer.BadParameter(f"--via-file: cannot read {via_file}: {exc}") from None
+        except UnicodeDecodeError:
+            raise typer.BadParameter(f"--via-file: file is not valid UTF-8: {via_file}") from None
+        if not task:
+            raise typer.BadParameter(f"--via-file: file is empty: {via_file}")
+    elif task is None or task == "-":
         if sys.stdin.isatty():
             typer.echo("[..] Reading reply from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
         task = sys.stdin.read().strip()
     if not task:
-        raise typer.BadParameter("task is required (pass as argument or pipe via stdin)")
+        raise typer.BadParameter("task is required (pass as argument, --via-file, or pipe via stdin)")
 
     import httpx as _httpx
 
@@ -2687,12 +2747,10 @@ def _status_show_heartbeat(job_id: str, client) -> None:
             output_chars = details.get("output_chars")
             label = _HEARTBEAT_STATE_LABELS.get(tui_state, tui_state) if tui_state else ""
             activity = ""
-            if tui_state == "working" and last_line:
+            if last_line:
                 activity = last_line[:60]
             elif label and label != "unknown":
                 activity = label
-            elif last_line:
-                activity = last_line[:60]
             elif output_chars:
                 activity = f"{output_chars:,} chars output"
             if activity:
@@ -2777,10 +2835,32 @@ def jobs(
         if not items:
             typer.echo("(no jobs)")
             return
+        # For failed jobs, fetch the failure reason from events so
+        # operators can distinguish infra failures from agent errors.
+        failure_reasons: dict[str, str] = {}
+        for j in items:
+            if j["status"] != "failed":
+                continue
+            try:
+                events_data = client.get_job_events(j["job_id"], limit=50)
+                for ev in reversed(events_data.get("items", [])):
+                    body = ev.get("body") or {}
+                    if ev.get("event_type") == "run.failed":
+                        summary = body.get("summary") or {}
+                        exc_type = summary.get("exception_type", "")
+                        if exc_type:
+                            failure_reasons[j["job_id"]] = exc_type
+                        break
+            except Exception:  # noqa: BLE001
+                pass
         for j in items:
             retry = f" retry={j['retry_count']}/{j['max_retries']}" if j.get("retry_count", 0) > 0 else ""
+            status_str = j["status"]
+            reason = failure_reasons.get(j["job_id"])
+            if reason:
+                status_str = f"failed:{reason}"
             typer.echo(
-                f"  {j['job_id']}  {j['status']:10s}  agent={j.get('target_agent_id', '?')}{retry}"
+                f"  {j['job_id']}  {status_str:30s}  agent={j.get('target_agent_id', '?')}{retry}"
             )
 
 
@@ -2837,9 +2917,9 @@ def result(
 
         if role:
             candidates = [a for a in items if a.get("role") == role]
-        elif has_output_contract and job_failed:
-            # Failed contract job: the result artifact likely has non-conforming
-            # garbage. Prefer failure_evidence, then transcript, then result.
+        elif job_failed:
+            # Failed job: show the failure reason first, fall back to transcript.
+            # This applies to both contract and non-contract jobs.
             candidates = (
                 [a for a in items if a.get("role") == "failure_evidence"]
                 or [a for a in items if a.get("role") == "transcript_log"]
@@ -2870,8 +2950,13 @@ def result(
                 typer.echo(f"Available roles: {', '.join(available)}", err=True)
             raise typer.Exit(1)
         art = candidates[-1]  # latest
-        if has_output_contract and job_failed and not role:
-            typer.echo(f"WARNING: Job failed (output contract violation). Showing {art.get('role', 'artifact')}.", err=True)
+        if job_failed and not role:
+            art_role = art.get("role", "artifact")
+            if has_output_contract:
+                typer.echo(f"WARNING: Job failed (output contract violation). Showing {art_role}.", err=True)
+            else:
+                typer.echo(f"WARNING: Job failed. Showing {art_role}.", err=True)
+            typer.echo("  Tip: use --role to select a specific artifact (e.g. --role transcript_log).", err=True)
             typer.echo("---", err=True)
         try:
             data = client.fetch_artifact(art["artifact_id"], content=True)

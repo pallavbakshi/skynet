@@ -436,16 +436,17 @@ class ClaudeCodeAdapter(AgentAdapter):
                     tui_state = "gate.fatal"
                 elif gate_kind == GateKind.AUTO:
                     tui_state = "gate.auto"
+                elif _is_working(screen):
+                    # Check working before completed for heartbeat display:
+                    # active work indicators should always show "working",
+                    # even if a completed turn is also visible on screen.
+                    tui_state = "working"
                 elif _is_completed_turn(
                     screen,
                     baseline_answered_turns=len(baseline_turns),
                     baseline_last_response=baseline_last_response,
                 ):
-                    # Check completed before working — a brief spinner
-                    # during result extraction shouldn't regress the state.
                     tui_state = "completed"
-                elif _is_working(screen):
-                    tui_state = "working"
                 elif _ends_with_prompt(screen):
                     tui_state = "ready"
 
