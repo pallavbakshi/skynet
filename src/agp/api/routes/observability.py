@@ -175,7 +175,7 @@ def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     terminal_event = first_by_type.get("job.completed") or first_by_type.get("job.failed") or first_by_type.get("job.cancelled")
     terminal_at = terminal_event.created_at if terminal_event is not None else None
     return _ok({
-        "job": _serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")),
+        "job": _serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "summary_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")),
         "runs": [_serialize(run, ("run_id", "job_id", "agent_id", "runtime_id", "attempt", "status", "started_at", "finished_at")) for run in db.scalars(select(Run).where(Run.job_id == job_id).order_by(Run.attempt.asc())).all()],
         "timeline": [{"event_id": e.event_id, "event_seq": e.event_seq, "event_type": e.event_type, "created_at": e.created_at, "run_id": e.run_id, "agent_id": e.agent_id, "runtime_id": e.runtime_id, "body": e.body_json} for e in events],
         "trace": {

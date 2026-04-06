@@ -21,6 +21,23 @@ class RuntimeIdentity:
     token: str | None = None
 
 
+class _NonClosingTransport(httpx.BaseTransport):
+    """Wraps a transport but skips close() to avoid poisoning the owner.
+
+    Used when a sibling httpx.Client shares a transport with the parent —
+    the sibling can be closed safely without shutting down the shared pool.
+    """
+
+    def __init__(self, transport: httpx.BaseTransport) -> None:
+        self._inner = transport
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self._inner.handle_request(request)
+
+    def close(self) -> None:
+        pass  # Owner is responsible for closing
+
+
 class RuntimeClient:
     """Thin runtime client over the control-plane HTTP API.
 
@@ -60,6 +77,46 @@ class RuntimeClient:
     def _log(self, entry: dict[str, Any]) -> None:
         if self._log_fn is not None:
             self._log_fn(self.identity.runtime_id, entry)
+
+    def create_sibling_client(self, *, timeout: float = 10.0) -> httpx.Client:
+        """Create an independent httpx.Client sharing this client's transport.
+
+        Used by the heartbeat thread to avoid blocking the main thread's
+        connection pool while still preserving the injected transport
+        (critical for tests using FastAPI TestClient).
+
+        If this client was constructed with an injected httpx.Client, the
+        sibling reuses its transport/pool.  Otherwise, a fresh client is
+        created with the same base_url and auth headers.
+        """
+        headers: dict[str, str] = {}
+        if self.identity.token:
+            headers["Authorization"] = f"Bearer {self.identity.token}"
+        if not self._owns_client:
+            # Injected client — share the transport so tests work correctly.
+            # Wrap in _NonClosingTransport so sibling.close() doesn't poison
+            # the parent's transport.
+            transport = getattr(self._client, "_transport", None)
+            base_url = str(getattr(self._client, "_base_url", self.identity.server_url.rstrip("/")))
+            if transport is None:
+                # httpx internals changed; fall back to independent client
+                return httpx.Client(
+                    base_url=self.identity.server_url.rstrip("/"),
+                    timeout=timeout,
+                    headers=headers,
+                )
+            return httpx.Client(
+                transport=_NonClosingTransport(transport),
+                base_url=base_url,
+                timeout=timeout,
+                headers=headers,
+            )
+        # Self-owned client — create a separate connection pool
+        return httpx.Client(
+            base_url=self.identity.server_url.rstrip("/"),
+            timeout=timeout,
+            headers=headers,
+        )
 
     def close(self) -> None:
         if self._owns_client:
@@ -393,3 +450,4 @@ class RuntimeClient:
         payload = response.json()["data"]
         self._log({"kind": "runtime_client", "action": "submit_peek_result", "request_id": request_id})
         return payload
+

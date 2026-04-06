@@ -6,9 +6,6 @@ Operational commands still exist here as hidden compatibility shims so
 older scripts keep working, but the intended operator entrypoint is the
 ``skyops`` CLI.
 
-All server-side imports are deferred to command bodies so that
-``pip install agp`` (without ``[server]``) can still import
-``agp.client`` without pulling in uvicorn/sqlalchemy/pydantic-settings.
 """
 
 import json
@@ -27,7 +24,7 @@ app = typer.Typer(help="AGP agent CLI.")
 
 _SEND_REPLY_OPTION_NAMES = {
     "--attach",
-    "--detach",
+    "--fire-and-forget",
     "--nudge",
     "--output-contract",
     "--poll-timeout",
@@ -37,18 +34,6 @@ _SEND_REPLY_OPTION_NAMES = {
     "--timeout-seconds",
 }
 
-
-def _require_server_extra() -> None:
-    try:
-        import fastapi  # noqa: F401
-        import sqlalchemy  # noqa: F401
-    except ImportError:
-        typer.echo(
-            "This command requires server dependencies.\n"
-            "Install with: pip install 'agp[server]'",
-            err=True,
-        )
-        raise typer.Exit(1)
 
 
 def _connectable_host(host: str) -> str:
@@ -475,7 +460,7 @@ def _capture_git_diff(*, include_untracked: bool = False) -> tuple[str | None, s
 @app.command(hidden=True)
 def initdb() -> None:
     """Initialize or migrate the database schema."""
-    _require_server_extra()
+
 
     from agp.db import init_db
 
@@ -486,7 +471,7 @@ def initdb() -> None:
 @app.command(name="db-status", hidden=True)
 def db_status() -> None:
     """Show current schema version and pending migrations."""
-    _require_server_extra()
+
 
     from agp.migrations import schema_status
 
@@ -503,7 +488,7 @@ def db_status() -> None:
 @app.command(name="db-migrate", hidden=True)
 def db_migrate() -> None:
     """Apply pending schema migrations."""
-    _require_server_extra()
+
 
     from agp.migrations import apply_migrations
 
@@ -522,7 +507,7 @@ def serve(
     port: int = typer.Option(None, help="Bind port (default: AGP_PORT or 7860)."),
 ) -> None:
     """Run the AGP control plane API server."""
-    _require_server_extra()
+
 
     import uvicorn
     from agp.config import settings
@@ -573,7 +558,7 @@ def runtime_work_loop(
     log_level: str = typer.Option("WARNING", help="Python log level (DEBUG, INFO, WARNING, ERROR)."),
 ) -> None:
     """Continuously claim and execute jobs until stopped or iteration bound is hit."""
-    _require_server_extra()
+
     if isinstance(log_level, str):
         level = getattr(logging, log_level.upper(), logging.WARNING)
         # Scope to agp loggers only — avoid flooding stderr with httpcore/httpx transport noise
@@ -700,7 +685,7 @@ def sweep_loop(
     max_iterations: int | None = None,
 ) -> None:
     """Continuously expire stale leases on a fixed interval."""
-    _require_server_extra()
+
 
     from agp.control_plane import sweep_expired_leases
     from agp.db import SessionLocal
@@ -722,7 +707,7 @@ def sweep_runtimes_loop(
     stale_timeout_seconds: int = typer.Option(None, help="Override AGP_RUNTIME_STALE_TIMEOUT_SECONDS."),
 ) -> None:
     """Continuously mark stale runtimes offline and detach or degrade bound agents."""
-    _require_server_extra()
+
 
     from agp.config import settings
     from agp.control_plane import sweep_stale_runtimes
@@ -846,6 +831,20 @@ def _print_job_result(job: dict, client) -> None:
     if retry_count > 0:
         typer.echo(f"RETRIES:      {retry_count}/{max_retries}")
 
+    # Print meta from summary if available
+    summary = job.get("summary_json") or job.get("summary") or {}
+    if isinstance(summary, dict) and summary.get("model"):
+        meta_parts = [summary["model"]]
+        if summary.get("effort"):
+            meta_parts.append(summary["effort"])
+        if summary.get("tokens"):
+            meta_parts.append(f"{summary['tokens']:,} tokens")
+        if summary.get("context_pct"):
+            meta_parts.append(f"{summary['context_pct']}% context")
+        if summary.get("elapsed"):
+            meta_parts.append(f"{summary['elapsed']:.1f}s")
+        typer.echo(f"META:         {' · '.join(meta_parts)}")
+
     # Print result artifact content
     if job.get("result_artifact_id"):
         try:
@@ -897,19 +896,25 @@ def _print_detached(job_id: str, agent_id: str) -> None:
     typer.echo(f"AGENT:        {agent_id}")
     typer.echo(f"STATUS:       IN_PROGRESS")
     typer.echo("")
-    typer.echo("Notice: The CLI has detached to free your terminal.")
-    typer.echo(f"- To peek at live output:    agp peek {agent_id}")
-    typer.echo(f"- To check status manually:  agp status {job_id}")
-    typer.echo(f"- To wait synchronously:     agp wait {job_id}")
-    typer.echo(f"- To fetch result later:     agp result {job_id}")
+    typer.echo(f"Task still running.  Get result when done:")
+    typer.echo(f"  agp wait {job_id}")
+    typer.echo(f"  agp peek {agent_id}        # live terminal view")
+    typer.echo(f"  agp status {job_id}        # check job status")
+    typer.echo(f"  agp result {job_id}        # fetch result once done")
 
 
-def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0):
-    """Poll job until terminal or timeout.  Returns (job_dict, timed_out)."""
+def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0, *, job_created_at: float | None = None):
+    """Poll job until terminal or timeout.  Returns (job_dict, timed_out).
+
+    If *job_created_at* is given (monotonic-equivalent offset in seconds
+    since job start), the elapsed counter shows total time since job
+    creation rather than time since this call.
+    """
     import time
     from datetime import datetime, timezone
 
     start = time.monotonic()
+    elapsed_offset = job_created_at or 0.0
     deadline = start + timeout
     last_heartbeat = start
     next_peek_tip_at = 30  # first tip at 30s, then decaying frequency
@@ -921,7 +926,7 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
 
         now = time.monotonic()
         if now - last_heartbeat >= heartbeat_interval:
-            elapsed = int(now - start)
+            elapsed = int(now - start + elapsed_offset)
             # Show queued status when agent hasn't claimed the job yet
             if job["status"] in ("queued", "accepted"):
                 typer.echo(f"[..] Queued, waiting for agent... ({elapsed}s elapsed)")
@@ -943,15 +948,13 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
                     tui_state = (details.get("tui_state") or "").strip()
                     last_line = (details.get("last_line") or "").strip()
                     output_chars = details.get("output_chars")
-                    # Show last_line when available for any state — it has
-                    # the most useful info (e.g. "Read(src/agp/cli.py)").
-                    # Fall back to the semantic label when no last_line.
-                    if last_line:
-                        hint = f" \u2014 {last_line[:60]}"
-                    elif tui_state and tui_state != "unknown":
-                        hint = f" \u2014 {_HEARTBEAT_STATE_LABELS.get(tui_state, tui_state)}"
-                    elif output_chars:
-                        hint = f" \u2014 {output_chars:,} chars output"
+                    activity = _heartbeat_activity_hint(
+                        tui_state=tui_state,
+                        last_line=last_line,
+                        output_chars=output_chars,
+                    )
+                    if activity:
+                        hint = f" \u2014 {activity}"
                     created_at = progress_ev.get("created_at", "")
                     if created_at:
                         ev_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
@@ -1366,10 +1369,10 @@ def send(
     agent_id: str = typer.Argument(..., help="Target agent ID."),
     task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted or '-')."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
-    detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
-    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="How long the CLI waits before auto-detaching (seconds). The agent keeps running after detach."),
+    fire_and_forget: bool = typer.Option(False, "--fire-and-forget", help="Return immediately after dispatch — no sync window."),
+    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before exiting. The agent keeps running in the background."),
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
-    nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
+    nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (useful with --fire-and-forget)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     review: bool = typer.Option(False, "--review", help=(
         'Apply the standard review output contract. '
@@ -1381,11 +1384,17 @@ def send(
     reply_to: str | None = typer.Option(None, "--reply-to", help="Parent message ID for a multi-turn reply."),
     attach: list[str] = typer.Option(None, "--attach", help="Attach a text file as <path>:<role>. Repeatable."),
     via_file: str | None = typer.Option(None, "--via-file", help="Read task text from a file. Avoids shell quoting issues with complex prompts."),
+    context_from: str | None = typer.Option(None, "--context-from", help="Prepend the result of a previous job as context. Pass a job ID."),
 ) -> None:
-    """Send a task to an agent with smart detach.
+    """Send a task to an agent.
 
-    Default: waits up to 90s for completion, then auto-detaches.
-    Use --detach for fire-and-forget.  Use --poll-timeout to adjust the sync window.
+    By default the CLI waits up to 90 seconds for the agent to finish.
+    If the agent is still working after that window, the CLI exits and
+    the agent keeps running in the background — use ``agp wait <job_id>``
+    to pick it back up.
+
+    Use --fire-and-forget to skip the wait entirely and return immediately.
+    Use --poll-timeout to change how long the CLI waits (e.g. --poll-timeout 300).
     Use --nudge <orc_id> to get a push notification when the task finishes.
 
     Task input (in priority order):
@@ -1396,20 +1405,26 @@ def send(
       stdin             Pipe or redirect: echo "..." | agp send agent
                         or: agp send agent - < prompt.md
 
-    While waiting, use `agp peek <agent_id>` in another terminal to see
+    While waiting, use ``agp peek <agent_id>`` in another terminal to see
     what the agent is doing in real time.
 
     Examples:
 
       agp send claude-dev "fix the bug in cli.py"
-      agp send claude-dev --via-file /tmp/detailed-task.md --detach
-      agp send claude-reviewer --review --via-file task.md --timeout 300
+      agp send claude-dev --via-file /tmp/task.md --fire-and-forget
+      agp send claude-reviewer --review --via-file task.md --poll-timeout 300
       echo "what is 2+2?" | agp send claude-dev
 
+      # Fan-out pattern: dispatch to multiple agents, then collect results
+      agp send claude-dev --fire-and-forget "review src/cli.py"
+      agp send codex-dev  --fire-and-forget "review src/cli.py"
+      agp wait <job_id_1> <job_id_2>
+
     Unknown flags in the task (e.g. --resume, --no-cache) are passed through.
-    If the task text must contain this command's own option names (--detach,
-    --timeout, etc.), insert ``--`` before the task to stop option parsing:
-    ``agp send myagent --detach -- fix the --timeout bug``
+    If the task text must contain this command's own option names
+    (--fire-and-forget, --timeout, etc.), insert ``--`` before the task
+    to stop option parsing:
+    ``agp send myagent -- fix the --timeout bug``
     """
     _validate_send_reply_target("agent_id", agent_id)
     _reject_suspicious_task_options(ctx, task=task)
@@ -1418,6 +1433,10 @@ def send(
         parts = [task] if task else []
         parts.extend(ctx.args)
         task = " ".join(parts)
+    # Normalize: strip whitespace so "   " is treated as empty (stdin and
+    # --via-file paths already strip).
+    if task is not None and task != "-":
+        task = task.strip() or None
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
@@ -1450,7 +1469,7 @@ def send(
     if via_file is not None:
         if task and task != "-":
             raise typer.BadParameter("cannot combine --via-file with an inline task argument")
-        fpath = Path(via_file)
+        fpath = Path(via_file).resolve()
         if not fpath.is_file():
             raise typer.BadParameter(f"--via-file: file not found: {via_file}")
         try:
@@ -1461,6 +1480,9 @@ def send(
             raise typer.BadParameter(f"--via-file: file is not valid UTF-8: {via_file}") from None
         if not task:
             raise typer.BadParameter(f"--via-file: file is empty: {via_file}")
+        # Store resolved path so the adapter can pass it to so.send(file=...)
+        # instead of writing a second copy.
+        metadata["via_file"] = str(fpath)
     elif task is None or task == "-":
         if sys.stdin.isatty():
             typer.echo("[..] Reading task from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
@@ -1471,6 +1493,21 @@ def send(
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
+        # Prepend context from a previous job result if requested
+        if context_from:
+            try:
+                prev_job = client.get_job(context_from)
+                art_id = prev_job.get("result_artifact_id")
+                if art_id:
+                    art_data = client.fetch_artifact(art_id, content=True)
+                    context_text = art_data.get("content", "")
+                    if context_text:
+                        task = f"<context>\n{context_text}\n</context>\n\n{task}"
+                else:
+                    typer.echo(f"[warn] job {context_from} has no result artifact", err=True)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(f"[warn] --context-from: {_format_http_error(exc)}", err=True)
+
         typer.echo(f"[..] Dispatching to {agent_id}...")
         try:
             result = client.send(
@@ -1488,8 +1525,8 @@ def send(
             raise typer.Exit(1)
         job_id = result["job_id"]
 
-        # Fire-and-forget
-        if detach:
+        # --fire-and-forget: return immediately after dispatch
+        if fire_and_forget:
             _print_detached(job_id, agent_id)
             return
 
@@ -1515,6 +1552,18 @@ def send(
         _print_detached(job_id, agent_id)
 
 
+# `run` is an alias for `send` — many users reach for `agp run` first.
+app.command(
+    name="run",
+    hidden=True,
+    context_settings={
+        "allow_extra_args": True,
+        "allow_interspersed_args": True,
+        "ignore_unknown_options": True,
+    },
+)(send)
+
+
 @app.command(
     context_settings={
         "allow_extra_args": True,
@@ -1527,10 +1576,10 @@ def reply(
     job_id: str = typer.Argument(..., help="Source job ID to reply to."),
     task: str | None = typer.Argument(None, help="Reply text to send; if omitted, read from stdin."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
-    detach: bool = typer.Option(False, "--detach", help="Fire and forget — skip the sync window."),
-    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="How long the CLI waits before auto-detaching (seconds). The agent keeps running after detach."),
+    fire_and_forget: bool = typer.Option(False, "--fire-and-forget", help="Return immediately after dispatch — no sync window."),
+    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before exiting. The agent keeps running in the background."),
     timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
-    nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (for detached tasks)."),
+    nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (useful with --fire-and-forget)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     review: bool = typer.Option(False, "--review", help=(
         'Apply the standard review output contract. '
@@ -1544,16 +1593,27 @@ def reply(
 ) -> None:
     """Reply to an existing job, preserving its conversation context.
 
+    Continues the agent's conversation from where the previous job left off.
     Reply text can be passed as unquoted words after the job ID, via --via-file,
     or piped through stdin.
 
-    While waiting, use `agp peek <agent_id>` in another terminal to see
+    Like ``send``, the CLI waits up to 90 seconds for completion, then exits.
+    Use --fire-and-forget to return immediately.
+
+    While waiting, use ``agp peek <agent_id>`` in another terminal to see
     what the agent is doing in real time.
 
+    Examples:
+
+      agp reply job_abc123 "now refactor the error handling too"
+      agp reply job_abc123 --via-file /tmp/followup.md
+      agp reply job_abc123 --fire-and-forget "apply the suggested fixes"
+
     Unknown flags in the reply (e.g. --resume, --no-cache) are passed through.
-    If the reply text must contain this command's own option names (--detach,
-    --timeout, etc.), insert ``--`` before the reply to stop option parsing:
-    ``agp reply job_x --detach -- fix the --timeout bug``
+    If the reply text must contain this command's own option names
+    (--fire-and-forget, --timeout, etc.), insert ``--`` before the reply
+    to stop option parsing:
+    ``agp reply job_x -- fix the --timeout bug``
     """
     _validate_send_reply_target("job_id", job_id)
     _reject_suspicious_task_options(ctx, task=task)
@@ -1562,6 +1622,9 @@ def reply(
         parts = [task] if task else []
         parts.extend(ctx.args)
         task = " ".join(parts)
+    # Normalize: strip whitespace so "   " is treated as empty.
+    if task is not None and task != "-":
+        task = task.strip() or None
     metadata: dict = {"kind": "cli"}
     if nudge_target:
         metadata["nudge_target"] = nudge_target
@@ -1593,7 +1656,7 @@ def reply(
     if via_file is not None:
         if task and task != "-":
             raise typer.BadParameter("cannot combine --via-file with an inline task argument")
-        fpath = Path(via_file)
+        fpath = Path(via_file).resolve()
         if not fpath.is_file():
             raise typer.BadParameter(f"--via-file: file not found: {via_file}")
         try:
@@ -1604,6 +1667,7 @@ def reply(
             raise typer.BadParameter(f"--via-file: file is not valid UTF-8: {via_file}") from None
         if not task:
             raise typer.BadParameter(f"--via-file: file is empty: {via_file}")
+        metadata["via_file"] = str(fpath)
     elif task is None or task == "-":
         if sys.stdin.isatty():
             typer.echo("[..] Reading reply from stdin (Ctrl-D to end, Ctrl-C to cancel)...")
@@ -1674,7 +1738,8 @@ def reply(
             raise typer.Exit(1)
         new_job_id = result["job_id"]
 
-        if detach:
+        # --fire-and-forget: return immediately after dispatch
+        if fire_and_forget:
             _print_detached(new_job_id, agent_id)
             return
 
@@ -2432,56 +2497,116 @@ def diagnose_cmd(
 
 @app.command(name="wait")
 def wait_cmd(
-    job_id: str = typer.Argument(..., help="Job ID to re-attach to."),
+    job_ids: list[str] = typer.Argument(..., help="One or more job IDs to wait on."),
     server_url: str = typer.Option(None, help="CP URL."),
-    timeout: int = typer.Option(300, help="Wait timeout in seconds (default: 300)."),
+    timeout: int = typer.Option(300, "--poll-timeout", "--timeout", help="Wait timeout in seconds (default: 300)."),
 ) -> None:
     """Re-attach to a running job and wait for its result.
 
-    While waiting, use `agp peek <agent_id>` in another terminal to
+    Accepts one or more job IDs.  When multiple IDs are given, waits for
+    each sequentially and prints each result as it arrives.
+
+    While waiting, use ``agp peek <agent_id>`` in another terminal to
     inspect what the agent is doing.
+
+    Examples:
+
+      agp wait job_abc123
+      agp wait job_abc123 job_def456 job_ghi789
+      agp wait job_abc123 --poll-timeout 600
     """
     import httpx as _httpx
 
+    had_failure = False
+
     with _cli_client(server_url) as client:
-        # Quick check — maybe it already finished
-        try:
-            job = client.get_job(job_id)
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
-        if job["status"] in ("completed", "failed", "cancelled"):
-            _print_job_result(job, client)
-            if job["status"] == "failed":
-                raise typer.Exit(1)
-            return
+        for idx, job_id in enumerate(job_ids):
+            # Quick check — maybe it already finished
+            try:
+                job = client.get_job(job_id)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                had_failure = True
+                continue
+            if job["status"] in ("completed", "failed", "cancelled"):
+                _print_job_result(job, client)
+                if job["status"] == "failed":
+                    had_failure = True
+                continue
 
-        agent_id = job.get("target_agent_id", "?")
-        typer.echo(f"[..] Re-attaching to {job_id} (agent={agent_id})...")
-        _print_peek_tip(agent_id)
-        try:
-            job, timed_out = _poll_until_done(client, job_id, timeout)
-        except KeyboardInterrupt:
-            _print_detached(job_id, agent_id)
-            raise typer.Exit(0)
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
+            agent_id = job.get("target_agent_id", "?")
+            typer.echo(f"[..] Re-attaching to {job_id} (agent={agent_id})...")
+            _print_peek_tip(agent_id)
+            # Compute elapsed time since job creation so the timer is continuous
+            job_age: float = 0.0
+            try:
+                from datetime import datetime, timezone
+                created_raw = job.get("created_at")
+                if created_raw:
+                    created = created_raw if isinstance(created_raw, datetime) else datetime.fromisoformat(str(created_raw))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    job_age = (datetime.now(timezone.utc) - created).total_seconds()
+            except Exception:
+                pass
+            try:
+                job, timed_out = _poll_until_done(client, job_id, timeout, job_created_at=job_age)
+            except KeyboardInterrupt:
+                import time
+                remaining = job_ids[idx + 1:]
+                all_ids = [job_id] + remaining
+                typer.echo("", err=True)
+                typer.echo(f"Detached {len(all_ids)} job(s) (still running in background):", err=True)
+                for jid in all_ids:
+                    typer.echo(f"  agp wait {jid}", err=True)
+                typer.echo(f"\nCtrl+C again within 2s to stop all jobs.", err=True)
+                try:
+                    time.sleep(2)
+                except KeyboardInterrupt:
+                    typer.echo(f"\nStopping {len(all_ids)} job(s)...", err=True)
+                    for jid in all_ids:
+                        try:
+                            client.interrupt(jid)
+                            typer.echo(f"  {jid} — interrupted", err=True)
+                        except Exception:
+                            typer.echo(f"  {jid} — could not interrupt", err=True)
+                raise typer.Exit(0)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                had_failure = True
+                continue
 
-        if not timed_out:
-            _print_job_result(job, client)
-            if job["status"] == "failed":
-                raise typer.Exit(1)
-            return
+            if not timed_out:
+                _print_job_result(job, client)
+                if job["status"] == "failed":
+                    had_failure = True
+                continue
 
-        typer.echo("timeout — job still running", err=True)
-        typer.echo(f"Check again with:   agp status {job_id}")
-        if agent_id and agent_id != "?":
-            typer.echo(f"Peek at terminal:   agp peek {agent_id}")
+            typer.echo(f"timeout — {job_id} still running", err=True)
+            typer.echo(f"Check again with:   agp status {job_id}")
+            if agent_id and agent_id != "?":
+                typer.echo(f"Peek at terminal:   agp peek {agent_id}")
+            had_failure = True
+
+    if had_failure:
         raise typer.Exit(1)
 
 
 # ── 2b. peek ───────────────────────────────────────────────────────
+
+
+def _peek_agent_status(agent_id: str, server_url: str | None) -> str | None:
+    """Return a short status string for the peek header, or None on failure."""
+    try:
+        with _cli_client(server_url) as client:
+            info = client.get_agent(agent_id)
+            status = (info.get("status") or "unknown").upper()
+            job_id = info.get("current_job_id") or ""
+            if status == "BUSY" and job_id:
+                return f"BUSY on {job_id}"
+            return status
+    except Exception:
+        return None
 
 
 def _try_local_peek(agent_id: str, *, lines: int = 0) -> str | None:
@@ -2533,6 +2658,59 @@ def _try_local_peek(agent_id: str, *, lines: int = 0) -> str | None:
 
 
 @app.command()
+def attach(
+    agent_id: str = typer.Argument(..., help="Agent ID to attach to."),
+) -> None:
+    """Attach to an agent's live terminal session.
+
+    Opens an interactive view of the agent's tmux or wezterm pane.
+    Use Ctrl+B D (tmux) to detach without stopping the agent.
+
+    Examples:
+
+      agp attach claude-dev
+      agp attach codex-dev
+    """
+    import os
+    import subprocess
+
+    session_name = f"agp-{agent_id}"
+
+    # Try tmux
+    try:
+        check = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True,
+        )
+        if check.returncode == 0:
+            os.execvp("tmux", ["tmux", "attach", "-t", session_name])
+    except FileNotFoundError:
+        pass
+
+    # Try wezterm — smallops marks panes with title "SMALLOPS:{agent_id}"
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            import json as _json
+            marker = f"SMALLOPS:{agent_id}"
+            for pane in _json.loads(result.stdout):
+                if pane.get("window_title") == marker or pane.get("tab_title") == marker:
+                    pane_id = str(pane.get("pane_id"))
+                    subprocess.run(["wezterm", "cli", "activate-pane", "--pane-id", pane_id], check=False)
+                    typer.echo(f"Activated wezterm pane {pane_id} for {agent_id}")
+                    return
+    except FileNotFoundError:
+        pass
+
+    typer.echo(f"No local session found for {agent_id} (looked for '{session_name}').", err=True)
+    typer.echo(f"Use 'agp peek {agent_id}' for remote agents.", err=True)
+    raise typer.Exit(1)
+
+
+@app.command()
 def peek(
     agent_id: str = typer.Argument(..., help="Agent ID to peek at."),
     lines: int = typer.Option(0, "--lines", "-n", help="Scrollback lines to capture (0 = visible screen only)."),
@@ -2570,6 +2748,10 @@ def peek(
     # Fast path: try local capture first
     local_text = _try_local_peek(agent_id, lines=lines)
     if local_text is not None:
+        # Show agent status header so users know if output is live or stale
+        agent_status = _peek_agent_status(agent_id, server_url)
+        if agent_status:
+            typer.echo(f"[{agent_id} — {agent_status}]", err=True)
         typer.echo(local_text, nl=False)
         return
 
@@ -2841,6 +3023,18 @@ _HEARTBEAT_STATE_LABELS = {
 }
 
 
+def _heartbeat_activity_hint(*, tui_state: str, last_line: str, output_chars: int | None) -> str:
+    """Return the user-facing progress hint for a runtime heartbeat."""
+    if last_line:
+        return last_line[:60]
+    label = _HEARTBEAT_STATE_LABELS.get(tui_state, tui_state) if tui_state else ""
+    if label and label != "unknown":
+        return label
+    if output_chars:
+        return f"{output_chars:,} chars output"
+    return ""
+
+
 def _status_show_heartbeat(job_id: str, client) -> None:
     """Show the latest progress heartbeat for a running job."""
     try:
@@ -2854,14 +3048,11 @@ def _status_show_heartbeat(job_id: str, client) -> None:
             tui_state = (details.get("tui_state") or "").strip()
             last_line = (details.get("last_line") or "").strip()
             output_chars = details.get("output_chars")
-            label = _HEARTBEAT_STATE_LABELS.get(tui_state, tui_state) if tui_state else ""
-            activity = ""
-            if last_line:
-                activity = last_line[:60]
-            elif label and label != "unknown":
-                activity = label
-            elif output_chars:
-                activity = f"{output_chars:,} chars output"
+            activity = _heartbeat_activity_hint(
+                tui_state=tui_state,
+                last_line=last_line,
+                output_chars=output_chars,
+            )
             if activity:
                 typer.echo(f"ACTIVITY:     {activity}")
             # Show heartbeat freshness
@@ -2931,6 +3122,7 @@ def jobs(
     filter_status: str = typer.Option(None, "--status", help="Filter by status (queued, running, completed, failed)."),
 ) -> None:
     """List recent jobs."""
+    from datetime import datetime, timezone
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
@@ -2965,14 +3157,40 @@ def jobs(
                         break
             except Exception:  # noqa: BLE001
                 pass
+        now = datetime.now(timezone.utc)
         for j in items:
             retry = f" retry={j['retry_count']}/{j['max_retries']}" if j.get("retry_count", 0) > 0 else ""
             status_str = j["status"]
             reason = failure_reasons.get(j["job_id"])
             if reason:
                 status_str = f"failed:{reason}"
+            time_info = ""
+            try:
+                created_raw = j["created_at"]
+                created = (
+                    created_raw if isinstance(created_raw, datetime)
+                    else datetime.fromisoformat(str(created_raw))
+                )
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                age_str = _format_duration((now - created).total_seconds()) + " ago"
+                elapsed_str = ""
+                updated_raw = j.get("updated_at")
+                if updated_raw and j["status"] in ("completed", "failed"):
+                    updated = (
+                        updated_raw if isinstance(updated_raw, datetime)
+                        else datetime.fromisoformat(str(updated_raw))
+                    )
+                    if updated.tzinfo is None:
+                        updated = updated.replace(tzinfo=timezone.utc)
+                    elapsed_str = _format_duration((updated - created).total_seconds())
+                time_info = age_str
+                if elapsed_str:
+                    time_info += f"  took {elapsed_str}"
+            except Exception:
+                pass
             typer.echo(
-                f"  {j['job_id']}  {status_str:30s}  agent={j.get('target_agent_id', '?')}{retry}"
+                f"  {j['job_id']}  {status_str:<20s}  agent={j.get('target_agent_id', '?'):<14s}  {time_info}{retry}"
             )
 
 
@@ -3084,6 +3302,7 @@ def result(
 @app.command()
 def ls(
     server_url: str = typer.Option(None, help="CP URL."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output — just agent lines, no banner."),
 ) -> None:
     """List logical agents and available capabilities."""
     from datetime import datetime, timezone
@@ -3143,27 +3362,24 @@ def ls(
                 pass  # job listing may fail; proceed without job details
 
         # ── Header
-        typer.echo(_SEPARATOR)
-        typer.echo("      AGP SERVICE DISCOVERY (agp ls)")
-        typer.echo(_SEPARATOR)
-        typer.echo("Logical agent view only. Use `agp health` or `agp diagnose runtime <id>` for runtime health.")
-        typer.echo("")
+        if not quiet:
+            typer.echo(_SEPARATOR)
+            typer.echo("      AGP SERVICE DISCOVERY (agp ls)")
+            typer.echo(_SEPARATOR)
+            typer.echo("Logical agent view only. Use `agp health` or `agp diagnose runtime <id>` for runtime health.")
+            typer.echo("")
 
         # ── Active Agents section
         active = list(agents)  # All agents in DB are live
 
-        typer.echo("[ACTIVE AGENTS]")
+        if not quiet:
+            typer.echo("[ACTIVE AGENTS]")
         if not active:
             typer.echo("(none)")
         else:
-            # Column headers
-            typer.echo(
-                f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'RUNTIME':<16s} "
-                f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'PENDING':<7s} {'QUEUE_AGE':<10s} {'WORKSPACE'}"
-            )
-            typer.echo("-" * 142)
-
             now = datetime.now(timezone.utc)
+            # Build row data for all agents
+            agent_rows = []
             for a in active:
                 agent_id = a["agent_id"]
                 role = ", ".join(a.get("capabilities", [])) or "-"
@@ -3179,7 +3395,6 @@ def ls(
                 job = agent_jobs.get(agent_id)
                 if job:
                     job_id = job["job_id"]
-                    # Compute time on job
                     try:
                         created = datetime.fromisoformat(job["created_at"])
                         elapsed = (now - created).total_seconds()
@@ -3190,24 +3405,56 @@ def ls(
                     job_id = "-"
                     time_on_job = "-"
 
+                agent_rows.append({
+                    "agent_id": agent_id, "role": role, "status": agent_status,
+                    "runtime_id": runtime_id, "job_id": job_id,
+                    "time_on_job": time_on_job, "pending": pending,
+                    "queue_depth": queue_depth, "queue_age": queue_age,
+                    "workspace": workspace, "runtime_status": runtime_status,
+                    "health_status": health_status,
+                })
+
+            # Compact card view for small fleets; wide table for larger ones
+            if len(agent_rows) <= 5:
+                for r in agent_rows:
+                    parts = [f"{r['agent_id']:<20s}", r["status"]]
+                    if r["role"] != "-":
+                        parts.append(f"caps=[{r['role']}]")
+                    if r["job_id"] != "-":
+                        parts.append(f"job={r['job_id']}")
+                        if r["time_on_job"] != "-":
+                            parts.append(f"({r['time_on_job']})")
+                    if r["queue_depth"] > 0:
+                        parts.append(f"queue={r['pending']}")
+                    typer.echo("  ".join(parts))
+            else:
                 typer.echo(
-                    f"{agent_id:<20s} {role:<18s} {agent_status:<8s} {runtime_id:<16s} "
-                    f"{job_id:<14s} {time_on_job:<12s} {pending:<7s} {queue_age:<10s} {workspace}"
+                    f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'RUNTIME':<16s} "
+                    f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'PENDING':<7s} {'QUEUE_AGE':<10s} {'WORKSPACE'}"
                 )
-
-                if queue_depth <= 0:
-                    continue
-                if runtime_id == "-":
-                    warning_items.append(
-                        f"- {agent_id}: {queue_depth} queued, no runtime bound. Start or re-register its runtime."
-                    )
-                    continue
-                if runtime_status in {"degraded", "offline"} or health_status in {"degraded", "unreachable"}:
-                    warning_items.append(
-                        f"- {agent_id}: {queue_depth} queued, runtime {runtime_id} heartbeat stale ({health_status if health_status != '-' else runtime_status}). Restart that runtime."
+                typer.echo("-" * 142)
+                for r in agent_rows:
+                    typer.echo(
+                        f"{r['agent_id']:<20s} {r['role']:<18s} {r['status']:<8s} {r['runtime_id']:<16s} "
+                        f"{r['job_id']:<14s} {r['time_on_job']:<12s} {r['pending']:<7s} {r['queue_age']:<10s} {r['workspace']}"
                     )
 
-        typer.echo("")
+            # Warnings based on agent state
+            for r in agent_rows:
+                if r["queue_depth"] <= 0:
+                    continue
+                if r["runtime_id"] == "-":
+                    warning_items.append(
+                        f"- {r['agent_id']}: {r['queue_depth']} queued, no runtime bound. Start or re-register its runtime."
+                    )
+                    continue
+                if r["runtime_status"] in {"degraded", "offline"} or r["health_status"] in {"degraded", "unreachable"}:
+                    warning_items.append(
+                        f"- {r['agent_id']}: {r['queue_depth']} queued, runtime {r['runtime_id']} heartbeat stale ({r['health_status'] if r['health_status'] != '-' else r['runtime_status']}). Restart that runtime."
+                    )
+
+        if not quiet:
+            typer.echo("")
 
         if warning_items:
             typer.echo("[WARNINGS]")
@@ -3215,6 +3462,9 @@ def ls(
                 typer.echo(item)
             typer.echo("Action: run `make local-restart` to recover state, or `make local-up` for a clean start.")
             typer.echo("")
+
+        if quiet:
+            return
 
         # ── Available Capabilities section
         typer.echo("[AVAILABLE CAPABILITIES (On-Demand)]")
@@ -3420,157 +3670,93 @@ def _info_capability(target: str, client) -> None:
 
 
 def _format_human_nudge(message: str) -> str:
-    return (
-        f"{_SEPARATOR}\n"
-        f"[SYSTEM NUDGE] Human Co-Pilot Override\n"
-        f"{_SEPARATOR}\n"
-        f"SOURCE:       User / Lead Developer\n"
-        f"PRIORITY:     CRITICAL OVERRIDE\n"
-        f"\n"
-        f'HUMAN MESSAGE: "{message}"\n'
-        f"\n"
-        f"ACTION REQUIRED: Acknowledge this pivot immediately. "
-        f"Pause your current goals, use `agp ls` to find an available worker, "
-        f"and execute the human's exact request."
-    )
+    return message
 
 
 @app.command()
 def nudge(
-    target: str = typer.Argument(..., help="Target orchestrator agent ID."),
-    message: str = typer.Argument(..., help="Message to inject."),
-    server_url: str = typer.Option(None, help="CP URL."),
-    priority: int = typer.Option(1, help="Priority (1=human, 2=job, 3=agenda, 4=system)."),
-    source: str = typer.Option("human", help="Nudge source label."),
+    target: str = typer.Argument(..., help="Target agent ID."),
+    message: str = typer.Argument(..., help="Message to inject into the agent's terminal."),
 ) -> None:
-    """Send a nudge to an orchestrator's terminal.
+    """Inject a message directly into an agent's terminal — instantly.
 
-    The nudge is queued and delivered by the nudge-loop daemon when
-    the orchestrator's shell is idle.
+    Writes the message to a via-file and types the reference string
+    into the agent's terminal pane.  No queue, no heartbeat, no wait.
+    The agent sees the message on its next input read.
+
+    Works with both tmux and wezterm sessions (local only).
+
+    Examples:
+
+      agp nudge claude-dev "stop and focus on the login bug instead"
+      agp nudge orchestrator "the deadline moved to Friday"
     """
-    if source == "human" and priority == 1:
-        payload = _format_human_nudge(message)
-    else:
-        payload = (
-            f"{_SEPARATOR}\n"
-            f"[SYSTEM NUDGE] {source.replace('_', ' ').title()}\n"
-            f"{_SEPARATOR}\n"
-            f"{message}"
-        )
-
-    import httpx as _httpx
-
-    with _cli_client(server_url) as client:
-        try:
-            result = client.create_nudge(target, payload, priority=priority, source=source)
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
-        typer.echo(f"nudge queued: {result['nudge_id']} (priority={priority}, target={target})")
-
-
-# ── 8. nudge-loop ────────────────────────────────────────────────────
-
-
-@app.command(hidden=True)
-def nudge_loop(
-    target: str = typer.Argument(..., help="Orchestrator agent ID to deliver nudges to."),
-    session: str = typer.Option(None, help="Tmux session name (default: agp-<target>)."),
-    server_url: str = typer.Option(None, help="CP URL."),
-    poll_seconds: float = typer.Option(2.0, help="Poll interval for new nudges."),
-    idle_polls: int = typer.Option(3, help="Consecutive stable polls before injecting."),
-    max_iterations: int | None = typer.Option(None, help="Stop after N deliveries (for testing)."),
-) -> None:
-    """Daemon: deliver queued nudges into an orchestrator's tmux session.
-
-    Monitors the nudge queue and the tmux session.  Only injects when
-    the session output has stabilised (shell is idle).
-    """
-    _require_server_extra()
-
+    import os
     import subprocess
-    import time
+    import tempfile
+    from pathlib import Path
 
-    session_name = session or f"agp-{target}"
-    delivered = 0
+    payload = _format_human_nudge(message)
 
-    typer.echo(f"nudge-loop: target={target}  session={session_name}  poll={poll_seconds}s")
+    # Write nudge to a plain file — NOT write_via_file (which adds
+    # BEGIN TASK / END TASK markers and a task-style reference string).
+    # Nudges are system reminders, not tasks.  The original so.send()
+    # poll must not see nudge markers in the terminal output.
+    nudge_dir = Path("/tmp/smallops")
+    nudge_dir.mkdir(mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="nudge-", suffix=".md", dir=str(nudge_dir))
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(payload)
+    ref = f"Read the file {tmp} and follow the instructions inside."
+    session_name = f"agp-{target}"
 
-    with _make_client(server_url) as client:
-        while True:
-            # Check for pending nudges
-            nudge = client.next_nudge(target)
-            if nudge is None:
-                time.sleep(poll_seconds)
-                continue
+    # Try tmux
+    try:
+        check = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            capture_output=True, timeout=3,
+        )
+        if check.returncode == 0:
+            # Match smallops send_text: -l (literal) text, brief pause, then Enter
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, "-l", ref],
+                check=True, capture_output=True, timeout=3,
+            )
+            time.sleep(0.05)
+            subprocess.run(
+                ["tmux", "send-keys", "-t", session_name, "Enter"],
+                check=True, capture_output=True, timeout=3,
+            )
+            typer.echo(f"nudge sent to {target}")
+            return
+    except FileNotFoundError:
+        pass
 
-            # Wait for tmux session to be idle
-            typer.echo(f"[nudge] pending: {nudge['nudge_id']} (priority={nudge['priority']}, source={nudge['source']})")
-            idle = _wait_for_tmux_idle(session_name, poll_seconds=poll_seconds, idle_after=idle_polls)
-            if not idle:
-                typer.echo(f"[nudge] session {session_name} not idle, delivering anyway")
+    # Try wezterm
+    try:
+        result = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            capture_output=True, text=True, timeout=3,
+        )
+        if result.returncode == 0:
+            import json as _json
+            marker = f"SMALLOPS:{target}"
+            for pane in _json.loads(result.stdout):
+                if pane.get("window_title") == marker or pane.get("tab_title") == marker:
+                    pane_id = str(pane.get("pane_id"))
+                    subprocess.run(
+                        ["wezterm", "cli", "send-text", "--pane-id", pane_id, "--no-paste", ref + "\n"],
+                        check=True, capture_output=True, timeout=3,
+                    )
+                    typer.echo(f"nudge sent to {target}")
+                    return
+    except FileNotFoundError:
+        pass
 
-            # Inject into tmux
-            payload = nudge["payload"]
-            try:
-                # Use tmux load-buffer + paste-buffer for clean multi-line injection
-                subprocess.run(
-                    ["tmux", "set-buffer", "-b", "agp-nudge", payload],
-                    check=True, capture_output=True,
-                )
-                subprocess.run(
-                    ["tmux", "paste-buffer", "-b", "agp-nudge", "-t", session_name],
-                    check=True, capture_output=True,
-                )
-                subprocess.run(
-                    ["tmux", "send-keys", "-t", session_name, "", "Enter"],
-                    check=True, capture_output=True,
-                )
-                typer.echo(f"[nudge] delivered: {nudge['nudge_id']}")
-            except subprocess.CalledProcessError as e:
-                typer.echo(f"[nudge] delivery failed: {e}", err=True)
+    typer.echo(f"No local session found for {target} (looked for '{session_name}').", err=True)
+    raise typer.Exit(1)
 
-            delivered += 1
-            if max_iterations is not None and delivered >= max_iterations:
-                typer.echo(f"[nudge] reached max_iterations={max_iterations}, stopping")
-                return
-
-            time.sleep(poll_seconds)
-
-
-def _wait_for_tmux_idle(
-    session_name: str,
-    *,
-    poll_seconds: float = 2.0,
-    idle_after: int = 3,
-    timeout_seconds: float = 30.0,
-) -> bool:
-    """Wait until terminal output stabilises.  Returns True if idle detected."""
-    import time
-
-    # Derive agent_id from session name (agp-{agent_id} naming convention)
-    # _try_local_peek uses this to probe tmux/wezterm sessions.
-    agent_id = session_name.removeprefix("agp-") if session_name.startswith("agp-") else session_name
-
-    last_output = ""
-    stable_count = 0
-    deadline = time.monotonic() + timeout_seconds
-
-    while time.monotonic() < deadline:
-        current = _try_local_peek(agent_id) or ""
-        current = current.rstrip()
-
-        if current == last_output:
-            stable_count += 1
-            if stable_count >= idle_after:
-                return True
-        else:
-            stable_count = 0
-            last_output = current
-
-        time.sleep(poll_seconds)
-
-    return False
 
 
 # ── cleanup ──────────────────────────────────────────────────────────

@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from agp.plugins._via_file import (
-    build_task_file_content,
+    build_task_content,
     cleanup_stale_task_files,
     cleanup_task_file,
     reference_string,
@@ -16,8 +16,8 @@ from agp.plugins._via_file import (
 )
 
 
-class BuildTaskFileContentTest(unittest.TestCase):
-    """Tests for build_task_file_content()."""
+class BuildTaskContentTest(unittest.TestCase):
+    """Tests for build_task_content() — returns (prompt, sections) tuple."""
 
     def _minimal_claimed(self, **overrides: object) -> dict:
         base = {
@@ -29,19 +29,34 @@ class BuildTaskFileContentTest(unittest.TestCase):
         base.update(overrides)
         return base
 
-    def test_minimal_prompt(self) -> None:
-        content = build_task_file_content(
+    def test_returns_prompt_and_sections_tuple(self) -> None:
+        prompt, sections = build_task_content(
             prompt="hello world",
             claimed=self._minimal_claimed(),
         )
-        self.assertIn("# AGP Task", content)
-        self.assertIn("## Task", content)
-        self.assertIn("hello world", content)
-        self.assertIn("run_456", content)
-        self.assertIn("job_123", content)
-        self.assertIn("agt_test", content)
+        self.assertEqual(prompt, "hello world")
+        self.assertIsInstance(sections, str)
 
-    def test_includes_output_contract(self) -> None:
+    def test_prompt_is_returned_unchanged(self) -> None:
+        prompt, _ = build_task_content(
+            prompt="hello world",
+            claimed=self._minimal_claimed(),
+        )
+        self.assertEqual(prompt, "hello world")
+        # BEGIN TASK / END TASK markers are added by smallops, not by us
+        self.assertNotIn("BEGIN TASK", prompt)
+
+    def test_sections_contain_metadata(self) -> None:
+        _, sections = build_task_content(
+            prompt="hello world",
+            claimed=self._minimal_claimed(),
+        )
+        self.assertIn("## Metadata", sections)
+        self.assertIn("run_456", sections)
+        self.assertIn("job_123", sections)
+        self.assertIn("agt_test", sections)
+
+    def test_sections_contain_output_contract(self) -> None:
         claimed = self._minimal_claimed(
             job={
                 "job_id": "job_contract",
@@ -55,60 +70,59 @@ class BuildTaskFileContentTest(unittest.TestCase):
                 },
             },
         )
-        content = build_task_file_content(prompt="review this", claimed=claimed)
-        self.assertIn("## Output Contract", content)
-        self.assertIn('"verdict"', content)
-        self.assertIn("valid JSON matching this schema", content)
+        _, sections = build_task_content(prompt="review this", claimed=claimed)
+        self.assertIn("## Output Contract", sections)
+        self.assertIn('"verdict"', sections)
+        self.assertIn("valid JSON matching this schema", sections)
 
-    def test_includes_conversation_id(self) -> None:
+    def test_sections_contain_conversation_id(self) -> None:
         claimed = self._minimal_claimed(
             message={"text": "task", "conversation_id": "conv_abc"},
         )
-        content = build_task_file_content(prompt="task", claimed=claimed)
-        self.assertIn("conv_abc", content)
+        _, sections = build_task_content(prompt="task", claimed=claimed)
+        self.assertIn("conv_abc", sections)
 
-    def test_includes_attachments_with_staged_paths(self) -> None:
+    def test_sections_contain_attachments(self) -> None:
         attachments = [
             {"name": "readme.md", "role": "context", "staged_path": "/workspace/.agp-tmp/readme.md"},
             {"name": "data.json", "role": "input"},
         ]
-        content = build_task_file_content(
+        _, sections = build_task_content(
             prompt="process these",
             claimed=self._minimal_claimed(),
             attachments=attachments,
         )
-        self.assertIn("## Attachments", content)
-        self.assertIn("readme.md", content)
-        self.assertIn("/workspace/.agp-tmp/readme.md", content)
-        self.assertIn("data.json", content)
+        self.assertIn("## Attachments", sections)
+        self.assertIn("readme.md", sections)
+        self.assertIn("/workspace/.agp-tmp/readme.md", sections)
+        self.assertIn("data.json", sections)
 
-    def test_includes_context_messages(self) -> None:
+    def test_sections_contain_context_messages(self) -> None:
         claimed = self._minimal_claimed(
             context_messages=[
                 {"role": "user", "text": "first message"},
                 {"role": "assistant", "text": "first response"},
             ],
         )
-        content = build_task_file_content(prompt="follow up", claimed=claimed)
-        self.assertIn("## Conversation Context", content)
-        self.assertIn("first message", content)
-        self.assertIn("first response", content)
+        _, sections = build_task_content(prompt="follow up", claimed=claimed)
+        self.assertIn("## Conversation Context", sections)
+        self.assertIn("first message", sections)
+        self.assertIn("first response", sections)
 
     def test_no_optional_sections_when_absent(self) -> None:
-        content = build_task_file_content(
+        prompt, sections = build_task_content(
             prompt="simple task",
-            claimed=self._minimal_claimed(),
+            claimed={"job": {}, "run": {}, "message": {"text": "t"}},
         )
-        self.assertNotIn("## Attachments", content)
-        self.assertNotIn("## Conversation Context", content)
-        self.assertNotIn("## Output Contract", content)
+        self.assertEqual(prompt, "simple task")
+        self.assertEqual(sections, "")
 
     def test_parent_job_included(self) -> None:
         claimed = self._minimal_claimed(
             job={"job_id": "job_child", "parent_job_id": "job_parent"},
         )
-        content = build_task_file_content(prompt="sub-task", claimed=claimed)
-        self.assertIn("job_parent", content)
+        _, sections = build_task_content(prompt="sub-task", claimed=claimed)
+        self.assertIn("job_parent", sections)
 
 
 class WriteAndCleanupTest(unittest.TestCase):

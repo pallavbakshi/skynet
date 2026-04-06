@@ -79,10 +79,13 @@ def collect_provider_env() -> dict[str, str]:
         env["OPENROUTER_API_KEY"] = openrouter_key
 
     anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
-    if anthropic_key is not None:
+    if anthropic_key:
         env["ANTHROPIC_API_KEY"] = anthropic_key
 
-    for key in PROVIDER_ENV_VARS[4:]:
+    _HANDLED = {"OPENAI_API_KEY", "OPENROUTER_API_KEY", "OPENAI_BASE_URL", "ANTHROPIC_API_KEY"}
+    for key in PROVIDER_ENV_VARS:
+        if key in _HANDLED:
+            continue
         value = os.environ.get(key)
         if value:
             env[key] = value

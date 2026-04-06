@@ -112,16 +112,17 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     )
     backlog = _agent_backlogs(db, [agent])[agent.agent_id]
     data = _serialize_agent_with_queue_depth(agent, backlog)
-    # Inject peek directives if a peek request is pending for this runtime.
+    # Inject directives if requests are pending for this runtime.
     runtime_id = request.runtime_id
     if runtime_id:
-        pending = peek_store.get_pending(runtime_id)
-        if pending:
-            data["_directives"] = {
-                "peek_requested": True,
-                "peek_lines": pending.lines,
-                "peek_request_id": pending.request_id,
-            }
+        directives: dict = {}
+        peek_pending = peek_store.get_pending(runtime_id)
+        if peek_pending:
+            directives["peek_requested"] = True
+            directives["peek_lines"] = peek_pending.lines
+            directives["peek_request_id"] = peek_pending.request_id
+        if directives:
+            data["_directives"] = directives
     return _ok(data)
 
 
@@ -196,3 +197,5 @@ def get_peek(agent_id: str, request_id: str = Query(...)) -> dict:
         "host_kind": result.host_kind,
         "captured_at": result.captured_at.isoformat(),
     })
+
+

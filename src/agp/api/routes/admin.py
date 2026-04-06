@@ -1,4 +1,4 @@
-"""Admin route handlers: capabilities, pools, nudges, health, upgrade status, queue deliveries."""
+"""Admin route handlers: capabilities, pools, health, upgrade status, queue deliveries."""
 
 from __future__ import annotations
 
@@ -10,12 +10,10 @@ from sqlalchemy.orm import Session
 
 from agp.api.helpers import _apply_created_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import SessionLocal, ensure_sqlite_runtime_database_available, get_db
-from agp.models import Capability, Nudge, QueueDeliveryRecord, utc_now
-from agp.schemas import CapabilitySeedRequest, CreateNudgeRequest, HealthResponse
+from agp.models import Capability, QueueDeliveryRecord, utc_now
+from agp.schemas import CapabilitySeedRequest, HealthResponse
 from agp.services._helpers import (
-    _enqueue_nudge,
     _get_upgrade_status,
-    _new_id,
     _require_capability,
 )
 from agp.services.events import _create_event
@@ -109,38 +107,6 @@ def seed_capability(request: CapabilitySeedRequest, db: Session = Depends(get_db
     _create_event(db, event_type="capability.seeded", body={"capability_id": capability_id})
     db.commit()
     return _ok({"capability_id": capability_id, "created": True})
-
-
-@router.post("/nudges")
-def create_nudge(request: CreateNudgeRequest, db: Session = Depends(get_db)) -> dict:
-    nudge = _enqueue_nudge(db, target_agent_id=request.target_agent_id, priority=request.priority, source=request.source, payload=request.payload, job_id=request.job_id)
-    db.commit()
-    return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "status", "created_at")))
-
-
-@router.get("/nudges/next")
-def next_nudge(target_agent_id: str = Query(...), db: Session = Depends(get_db)) -> dict:
-    nudge = db.scalars(
-        select(Nudge).where(Nudge.target_agent_id == target_agent_id, Nudge.status == "pending")
-        .order_by(Nudge.priority.asc(), Nudge.created_at.asc()).limit(1)
-    ).first()
-    if nudge is None:
-        return _ok(None)
-    nudge.status = "delivered"
-    nudge.delivered_at = utc_now()
-    db.commit()
-    return _ok(_serialize(nudge, ("nudge_id", "target_agent_id", "priority", "source", "payload", "job_id", "status", "created_at", "delivered_at")))
-
-
-@router.get("/nudges")
-def list_nudges(target_agent_id: str | None = Query(default=None), status: str | None = Query(default=None), limit: int = Query(default=20, ge=1, le=100), db: Session = Depends(get_db)) -> dict:
-    query = select(Nudge)
-    if target_agent_id is not None:
-        query = query.where(Nudge.target_agent_id == target_agent_id)
-    if status is not None:
-        query = query.where(Nudge.status == status)
-    nudges = db.scalars(query.order_by(Nudge.priority.asc(), Nudge.created_at.asc()).limit(limit)).all()
-    return _ok({"items": [_serialize(n, ("nudge_id", "target_agent_id", "priority", "source", "status", "job_id", "created_at", "delivered_at")) for n in nudges]})
 
 
 @router.get("/queue/deliveries")

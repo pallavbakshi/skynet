@@ -210,7 +210,9 @@ class RuntimeSupervisor:
     def _workspace_dir(self, session: TerminalSession) -> Path | None:
         raw = session.workspace_ref
         if not raw:
-            return None
+            # Fallback: use the runtime's working directory.  Mux may
+            # return cwd=None for existing sessions (smallops gap).
+            raw = str(Path.cwd())
         if "://" in raw:
             parsed = urlparse(raw)
             if parsed.scheme == "file":
@@ -655,9 +657,34 @@ class RuntimeSupervisor:
         self._active_tui_died = tui_died
         self._active_tui_died_reason = "tui exited during execution"
         try:
+            # Start heartbeat thread BEFORE bootstrap so the lease stays
+            # alive during potentially slow TUI startup (the old placement
+            # after ensure_bootstrapped caused "heartbeat death" — lease
+            # expired during long bootstraps with zero heartbeats sent).
+            if hasattr(self.client, "create_sibling_client"):
+                _hb_client = self.client.create_sibling_client(timeout=10.0)
+            else:
+                import httpx as _httpx
+                _hb_headers: dict[str, str] = {}
+                if self.client.identity.token:
+                    _hb_headers["Authorization"] = f"Bearer {self.client.identity.token}"
+                _hb_client = _httpx.Client(
+                    base_url=self.client.identity.server_url.rstrip("/"),
+                    timeout=10.0,
+                    headers=_hb_headers,
+                )
+            initial_hb = self.client.heartbeat(
+                run_id=run["run_id"],
+                lease_id=lease["lease_id"],
+                fencing_token=lease["fencing_token"],
+                extend_seconds=lease_ttl_seconds,
+            )
+            if isinstance(initial_hb, dict) and initial_hb.get("interrupt_requested"):
+                interrupt_event.set()
+            thread = Thread(target=heartbeat_loop, daemon=True)
+            thread.start()
+
             self._stage_job_attachments(session=session, claimed=claimed)
-            # Attempt to restore a cursor checkpoint from a previous runtime
-            # process.  The adapter can use this via session.metadata["restored_cursor"].
             restored = self.host.load_cursor(session)
             if restored is not None:
                 session.metadata["restored_cursor"] = restored
@@ -671,29 +698,6 @@ class RuntimeSupervisor:
                      "exception_type": type(exc).__name__},
                 )
                 raise
-
-            # Dedicated httpx client for the heartbeat thread so it never blocks
-            # on the main thread's connection pool (critical over SSH tunnels).
-            import httpx as _httpx
-            _hb_headers: dict[str, str] = {}
-            if self.client.identity.token:
-                _hb_headers["Authorization"] = f"Bearer {self.client.identity.token}"
-            _hb_client = _httpx.Client(
-                base_url=self.client.identity.server_url.rstrip("/"),
-                timeout=10.0,
-                headers=_hb_headers,
-            )
-            initial_hb = self.client.heartbeat(
-                run_id=run["run_id"],
-                lease_id=lease["lease_id"],
-                fencing_token=lease["fencing_token"],
-                extend_seconds=lease_ttl_seconds,
-            )
-            # Check the initial heartbeat response for pre-existing interrupts.
-            if isinstance(initial_hb, dict) and initial_hb.get("interrupt_requested"):
-                interrupt_event.set()
-            thread = Thread(target=heartbeat_loop, daemon=True)
-            thread.start()
             _append_runtime_log(
                 self.client.identity.runtime_id,
                 {
@@ -976,7 +980,10 @@ class RuntimeSupervisor:
                     "Skipping fail() for run %s — lease was lost during execution",
                     run["run_id"],
                 )
-                return {"claimed": True, "claim": claimed, "error": str(exc)}
+                return {
+                    "claimed": True, "claim": claimed, "error": str(exc),
+                    "result": {"job_status": "failed", "run_status": "failed", "lease_lost": True},
+                }
             try:
                 failed = self.client.fail(
                     run_id=run["run_id"],
@@ -997,7 +1004,10 @@ class RuntimeSupervisor:
                     },
                 )
                 _logger.warning("fail() rejected for run %s: %s", run["run_id"], fail_exc)
-                return {"claimed": True, "claim": claimed, "error": str(exc)}
+                return {
+                    "claimed": True, "claim": claimed, "error": str(exc),
+                    "result": {"job_status": "failed", "run_status": "failed", "fail_rejected": True},
+                }
             return {"claimed": True, "claim": claimed, "error": str(exc), "result": failed}
         finally:
             with self._session_lock:

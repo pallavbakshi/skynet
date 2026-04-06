@@ -485,51 +485,6 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
-    # ── Nudges ───────────────────────────────────────────────────
-
-    def create_nudge(
-        self,
-        target_agent_id: str,
-        payload: str,
-        *,
-        priority: int = 1,
-        source: str = "human",
-        job_id: str | None = None,
-    ) -> dict:
-        body: dict[str, Any] = {
-            "target_agent_id": target_agent_id,
-            "priority": priority,
-            "source": source,
-            "payload": payload,
-        }
-        if job_id is not None:
-            body["job_id"] = job_id
-        response = self._client.post("/nudges", json=body)
-        response.raise_for_status()
-        return response.json()["data"]
-
-    def next_nudge(self, target_agent_id: str) -> dict | None:
-        """Pop the next pending nudge.  Returns None if queue is empty."""
-        response = self._client.get("/nudges/next", params={"target_agent_id": target_agent_id})
-        response.raise_for_status()
-        return response.json()["data"]
-
-    def list_nudges(
-        self,
-        *,
-        target_agent_id: str | None = None,
-        status: str | None = None,
-        limit: int = 20,
-    ) -> dict:
-        params: dict[str, object] = {"limit": limit}
-        if target_agent_id is not None:
-            params["target_agent_id"] = target_agent_id
-        if status is not None:
-            params["status"] = status
-        response = self._client.get("/nudges", params=params)
-        response.raise_for_status()
-        return response.json()["data"]
-
     # ── Handoff ───────────────────────────────────────────────────
 
     def handoff(

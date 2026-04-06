@@ -1,10 +1,17 @@
-"""Via-file prompt delivery for TUI and terminal adapters.
+"""AGP-level task content builder.
 
-Instead of pasting long prompts into the terminal (risking paste buffer
-corruption, size limits, and special character mangling), write a structured
-task file and send a short reference string to the agent.
+Builds the prompt text and extra sections (metadata, attachments, context,
+output contracts) that are passed separately to ``smallops.Session.send()``.
 
-The agent reads the file directly with full fidelity.
+Usage in adapters::
+
+    prompt, sections = build_task_content(prompt=..., claimed=..., attachments=...)
+    response = so.send(prompt, sections=sections)
+
+smallops handles all file delivery: it wraps *prompt* in BEGIN TASK / END TASK
+markers, appends *sections* after END TASK, writes the file, and sends a short
+reference string to the agent's terminal.  **Do NOT add BEGIN TASK / END TASK
+markers here.**
 """
 
 from __future__ import annotations
@@ -21,8 +28,13 @@ _logger = logging.getLogger(__name__)
 # Private directory under /tmp owned by the current process user.
 _TASK_DIR = Path(f"/tmp/agp-tasks-{os.getuid()}")
 
-# Reference string template — the agent sees this in its prompt input.
-_REFERENCE_TEMPLATE = "Read the file {path} and follow the instructions inside."
+# Reference string template for AGP-managed task files.
+# NOTE: For normal delivery, smallops generates its own reference string
+# with BEGIN TASK / END TASK framing.  This template is for AGP-only files
+# which do NOT contain those markers.
+_REFERENCE_TEMPLATE = (
+    "Read the file {path} and follow the instructions inside."
+)
 
 
 def _ensure_task_dir() -> Path:
@@ -36,26 +48,34 @@ def _ensure_task_dir() -> Path:
     return _TASK_DIR
 
 
-def build_task_file_content(
+def build_task_content(
     *,
     prompt: str,
     claimed: dict[str, Any],
     attachments: list[dict[str, Any]] | None = None,
-) -> str:
-    """Build the structured markdown content for the task file.
+) -> tuple[str, str]:
+    """Build the prompt and extra sections for a task.
 
-    Includes: task prompt, job/run metadata, conversation context,
-    attachment manifest, and output contract.
+    Returns ``(prompt_text, sections_text)`` where:
+
+    - *prompt_text* goes inside smallops' BEGIN TASK / END TASK block.
+    - *sections_text* is passed as ``sections=`` to ``so.send()`` and
+      appears **after** END TASK in the task file (metadata, attachments,
+      conversation context, output contract).
+
+    Callers should use::
+
+        prompt, sections = build_task_content(...)
+        response = so.send(prompt, sections=sections)
     """
     run = claimed.get("run") or {}
     job = claimed.get("job") or {}
     message = claimed.get("message") or {}
     conversation_id = message.get("conversation_id") or job.get("conversation_id")
 
-    sections: list[str] = []
+    extra: list[str] = []
 
     # Header with metadata
-    sections.append("# AGP Task\n")
     meta_lines = []
     if run.get("run_id"):
         meta_lines.append(f"- **Run ID:** `{run['run_id']}`")
@@ -68,51 +88,52 @@ def build_task_file_content(
     if job.get("parent_job_id"):
         meta_lines.append(f"- **Parent Job:** `{job['parent_job_id']}`")
     if meta_lines:
-        sections.append("\n".join(meta_lines))
+        extra.append("## Metadata\n\n" + "\n".join(meta_lines))
 
-    # Task prompt (the main content)
-    sections.append("## Task\n")
-    sections.append(prompt)
-
-    # Attachments manifest
+    # Attachments — include staged path and inline content when available
     attachment_items = attachments or claimed.get("job_attachments") or []
     if attachment_items:
-        sections.append("## Attachments\n")
+        att_parts = ["## Attachments\n"]
         for item in attachment_items:
             name = item.get("name", "unknown")
             role = item.get("role", "")
             staged_path = item.get("staged_path", "")
+            content = item.get("content", "")
             line = f"- **{name}**"
             if role:
                 line += f" (role: {role})"
             if staged_path:
                 line += f" — `{staged_path}`"
-            sections.append(line)
+            att_parts.append(line)
+            if content:
+                ext = name.rsplit(".", 1)[-1] if "." in name else ""
+                att_parts.append(f"```{ext}\n{content}\n```")
+        extra.append("\n".join(att_parts))
 
     # Conversation context (prior messages in the thread)
     context_messages = claimed.get("context_messages") or []
     if context_messages:
-        sections.append("## Conversation Context\n")
+        ctx_parts = ["## Conversation Context\n"]
         for msg in context_messages:
             role = msg.get("role", "unknown")
             text = msg.get("text", "")
             if text:
-                sections.append(f"### {role}\n\n{text}")
+                ctx_parts.append(f"### {role}\n\n{text}")
+        extra.append("\n\n".join(ctx_parts))
 
     # Output contract
     contract = job.get("output_contract_json")
     if isinstance(contract, dict) and contract:
-        sections.append("## Output Contract\n")
-        sections.append(
-            "You must respond with valid JSON matching this schema:\n"
-        )
-        sections.append(f"```json\n{json.dumps(contract.get('json_schema', {}), indent=2, sort_keys=True)}\n```")
-        sections.append(
+        extra.append(
+            "## Output Contract\n\n"
+            "You must respond with valid JSON matching this schema:\n\n"
+            f"```json\n{json.dumps(contract.get('json_schema', {}), indent=2, sort_keys=True)}\n```\n\n"
             "Do not include markdown fences, prose, or any text outside the JSON object "
             "in your final answer."
         )
 
-    return "\n\n".join(sections) + "\n"
+    sections_text = "\n\n".join(extra) + "\n" if extra else ""
+    return prompt, sections_text
 
 
 def write_task_file(
@@ -120,10 +141,11 @@ def write_task_file(
     run_id: str,
     content: str,
 ) -> str:
-    """Write the task content to a temp file and return its path.
+    """Write task content to an AGP-managed temp file and return its path.
 
-    Uses a deterministic filename based on run_id so the file can be
-    found and cleaned up reliably.
+    NOTE: For normal task delivery, use ``smallops.Session.send()`` instead —
+    it handles via-file writing, reference string injection, and polling.
+    This function is only needed for out-of-band file management.
     """
     task_dir = _ensure_task_dir()
     path = task_dir / f"agp-task-{run_id}.md"
@@ -149,7 +171,11 @@ def write_task_file(
 
 
 def reference_string(path: str) -> str:
-    """Return the short reference string the agent sees in the TUI."""
+    """Return AGP's reference string for a task file path.
+
+    NOTE: For normal delivery, ``smallops.write_via_file()`` generates
+    its own reference string.  This is only for AGP-managed files.
+    """
     return _REFERENCE_TEMPLATE.format(path=path)
 
 

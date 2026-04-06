@@ -63,12 +63,9 @@ from agp.client._runtime import RuntimeClient, RuntimeIdentity  # noqa: F401
 _COMPAT_IMPORTS: dict[str, tuple[str, str]] = {
     "InProcessTerminalHost": ("agp.plugins.inprocess", "InProcessTerminalHost"),
     "DefaultAgentAdapter": ("agp.plugins.inprocess", "DefaultAgentAdapter"),
-    "WezTermHost": ("agp.plugins.wezterm", "WezTermHost"),
+    "SmallopsTerminalHost": ("agp.plugins._smallops_host", "SmallopsTerminalHost"),
     "CodexAdapter": ("agp.plugins.codex", "CodexAdapter"),
-    "_clean_codex_tui_output": ("agp.plugins.codex", "_clean_codex_tui_output"),
-    "_extract_codex_tui_result": ("agp.plugins.codex", "_extract_codex_tui_result"),
     "ClaudeCodeAdapter": ("agp.plugins.claude_code", "ClaudeCodeAdapter"),
-    "_clean_claude_code_output": ("agp.plugins.claude_code", "_clean_claude_code_output"),
     "build_terminal_host": ("agp.plugins", "build_terminal_host"),
     "build_agent_adapter": ("agp.plugins", "build_agent_adapter"),
 }
@@ -124,5 +121,4 @@ __all__ = [
     # client re-exports
     "RuntimeClient",
     "RuntimeIdentity",
-    "_extract_codex_tui_result",
 ]

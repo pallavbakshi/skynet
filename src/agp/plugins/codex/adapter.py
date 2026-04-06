@@ -1,9 +1,11 @@
-"""Claude Code CLI agent adapter — backed by smallops.
+"""Codex CLI agent adapter — backed by smallops.
 
 Delegates TUI lifecycle (bootstrap, prompt delivery, polling, parsing,
 gate handling) to a smallops Session.  AGP-specific concerns (output
 contracts, artifact generation, supervisor integration, exception
 mapping) remain here.
+
+Marker mode and the state machine have been dropped — TUI-only via smallops.
 """
 from __future__ import annotations
 
@@ -12,7 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from smallops import (
-    ClaudeCodeTui,
+    CodexTui,
     Config as SmallopsConfig,
     Session,
 )
@@ -51,17 +53,26 @@ if TYPE_CHECKING:
 _logger = logging.getLogger(__name__)
 
 
-class ClaudeCodeAdapter(AgentAdapter):
-    """Agent adapter for Claude Code CLI, backed by smallops Session."""
+class CodexAdapter(AgentAdapter):
+    """Agent adapter for Codex CLI, backed by smallops Session."""
 
     def __init__(
         self,
         *,
-        cli_command: str = "claude",
+        cli_command: str = "codex",
         idle_poll_seconds: float = 2.0,
         idle_after: int = 3,
         idle_timeout_seconds: float = 0.0,
         session_mode: str = "ephemeral",
+        # Legacy params — accepted but ignored for backward compat
+        begin_marker: str = "",
+        result_marker: str = "",
+        max_polls: int = 0,
+        poll_interval_seconds: float = 0.0,
+        idle_timeout_polls: int = 0,
+        health_check_interval_polls: int = 0,
+        tui_mode: bool = True,
+        bootstrap_settle_seconds: float = 0.0,
     ) -> None:
         self.cli_command = cli_command
         self.idle_poll_seconds = idle_poll_seconds
@@ -76,7 +87,7 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     @property
     def kind(self) -> str:
-        return "claude_code"
+        return "codex"
 
     def _get_or_create_session(
         self, host: TerminalHost, session: TerminalSession,
@@ -85,7 +96,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         from agp.plugins._smallops_host import SmallopsTerminalHost
         if not isinstance(host, SmallopsTerminalHost):
             raise TypeError(
-                f"ClaudeCodeAdapter requires SmallopsTerminalHost, got {type(host).__name__}"
+                f"CodexAdapter requires SmallopsTerminalHost, got {type(host).__name__}"
             )
         if self._smallops_session is not None:
             return self._smallops_session
@@ -96,7 +107,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             timeout=self._effective_timeout,
             bootstrap_timeout=max(60.0, self._effective_timeout),
         )
-        tui = ClaudeCodeTui(cli=self.cli_command)
+        tui = CodexTui(cli=self.cli_command)
         self._smallops_session = Session(
             mux=host.mux,
             tui=tui,
@@ -129,7 +140,6 @@ class ClaudeCodeAdapter(AgentAdapter):
                 candidate = Path(workspace) / rel
                 if candidate.exists():
                     entry["staged_path"] = str(candidate)
-                    # Include content inline so the task file is self-contained
                     if "content" not in entry:
                         try:
                             entry["content"] = candidate.read_text(encoding="utf-8")
@@ -140,8 +150,8 @@ class ClaudeCodeAdapter(AgentAdapter):
 
     def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
         clean = _strip_ansi(text)
-        tui = ClaudeCodeTui(cli=self.cli_command)
-        from smallops.tui.claude_code._classify import (
+        tui = CodexTui(cli=self.cli_command)
+        from smallops.tui.codex._classify import (
             ends_with_prompt,
             is_shell_returned,
         )
@@ -163,7 +173,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         session: TerminalSession,
         claimed: dict[str, Any],
     ) -> bool:
-        """Bootstrap the Claude Code TUI via smallops Session.up().
+        """Bootstrap the Codex TUI via smallops Session.up().
 
         In sticky mode (default), reuses the existing TUI if it's still alive.
         """
@@ -171,7 +181,7 @@ class ClaudeCodeAdapter(AgentAdapter):
 
         # Sticky: skip bootstrap if TUI is already running
         if so.is_alive():
-            session.metadata["claude_code_bootstrapped"] = True
+            session.metadata["codex_bootstrapped"] = True
             return True
 
         env = collect_provider_env()
@@ -185,7 +195,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         except _PaneDied as exc:
             raise BootstrapFailure(f"pane died during bootstrap: {exc}") from exc
 
-        session.metadata["claude_code_bootstrapped"] = True
+        session.metadata["codex_bootstrapped"] = True
         return True
 
     # ── Execution ────────────────────────────────────────────────────
@@ -222,7 +232,6 @@ class ClaudeCodeAdapter(AgentAdapter):
             except OSError:
                 pass
 
-        # Build enriched prompt
         prompt = apply_output_contract_instruction(
             prompt=claimed["message"]["text"],
             claimed=claimed,
@@ -238,8 +247,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         )
 
         # Check if the original message was sent with --via-file and the
-        # file is still accessible — if so, pass the path directly so
-        # smallops reads it instead of AGP creating a second copy.
+        # file is still accessible — pass path directly to avoid double file.
         # IMPORTANT: skip file= when an output contract enriched the prompt,
         # because the original file lacks the injected contract instructions.
         via_file_path = (claimed.get("message") or {}).get("metadata", {}).get("via_file")
@@ -247,10 +255,9 @@ class ClaudeCodeAdapter(AgentAdapter):
             via_file_path = None  # enriched or file gone — use prompt_text
 
         so = self._get_or_create_session(host, session)
-        if not session.metadata.get("claude_code_bootstrapped"):
+        if not session.metadata.get("codex_bootstrapped"):
             self.ensure_bootstrapped(host=host, session=session, claimed=claimed)
 
-        # Emit dispatch progress
         supervisor.emit_progress(
             claimed,
             message="runtime.tui_dispatch",
@@ -285,14 +292,13 @@ class ClaudeCodeAdapter(AgentAdapter):
             except Exception:
                 _logger.debug("failed to capture screen on timeout", exc_info=True)
             raise ExecutionTimeout(
-                f"claude code tui did not complete: {exc}\n--- screen at timeout ---\n{screen}"
+                f"codex tui did not complete: {exc}\n--- screen at timeout ---\n{screen}"
             ) from exc
         except _PaneDied as exc:
             raise PaneDied(f"pane died during execution: {exc}") from exc
         except _FatalGate as exc:
             raise AuthFailure(f"fatal gate during execution: {exc}") from exc
 
-        # Collect scrollback for transcript artifact
         scrollback = ""
         try:
             scrollback = _strip_ansi(so.peek(500))
@@ -300,7 +306,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             _logger.debug("failed to capture scrollback", exc_info=True)
             scrollback = response.raw
 
-        # Prefer parsed LLM prose; fall back to raw capture if empty
+        # Prefer parsed LLM prose (smallops filters out tool traces/narration).
         parsed = getattr(response, "parsed", None)
         if parsed and parsed.text and parsed.text.strip():
             cleaned = parsed.text
@@ -328,7 +334,7 @@ class ClaudeCodeAdapter(AgentAdapter):
                 cleaned = selected
 
         if not cleaned.strip():
-            raise AdapterExecutionFailed("claude code tui produced no output after idle")
+            raise AdapterExecutionFailed("codex tui produced no output after idle")
 
         # Reconstruct full task content for the artifact record — use the
         # actual prompt the agent received (original file when file= was used).
@@ -383,7 +389,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         error: Exception,
         supervisor: "RuntimeSupervisor",
     ) -> None:
-        session.metadata.pop("claude_code_bootstrapped", None)
+        session.metadata.pop("codex_bootstrapped", None)
         if self._smallops_session is not None:
             try:
                 self._smallops_session.interrupt()

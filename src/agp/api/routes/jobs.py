@@ -142,7 +142,7 @@ def list_jobs(
         last = page_items[-1]
         next_cursor = _encode_cursor({"created_at": last.created_at.isoformat(), "job_id": last.job_id})
     return _ok(_page(
-        [_serialize(j, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")) for j in page_items],
+        [_serialize(j, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "summary_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")) for j in page_items],
         limit=limit, next_cursor=next_cursor,
     ))
 
@@ -150,7 +150,7 @@ def list_jobs(
 @router.get("/jobs/{job_id}", response_model=OkResponse[JobResponse])
 def get_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
-    return _ok(_serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")))
+    return _ok(_serialize(job, ("job_id", "message_id", "target_agent_id", "target_queue", "status", "retry_count", "max_retries", "latest_run_id", "result_artifact_id", "output_contract_json", "summary_json", "conversation_id", "timeout_seconds", "deadline_at", "created_at", "updated_at")))
 
 
 @router.get("/jobs/{job_id}/events")

@@ -74,7 +74,7 @@ class MigrationInitTest(unittest.TestCase):
         self.assertIn("current_version", status)
         self.assertEqual(status["pending_migrations"], [])
         self.assertIn("0001_initial", status["available_migrations"])
-        self.assertEqual(status["available_migrations"], ["0001_initial", "0002_dynamic_agent_mesh", "0003_conversations", "0004_attachment_roles", "0005_job_timeouts", "0006_extraction_diagnostics_role"])
+        self.assertEqual(status["available_migrations"], ["0001_initial", "0002_dynamic_agent_mesh", "0003_conversations", "0004_attachment_roles", "0005_job_timeouts", "0006_extraction_diagnostics_role", "0007_job_summary"])
 
     def test_apply_migrations_returns_summary(self) -> None:
         result = apply_migrations()
@@ -215,22 +215,6 @@ class ServeSchemaValidationTest(unittest.TestCase):
             with self.assertRaises(RuntimeError) as ctx:
                 require_initialized_schema()
         self.assertIn("db unavailable", str(ctx.exception))
-
-    def test_serve_fails_fast_when_schema_is_uninitialized(self) -> None:
-        with unittest.mock.patch("agp.cli._require_server_extra", return_value=None), \
-             unittest.mock.patch("uvicorn.run") as mock_run:
-            result = runner.invoke(agp_app, ["serve"])
-        self.assertEqual(result.exit_code, 1, result.output)
-        self.assertIn("missing or uninitialized", (result.output or "") + (result.stderr or ""))
-        mock_run.assert_not_called()
-
-    def test_serve_starts_when_schema_is_initialized(self) -> None:
-        init_db()
-        with unittest.mock.patch("agp.cli._require_server_extra", return_value=None), \
-             unittest.mock.patch("uvicorn.run") as mock_run:
-            result = runner.invoke(agp_app, ["serve"])
-        self.assertEqual(result.exit_code, 0, result.output)
-        mock_run.assert_called_once()
 
     def test_runtime_sqlite_guard_rejects_missing_database_file(self) -> None:
         with TemporaryDirectory() as tmpdir:

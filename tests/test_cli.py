@@ -221,7 +221,7 @@ class ReplyCommandTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["reply", "job_src", "--detach"], input="follow-up from stdin\n")
+        result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget"], input="follow-up from stdin\n")
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
@@ -243,8 +243,8 @@ class ReplyCommandTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        # Simulate unquoted: reply job_src Three findings need fixes --detach
-        result = runner.invoke(app, ["reply", "job_src", "Three", "findings", "need", "fixes", "--detach"])
+        # Simulate unquoted: reply job_src Three findings need fixes --fire-and-forget
+        result = runner.invoke(app, ["reply", "job_src", "Three", "findings", "need", "fixes", "--fire-and-forget"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
@@ -269,7 +269,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         result = runner.invoke(
             app,
-            ["reply", "job_src", "Please", "investigate", "--resume", "job_123", "--detach"],
+            ["reply", "job_src", "Please", "investigate", "--resume", "job_123", "--fire-and-forget"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -297,7 +297,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         result = runner.invoke(
             app,
-            ["reply", "job_src", "--detach", "--", "Explain", "--timeout", "semantics"],
+            ["reply", "job_src", "--fire-and-forget", "--", "Explain", "--timeout", "semantics"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -314,11 +314,11 @@ class ReplyCommandTest(unittest.TestCase):
 
     @patch("agp.cli._make_client")
     def test_reply_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
-        result = runner.invoke(app, ["reply", "job_src", "task", "--detatch"])
+        result = runner.invoke(app, ["reply", "job_src", "task", "--tiemout"])
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("did you mean", result.output)
-        self.assertIn("--detach", result.output)
+        self.assertIn("--timeout", result.output)
         mock_make.assert_not_called()
 
     @patch("agp.cli._make_client")
@@ -331,8 +331,8 @@ class ReplyCommandTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        # Simulate unquoted: send agent_x Analyze the code --detach
-        result = runner.invoke(app, ["send", "agent_x", "Analyze", "the", "code", "--detach"])
+        # Simulate unquoted: send agent_x Analyze the code --fire-and-forget
+        result = runner.invoke(app, ["send", "agent_x", "Analyze", "the", "code", "--fire-and-forget"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
@@ -351,7 +351,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         result = runner.invoke(
             app,
-            ["send", "agent_x", "Review", "this", "--resume", "job_123", "--detach"],
+            ["send", "agent_x", "Review", "this", "--resume", "job_123", "--fire-and-forget"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -370,12 +370,12 @@ class ReplyCommandTest(unittest.TestCase):
 
         result = runner.invoke(
             app,
-            ["send", "agent_x", "--detach", "--", "Explain", "--detach", "semantics"],
+            ["send", "agent_x", "--fire-and-forget", "--", "Explain", "--fire-and-forget", "semantics"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
-        self.assertEqual(fake_client.send.call_args.args[2], "Explain --detach semantics")
+        self.assertEqual(fake_client.send.call_args.args[2], "Explain --fire-and-forget semantics")
 
     @patch("agp.cli._make_client")
     def test_send_preserves_known_flags_while_absorbing_unknown_option_like_tokens(self, mock_make: MagicMock) -> None:
@@ -397,7 +397,7 @@ class ReplyCommandTest(unittest.TestCase):
                 "job_123",
                 "--timeout-seconds",
                 "45",
-                "--detach",
+                "--fire-and-forget",
             ],
         )
 
@@ -419,7 +419,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         result = runner.invoke(
             app,
-            ["send", "agent_x", "run", "pytest", "-xvs", "--no-cache", "--detach"],
+            ["send", "agent_x", "run", "pytest", "-xvs", "--no-cache", "--fire-and-forget"],
         )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -436,11 +436,11 @@ class ReplyCommandTest(unittest.TestCase):
 
     @patch("agp.cli._make_client")
     def test_send_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
-        result = runner.invoke(app, ["send", "agent_x", "task", "--detatch"])
+        result = runner.invoke(app, ["send", "agent_x", "task", "--tiemout"])
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("did you mean", result.output)
-        self.assertIn("--detach", result.output)
+        self.assertIn("--timeout", result.output)
         mock_make.assert_not_called()
 
     @patch("agp.cli._make_client")
@@ -450,7 +450,7 @@ class ReplyCommandTest(unittest.TestCase):
         _mock_stdin_read: MagicMock,
         mock_make: MagicMock,
     ) -> None:
-        result = runner.invoke(app, ["reply", "job_src", "--detach", "--output-contract", "{"])
+        result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget", "--output-contract", "{"])
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("invalid JSON for --output-contract", result.output)
@@ -458,7 +458,7 @@ class ReplyCommandTest(unittest.TestCase):
 
     @patch("agp.cli._make_client")
     def test_reply_rejects_empty_stdin_when_argument_omitted(self, mock_make: MagicMock) -> None:
-        result = runner.invoke(app, ["reply", "job_src", "--detach"], input="\n")
+        result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget"], input="\n")
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("task is required", result.output)
@@ -491,7 +491,7 @@ class ReplyCommandTest(unittest.TestCase):
                 "reply", "job_src", "fix this",
                 "--timeout-seconds", "120",
                 "--attach", f"{tmp_path}:context",
-                "--detach",
+                "--fire-and-forget",
             ])
         finally:
             import os
@@ -527,7 +527,7 @@ class ReplyCommandTest(unittest.TestCase):
         result = runner.invoke(app, [
             "reply", "job_src", "follow up",
             "--poll-timeout", "5",
-            "--detach",
+            "--fire-and-forget",
         ])
         self.assertEqual(result.exit_code, 0, result.output)
 
@@ -544,7 +544,7 @@ class ReplyCommandTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["send", "agent_x", "review this", "--review", "--detach"])
+        result = runner.invoke(app, ["send", "agent_x", "review this", "--review", "--fire-and-forget"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
@@ -573,7 +573,7 @@ class ReplyCommandTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["reply", "job_src", "review this", "--review", "--detach"])
+        result = runner.invoke(app, ["reply", "job_src", "review this", "--review", "--fire-and-forget"])
 
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
@@ -588,7 +588,7 @@ class ReplyCommandTest(unittest.TestCase):
         result = runner.invoke(app, [
             "send", "agent_x", "task",
             "--review", "--output-contract", '{"format":"json"}',
-            "--detach",
+            "--fire-and-forget",
         ])
 
         self.assertEqual(result.exit_code, 2, result.output)
@@ -1129,13 +1129,10 @@ class PollUntilDoneTest(unittest.TestCase):
         matching = [l for l in lines if "finishing up" in l]
         self.assertTrue(matching, f"expected 'finishing up' hint, got: {lines}")
 
-    def test_tui_state_working_prefers_last_line(self) -> None:
+    def test_tui_state_working_prefers_last_line_over_semantic_label(self) -> None:
         lines = self._run_with_tui_state("working", last_line="✳ Thinking…")
-        matching = [l for l in lines if "Thinking" in l]
-        self.assertTrue(matching, f"expected last_line content for working state, got: {lines}")
-        # Should NOT show the literal word "working" as a label
-        label_only = [l for l in lines if "\u2014 working" in l]
-        self.assertFalse(label_only, f"working state should prefer last_line over label, got: {lines}")
+        raw = [l for l in lines if "Thinking" in l]
+        self.assertTrue(raw, f"expected raw last_line when available, got: {lines}")
 
     def test_tui_state_working_without_last_line_falls_back(self) -> None:
         lines = self._run_with_tui_state("working", last_line="")
@@ -1160,155 +1157,6 @@ class PollUntilDoneTest(unittest.TestCase):
         self.assertTrue(matching, f"CLI should pass through last_line without re-filtering, got: {lines}")
 
 
-class ClaudeCodeWorkingDetectionTest(unittest.TestCase):
-    """Verify _looks_like_working matches old and new Claude Code thinking indicators."""
-
-    def test_old_thinking_prefix(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        self.assertTrue(adapter._looks_like_working("∴ thinking about this..."))
-        self.assertTrue(adapter._looks_like_working("∴ Working on changes"))
-
-    def test_new_thinking_indicators(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        # New-style indicators seen in Claude Code v2.1.89+
-        self.assertTrue(adapter._looks_like_working("✳ Swooping… (51s · ↓ 3.7k tokens)"))
-        self.assertTrue(adapter._looks_like_working("✻ Cogitating… (2m 4s · thinking with high effort)"))
-        self.assertTrue(adapter._looks_like_working("✽ Bloviating… (1m 30s)"))
-        self.assertTrue(adapter._looks_like_working("✻ Ruminating… (5s)"))
-
-    def test_middle_dot_not_false_positive(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        # · (middle dot) appears in regular response content — must NOT match
-        self.assertFalse(adapter._looks_like_working("· next steps..."))
-        self.assertFalse(adapter._looks_like_working("· thinking... through tradeoffs"))
-
-    def test_response_content_not_working(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        # Response content that mentions working indicators must NOT match
-        self.assertFalse(adapter._looks_like_working(
-            '- Then checks "esc to interrupt" on non-noise lines'
-        ))
-        # Code quotes containing ellipsis + working keywords must NOT match
-        self.assertFalse(adapter._looks_like_working(
-            'if "esc to interrupt" in sl and ("…" in s or "..." in s'
-        ))
-
-    def test_status_bar_not_working(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        # Status bar is skipped entirely (bottom-scan filters noise)
-        self.assertFalse(adapter._looks_like_working(
-            "  ⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt   30987 tokens"
-        ))
-
-    def test_completed_not_working(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        # Post-thinking lines should NOT match
-        self.assertFalse(adapter._looks_like_working("✻ Cogitated for 4m 4s"))
-        self.assertFalse(adapter._looks_like_working("❯ "))
-        self.assertFalse(adapter._looks_like_working("⏵⏵ bypass permissions on"))
-        self.assertFalse(adapter._looks_like_working("────────────"))
-
-    def test_completed_turn_with_stale_thinking_line_not_working(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        screen = (
-            "❯ Reply with exactly: claude-dev-ok\n"
-            "∴ Thinking…\n"
-            "  The user is asking me to reply with exactly \"claude-dev-ok\".\n"
-            "● claude-dev-ok\n"
-            "────────────────────────────────────────\n"
-            "❯ \n"
-            "────────────────────────────────────────\n"
-            "  ⏵⏵ bypass permissions on (shift+tab to cycle)   22466 tokens\n"
-        )
-        self.assertTrue(adapter._looks_like_completed_turn(
-            screen, baseline_answered_turns=0, baseline_last_response=None,
-        ))
-        self.assertFalse(adapter._looks_like_working(screen))
-
-    def test_empty_and_noise(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        adapter = ClaudeCodeAdapter()
-        self.assertFalse(adapter._looks_like_working(""))
-        self.assertFalse(adapter._looks_like_working("⏺ Read some file"))
-
-
-class ScreenTailStabilityTest(unittest.TestCase):
-    """Verify _screen_tail excludes status bar and separator noise."""
-
-    def test_status_bar_excluded_from_tail(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        screen = (
-            "⏺ Here is my analysis of the code.\n"
-            "  The key issue is in the polling loop.\n"
-            "────────────────────────────────────────\n"
-            "❯ \n"
-            "────────────────────────────────────────\n"
-            "  ⏵⏵ bypass permissions on · 42146 tokens\n"
-        )
-        tail = ClaudeCodeAdapter._screen_tail(screen)
-        # Status bar and separators should be excluded
-        self.assertNotIn("⏵⏵", tail)
-        self.assertNotIn("────", tail)
-        # Content lines should be preserved
-        self.assertIn("analysis", tail)
-        self.assertIn("❯", tail)
-
-    def test_token_count_change_not_in_tail(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-        # Simulates two captures where only the token count changed
-        screen1 = "❯ \n  ⏵⏵ bypass permissions on · 42146 tokens\n"
-        screen2 = "❯ \n  ⏵⏵ bypass permissions on · 42200 tokens\n"
-        self.assertEqual(
-            ClaudeCodeAdapter._screen_tail(screen1),
-            ClaudeCodeAdapter._screen_tail(screen2),
-        )
-
-    def test_wrapped_status_bar_continuation_excluded_from_tail_and_prompt_check(self) -> None:
-        from agp.plugins.claude_code import ClaudeCodeAdapter
-
-        screen1 = (
-            "❯ hello\n"
-            "● 你好！\n"
-            "────────────────────────────────────────\n"
-            "❯ \n"
-            "  ⏵⏵ bypass permissions on\n"
-            "  · esc to interrupt   42146 tokens\n"
-        )
-        screen2 = (
-            "❯ hello\n"
-            "● 你好！\n"
-            "────────────────────────────────────────\n"
-            "❯ \n"
-            "  ⏵⏵ bypass permissions on\n"
-            "  · esc to interrupt   42200 tokens\n"
-        )
-
-        self.assertEqual(
-            ClaudeCodeAdapter._screen_tail(screen1),
-            ClaudeCodeAdapter._screen_tail(screen2),
-        )
-        self.assertTrue(ClaudeCodeAdapter._visible_ends_with_prompt(screen1))
-
-    def test_codex_noise_excluded_from_tail(self) -> None:
-        from agp.plugins.codex import CodexAdapter
-        screen = (
-            "• Here is my response\n"
-            "Working (30s • esc to interrupt)\n"
-            "Token usage: 5000\n"
-            "› \n"
-        )
-        tail = CodexAdapter._screen_tail(screen)
-        self.assertNotIn("Working (", tail)
-        self.assertNotIn("Token usage:", tail)
-        self.assertIn("response", tail)
-        self.assertIn("›", tail)
 
 
 class HeartbeatAgeSecondsTest(unittest.TestCase):

@@ -820,7 +820,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             headers={"Idempotency-Key": "cli-reply-seed"},
         ).json()["data"]
 
-        result = self._cli_invoke(["reply", first["job_id"], "second turn", "--detach"])
+        result = self._cli_invoke(["reply", first["job_id"], "second turn", "--fire-and-forget"])
         self.assertEqual(result.exit_code, 0)
 
         jobs = self.agp.list_jobs(target_agent_id="agt_reply")["items"]
@@ -1780,71 +1780,6 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(build_terminal_host("wezterm", runner=lambda *args, **kwargs: None).kind, "wezterm")
         self.assertEqual(build_agent_adapter("default").kind, "default")
 
-    def test_wezterm_host_maps_terminal_operations_to_cli_calls(self) -> None:
-        calls: list[tuple[list[str], str | None]] = []
-
-        class Result:
-            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-                self.stdout = stdout
-                self.stderr = stderr
-                self.returncode = returncode
-
-        state = {"listed": 0}
-
-        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:
-            calls.append((argv, input))
-            command = argv[2]
-            if command == "list":
-                state["listed"] += 1
-                if state["listed"] == 1:
-                    return Result("[]")
-                return Result(
-                    json.dumps(
-                        [
-                            {
-                                "pane_id": 4242,
-                                "tab_id": 7,
-                                "window_id": 9,
-                                "workspace": "agp-test",
-                                "window_title": "AGP:agt_wez",
-                                "tab_title": "AGP:agt_wez",
-                                "cwd": "file:///tmp/agt_wez",
-                            }
-                        ]
-                    )
-                )
-            if command == "spawn":
-                return Result("4242\n")
-            if command in {"set-window-title", "set-tab-title", "kill-pane", "send-text"}:
-                return Result("")
-            if command == "get-text":
-                return Result("session output\n")
-            raise AssertionError(f"unexpected wezterm command: {argv}")
-
-        host = WezTermHost(workspace="agp-test", shell_argv=["zsh", "-l"], runner=runner)
-        session = host.get_or_create_session(agent_id="agt_wez", workspace_ref="/tmp/agt_wez")
-        self.assertEqual(session.session_id, "4242")
-        self.assertTrue(host.session_exists(session))
-        health = host.health(session)
-        self.assertTrue(health.exists)
-        self.assertTrue(health.healthy)
-        self.assertEqual(health.metadata["pane_id"], 4242)
-        host.send_text(session, "hello", enter=True)
-        host.interrupt(session)
-        snapshot = host.snapshot(session)
-        host.terminate_session(session)
-
-        self.assertEqual(snapshot["session_id"], "4242")
-        self.assertEqual(snapshot["text"], "session output\n")
-        command_names = [argv[2] for argv, _ in calls]
-        self.assertIn("spawn", command_names)
-        self.assertIn("set-window-title", command_names)
-        self.assertIn("set-tab-title", command_names)
-        self.assertIn("get-text", command_names)
-        self.assertIn("kill-pane", command_names)
-        send_calls = [argv for argv, _ in calls if argv[2] == "send-text"]
-        self.assertGreaterEqual(len(send_calls), 3)
-
     def test_inprocess_terminal_host_cursor_reads_incremental_output(self) -> None:
         host = InProcessTerminalHost()
         session = host.get_or_create_session(agent_id="agt_cursor")
@@ -1865,165 +1800,6 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         host.terminate_session(session)
         self.assertFalse(host.session_exists(session))
         self.assertEqual(host.health(session).reason, "session_missing")
-
-    def test_wezterm_host_cursor_reads_incremental_output(self) -> None:
-        class Result:
-            def __init__(self, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
-                self.stdout = stdout
-                self.stderr = stderr
-                self.returncode = returncode
-
-        get_text_responses = iter(["baseline\n", "baseline\nnew line\n", "baseline\nnew line\n"])
-
-        def runner(argv: list[str], input: str | None = None, **_: object) -> Result:  # noqa: ARG001
-            if argv[2] == "get-text":
-                return Result(next(get_text_responses))
-            if argv[2] == "list":
-                return Result(
-                    json.dumps(
-                        [
-                            {
-                                "pane_id": 55,
-                                "tab_id": 7,
-                                "window_id": 9,
-                                "workspace": "agp-test",
-                                "window_title": "AGP:agt_wez_cursor",
-                                "tab_title": "AGP:agt_wez_cursor",
-                                "cwd": "file:///tmp/agt_wez_cursor",
-                            }
-                        ]
-                    )
-                )
-            if argv[2] == "send-text":
-                return Result("")
-            raise AssertionError(f"unexpected wezterm command: {argv}")
-
-        host = WezTermHost(workspace="agp-test", runner=runner)
-        session = host.get_or_create_session(agent_id="agt_wez_cursor", workspace_ref="/tmp/agt_wez_cursor")
-        cursor = host.create_cursor(session)
-        first = host.read_output(session, cursor)
-        self.assertTrue(first.changed)
-        self.assertEqual(first.text, "new line\n")
-        second = host.read_output(session, first.cursor)
-        self.assertFalse(second.changed)
-        self.assertEqual(second.text, "")
-
-    def test_codex_adapter_completes_on_marker_output(self) -> None:
-        class CodexHost(InProcessTerminalHost):
-            def send_text(self, session, text: str, *, enter: bool = True) -> None:
-                super().send_text(session, text, enter=enter)
-                if text.startswith("AGP_RUN_BEGIN run_codex"):
-                    self._history.setdefault(session.session_id, []).append(
-                        'AGP_RUN_RESULT run_codex {"status":"success","result":"success payload"}\n'
-                    )
-
-        host = CodexHost()
-        session = host.get_or_create_session(agent_id="agt_codex")
-        host.send_text(session, "bootstrap noise", enter=True)
-        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
-
-        class SupervisorStub:
-            def __init__(self) -> None:
-                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_codex"})()})()
-                self.progress: list[dict] = []
-
-            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
-                return None
-
-            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
-                self.progress.append({"message": message, "details": details or {}})
-                return {"status": "ok"}
-
-        supervisor = SupervisorStub()
-        claimed = {
-            "agent_id": "agt_codex",
-            "job": {"job_id": "job_codex"},
-            "run": {"run_id": "run_codex"},
-            "message": {"text": "do work"},
-        }
-        adapter.ensure_bootstrapped(host=host, session=session, claimed=claimed)
-        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=supervisor)
-        roles = [artifact.role for artifact in result.artifacts]
-        self.assertEqual(roles, ["prompt", "prompt", "transcript_log", "exec_log", "result"])
-        self.assertEqual(result.artifacts[-1].content, "success payload")
-
-    def test_codex_adapter_ignores_terminal_lines_for_other_run_ids(self) -> None:
-        class CodexHost(InProcessTerminalHost):
-            def send_text(self, session, text: str, *, enter: bool = True) -> None:
-                super().send_text(session, text, enter=enter)
-                if text.startswith("AGP_RUN_BEGIN run_live"):
-                    self._history.setdefault(session.session_id, []).append(
-                        'AGP_RUN_RESULT run_old {"status":"success","result":"stale payload"}\n'
-                    )
-                    self._history.setdefault(session.session_id, []).append(
-                        'AGP_RUN_RESULT run_live {"status":"success","result":"fresh payload"}\n'
-                    )
-
-        class SupervisorStub:
-            def __init__(self) -> None:
-                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_codex"})()})()
-
-            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
-                return None
-
-            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
-                return {"status": "ok"}
-
-        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
-        host = CodexHost()
-        session = host.get_or_create_session(agent_id="agt_codex_scoped")
-        claimed = {
-            "agent_id": "agt_codex_scoped",
-            "job": {"job_id": "job_codex_scoped"},
-            "run": {"run_id": "run_live"},
-            "message": {"text": "do scoped work"},
-        }
-        result = adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=SupervisorStub())
-        self.assertEqual(result.artifacts[-1].content, "fresh payload")
-
-    def test_codex_adapter_failure_payload_becomes_failure_artifacts(self) -> None:
-        class CodexHost(InProcessTerminalHost):
-            def send_text(self, session, text: str, *, enter: bool = True) -> None:
-                super().send_text(session, text, enter=enter)
-                if text.startswith("AGP_RUN_BEGIN run_codex_fail"):
-                    self._history.setdefault(session.session_id, []).append(
-                        'AGP_RUN_RESULT run_codex_fail {"status":"failure","error":"tool chain broke"}\n'
-                    )
-
-        class SupervisorStub:
-            def __init__(self) -> None:
-                self.client = type("Client", (), {"identity": type("Identity", (), {"runtime_id": "rtm_codex"})()})()
-
-            def check_interrupt(self, claimed: dict[str, object]) -> None:  # noqa: ARG002
-                return None
-
-            def emit_progress(self, claimed: dict[str, object], *, message: str, details: dict | None = None) -> dict:  # noqa: ARG002
-                return {"status": "ok"}
-
-        adapter = CodexAdapter(max_polls=2, poll_interval_seconds=0.0)
-        host = CodexHost()
-        session = host.get_or_create_session(agent_id="agt_codex_fail")
-        claimed = {
-            "agent_id": "agt_codex_fail",
-            "job": {"job_id": "job_codex_fail"},
-            "run": {"run_id": "run_codex_fail"},
-            "message": {"text": "fail work"},
-        }
-        supervisor = SupervisorStub()
-        with self.assertRaises(Exception) as ctx:
-            adapter.execute_run(host=host, session=session, claimed=claimed, supervisor=supervisor)
-        failure_result = adapter.build_failure_result(
-            host=host,
-            session=session,
-            claimed=claimed,
-            error=ctx.exception,
-            supervisor=supervisor,
-        )
-        roles = [artifact.role for artifact in failure_result.artifacts]
-        self.assertIn("transcript_log", roles)
-        self.assertIn("exec_log", roles)
-        self.assertIn("failure_evidence", roles)
-        self.assertTrue(any("tool chain broke" in artifact.content for artifact in failure_result.artifacts))
 
     def test_runtime_worker_completes_with_registryfs_artifacts(self) -> None:
         settings.artifact_backend = "registryfs"
@@ -2563,9 +2339,8 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
         result = self._cli_invoke(["ls"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("PENDING", result.output)
-        self.assertIn("QUEUE_AGE", result.output)
-        self.assertRegex(result.output, r"agt_pending.*\b1\b.*02m:[0-5][0-9]s")
+        self.assertIn("queue=1", result.output)
+        self.assertIn("agt_pending", result.output)
 
     def test_agp_ls_warns_when_queued_agent_has_no_runtime_bound(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_warn", "capabilities": ["python"]})

@@ -35,7 +35,6 @@ class Settings(BaseSettings):
     queue_max_delivery_attempts: int = 3
     lease_heartbeat_interval_seconds: int = 10
     agent_heartbeat_grace_seconds: int = 60
-    agent_idle_timeout_seconds: int = 300  # legacy, replaced by agent_heartbeat_grace_seconds
     runtime_stale_timeout_seconds: int = 90
     runtime_degraded_timeout_seconds: int = 45
     observability_unreachable_runtime_threshold: int = 1
@@ -55,15 +54,7 @@ class Settings(BaseSettings):
     runtime_agent_adapter_kind: str = "default"
     wezterm_workspace: str = "agp"
     wezterm_domain: str = ""
-    codex_begin_marker: str = "AGP_RUN_BEGIN"
-    codex_result_marker: str = "AGP_RUN_RESULT"
-    codex_poll_interval_seconds: float = 0.25
-    codex_max_polls: int = 20
-    codex_bootstrap_settle_seconds: float = 0.0
-    codex_idle_timeout_polls: int = 0
-    codex_health_check_interval_polls: int = 10
     codex_cli_command: str = "codex"
-    codex_tui_mode: bool = False
     codex_idle_poll_seconds: float = 2.0
     codex_idle_after: int = 3
     codex_idle_timeout_seconds: float = 0.0
@@ -72,27 +63,13 @@ class Settings(BaseSettings):
     claude_code_idle_poll_seconds: float = 2.0
     claude_code_idle_after: int = 3
     claude_code_idle_timeout_seconds: float = 0.0
-    claude_code_session_mode: str = "ephemeral"
-    claude_code_bootstrap_settle_seconds: float = 0.0
+    claude_code_session_mode: str = "sticky"
     wezterm_default_cwd: str = ""
     scrollback_lines: int = 50000
-    wezterm_scrollback_lines: int | None = None
     tmux_scrollback_lines: int = 50000
     tmux_default_cwd: str = ""
     tmux_session_prefix: str = "agp"
     output_checkpoint_dir: Path = Path(".agp-checkpoints")
-
-    @model_validator(mode="before")
-    @classmethod
-    def _apply_legacy_wezterm_scrollback_lines(cls, data: Any) -> Any:
-        if not isinstance(data, dict):
-            return data
-        if "scrollback_lines" in data:
-            return data
-        legacy_value = data.get("wezterm_scrollback_lines")
-        if legacy_value is None:
-            return data
-        return {**data, "scrollback_lines": legacy_value}
 
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> "Settings":

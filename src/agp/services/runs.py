@@ -401,6 +401,7 @@ def complete_run_service(
     lease.released_at = utc_now()
     job.status = JobStatus.COMPLETED.value
     job.result_artifact_id = result_artifact_id
+    job.summary_json = summary or {}
     job.updated_at = utc_now()
     # SessionLocal uses autoflush=False, so flush terminal state transitions
     # before querying for any remaining active work.
@@ -447,6 +448,7 @@ def fail_run_service(
     lease.status = LeaseStatus.RELEASED.value
     lease.released_at = utc_now()
     job.status = JobStatus.FAILED.value
+    job.summary_json = summary or {}
     job.updated_at = utc_now()
     # SessionLocal uses autoflush=False, so flush terminal state transitions
     # before querying for any remaining active work.

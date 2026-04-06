@@ -9,6 +9,7 @@ agp.db-wal
 .agp-artifacts-tests/
 .agp-checkpoints/
 .agp-logs/
+.agp-plugin-runs/
 .wezu/
 .pytest_cache/
 .idea/
@@ -28,6 +29,9 @@ superset/
 .agp-test-verify.db-wal
 .claude/
 prompts/
+
+# scratch docs
+codex-adapter.md
 
 # roro workspace
 .roro/

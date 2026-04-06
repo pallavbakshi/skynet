@@ -125,7 +125,7 @@ local-serve: ## Start local CP + sweepers (SQLite, no infra)
 		exit 1; \
 	fi
 	@echo "Starting local control plane on :$(AGP_PORT)..."
-	@$(RUN) agp serve > .agp-logs/control-plane.out 2>&1 & echo $$! > $(PID_DIR)/control-plane.pid
+	@nohup $(RUN) agp serve > .agp-logs/control-plane.out 2>&1 < /dev/null & echo $$! > $(PID_DIR)/control-plane.pid
 	@echo "Waiting for health check..."
 	@for i in 1 2 3 4 5 6 7 8 9 10; do \
 		if curl -fsS --max-time 2 http://127.0.0.1:$(AGP_PORT)/health >/dev/null 2>&1; then \
@@ -140,8 +140,8 @@ local-serve: ## Start local CP + sweepers (SQLite, no infra)
 		sleep 1; \
 	done
 	@echo "Starting sweepers..."
-	@$(RUN) agp sweep-loop --interval-seconds 5 > .agp-logs/lease-sweeper.out 2>&1 & echo $$! > $(PID_DIR)/lease-sweeper.pid
-	@$(RUN) agp sweep-runtimes-loop --interval-seconds 10 > .agp-logs/runtime-sweeper.out 2>&1 & echo $$! > $(PID_DIR)/runtime-sweeper.pid
+	@nohup $(RUN) agp sweep-loop --interval-seconds 5 > .agp-logs/lease-sweeper.out 2>&1 < /dev/null & echo $$! > $(PID_DIR)/lease-sweeper.pid
+	@nohup $(RUN) agp sweep-runtimes-loop --interval-seconds 10 > .agp-logs/runtime-sweeper.out 2>&1 < /dev/null & echo $$! > $(PID_DIR)/runtime-sweeper.pid
 	@echo ""
 	@echo "Local CP running at http://127.0.0.1:$(AGP_PORT)"
 	@echo "Agents self-register — no seeding needed."
@@ -289,8 +289,8 @@ restart-runtime: ## Restart CP + runtime workers (re-reads code changes, preserv
 			*)          _caps="code" ;; \
 		esac; \
 		echo "  Starting rtm-$$agent (adapter=$$_adapter, caps=$$_caps)"; \
-		$(MAKE) runtime AGP_RUNTIME_ID="rtm-$$agent" AGP_RUNTIME_AGENT_ID="$$agent" \
-			AGP_RUNTIME_CAPS="$$_caps" ADAPTER_KIND="$$_adapter" & \
+		nohup $(MAKE) runtime AGP_RUNTIME_ID="rtm-$$agent" AGP_RUNTIME_AGENT_ID="$$agent" \
+			AGP_RUNTIME_CAPS="$$_caps" ADAPTER_KIND="$$_adapter" >/dev/null 2>&1 < /dev/null & \
 	done; \
 	sleep 5; \
 	echo "Done. Check: make status"

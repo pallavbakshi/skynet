@@ -160,6 +160,14 @@ class PeekResultRequest(BaseModel):
     host_kind: str
 
 
+class NudgeInjectRequest(BaseModel):
+    payload: str = Field(max_length=64 * 1024)  # 64KB max
+
+
+class NudgeConfirmRequest(BaseModel):
+    request_id: str
+
+
 class ArtifactReference(BaseModel):
     role: str
     storage_ref: str
@@ -278,6 +286,7 @@ class JobResponse(BaseModel):
     latest_run_id: str | None = None
     result_artifact_id: str | None = None
     output_contract_json: dict[str, Any] | None = None
+    summary_json: dict[str, Any] | None = None
     conversation_id: str | None = None
     timeout_seconds: int | None = Field(default=None, gt=0)
     deadline_at: Any = None
