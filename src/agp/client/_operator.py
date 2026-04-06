@@ -411,6 +411,20 @@ class AgpClient:
         response.raise_for_status()
         return response.json()["data"]
 
+    # ── Peek ─────────────────────────────────────────────────────
+
+    def request_peek(self, agent_id: str, *, lines: int = 0) -> dict:
+        """Request a terminal peek for an agent's runtime."""
+        response = self._client.post(f"/agents/{agent_id}/peek", params={"lines": lines})
+        response.raise_for_status()
+        return _decode_datetimes(response.json()["data"])
+
+    def get_peek_result(self, agent_id: str, request_id: str) -> dict:
+        """Poll for a peek result."""
+        response = self._client.get(f"/agents/{agent_id}/peek", params={"request_id": request_id})
+        response.raise_for_status()
+        return _decode_datetimes(response.json()["data"])
+
     # ── Observability ─────────────────────────────────────────────
 
     def observability_summary(self) -> dict:

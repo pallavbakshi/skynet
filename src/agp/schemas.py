@@ -153,6 +153,13 @@ class RecoveryRequest(BaseModel):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class PeekResultRequest(BaseModel):
+    request_id: str
+    text: str = Field(max_length=512 * 1024)  # 512KB max
+    session_id: str
+    host_kind: str
+
+
 class ArtifactReference(BaseModel):
     role: str
     storage_ref: str

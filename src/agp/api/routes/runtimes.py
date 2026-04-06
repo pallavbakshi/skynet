@@ -12,7 +12,7 @@ from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _seriali
 from agp.db import get_db
 from agp.enums import HealthStatus, LeaseStatus
 from agp.models import Agent, Job, Lease, Run, Runtime
-from agp.schemas import OkResponse, RuntimeRegisterRequest, RuntimeResponse
+from agp.schemas import OkResponse, PeekResultRequest, RuntimeRegisterRequest, RuntimeResponse
 from agp.services._helpers import _require_runtime
 from agp.services.runtimes import register_runtime_service
 
@@ -90,3 +90,18 @@ def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     agents = db.scalars(select(Agent).join(Runtime, Runtime.agent_id == Agent.agent_id).where(Runtime.runtime_id == runtime.runtime_id)).all()
     data["agents"] = [_serialize(agent, ("agent_id", "capabilities", "status")) for agent in agents]
     return _ok(data)
+
+
+@router.post("/runtimes/{runtime_id}/peek-result")
+def submit_peek_result(runtime_id: str, body: PeekResultRequest, db: Session = Depends(get_db)) -> dict:
+    """Runtime uploads captured terminal text for a peek request."""
+    from agp.services.peek import peek_store
+    _require_runtime(db, runtime_id)
+    peek_store.submit_result(
+        body.request_id,
+        runtime_id=runtime_id,
+        text=body.text,
+        session_id=body.session_id,
+        host_kind=body.host_kind,
+    )
+    return _ok({"accepted": True})

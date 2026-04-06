@@ -90,12 +90,15 @@ class TerminalHost(ABC):
         """
         return ""
 
-    def read_scrollback(self, session: TerminalSession) -> str:
+    def read_scrollback(self, session: TerminalSession, *, lines: int | None = None) -> str:
         """Read the full pane including scrollback history.
 
         Returns as much content as the host can provide.  Tmux hosts
         capture up to ``scrollback_lines`` of history; other hosts fall
         back to :meth:`read_visible`.
+
+        If *lines* is given, return only the last *lines* lines of
+        scrollback.  None means return all available history.
         """
         return self.read_visible(session)
 

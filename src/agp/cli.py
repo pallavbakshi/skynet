@@ -2501,7 +2501,125 @@ def wait_cmd(
         raise typer.Exit(1)
 
 
-# ── 2b. health ──────────────────────────────────────────────────────
+# ── 2b. peek ───────────────────────────────────────────────────────
+
+
+def _try_local_peek(agent_id: str, *, lines: int = 0) -> str | None:
+    """Try to capture terminal content locally (fast path)."""
+    import shutil
+    import subprocess
+
+    # Try tmux first (most common host kind)
+    if shutil.which("tmux"):
+        session_name = f"agp-{agent_id}"
+        try:
+            check = subprocess.run(
+                ["tmux", "has-session", "-t", session_name],
+                capture_output=True, timeout=3,
+            )
+            if check.returncode == 0:
+                args = ["tmux", "capture-pane", "-t", session_name, "-p"]
+                if lines and lines > 0:
+                    args.extend(["-S", str(-lines)])
+                result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    return result.stdout
+        except Exception:
+            pass
+
+    # Try wezterm
+    if shutil.which("wezterm"):
+        try:
+            result = subprocess.run(
+                ["wezterm", "cli", "list", "--format", "json"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0:
+                import json as _json
+                for pane in _json.loads(result.stdout):
+                    title = pane.get("title", "")
+                    if f"agp-{agent_id}" in title or title == agent_id:
+                        pane_id = pane.get("pane_id")
+                        args = ["wezterm", "cli", "get-text", "--pane-id", str(pane_id)]
+                        if lines and lines > 0:
+                            args.extend(["--start-line", str(-lines)])
+                        result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+                        if result.returncode == 0:
+                            return result.stdout
+        except Exception:
+            pass
+
+    return None
+
+
+@app.command()
+def peek(
+    agent_id: str = typer.Argument(..., help="Agent ID to peek at."),
+    lines: int = typer.Option(0, "--lines", "-n", help="Scrollback lines to capture (0 = visible screen only)."),
+    timeout: float = typer.Option(30.0, "--timeout", help="Max seconds to wait for remote peek result."),
+    server_url: str = typer.Option(None, help="CP URL."),
+) -> None:
+    """Show live terminal content of an agent's runtime.
+
+    Captures the current screen (or scrollback with --lines N) from the
+    agent's terminal session, whether the runtime is local or remote.
+
+    For local agents, captures directly from tmux/wezterm (sub-second).
+    For remote agents, requests via the control plane (~5-15s).
+
+    Examples:
+
+      agp peek claude-dev
+      agp peek codex-reviewer --lines 100
+      agp peek claude-reviewer -n 50 --timeout 20
+    """
+    import time as _time
+    import httpx as _httpx
+
+    # Fast path: try local capture first
+    local_text = _try_local_peek(agent_id, lines=lines)
+    if local_text is not None:
+        typer.echo(local_text, nl=False)
+        return
+
+    # Remote path: request via CP
+    with _cli_client(server_url) as client:
+        try:
+            req = client.request_peek(agent_id, lines=lines)
+        except _httpx.HTTPStatusError as exc:
+            typer.echo(_format_http_error(exc), err=True)
+            raise typer.Exit(1)
+
+        request_id = req["request_id"]
+        runtime_id = req.get("runtime_id", "?")
+        typer.echo(f"[..] Peek requested for {agent_id} (runtime={runtime_id}). Waiting for heartbeat...", err=True)
+
+        start = _time.monotonic()
+        while _time.monotonic() - start < timeout:
+            elapsed = int(_time.monotonic() - start)
+            try:
+                result = client.get_peek_result(agent_id, request_id)
+            except _httpx.HTTPStatusError as exc:
+                typer.echo(_format_http_error(exc), err=True)
+                raise typer.Exit(1)
+
+            if result.get("status") == "ready":
+                typer.echo(result["text"], nl=False)
+                return
+
+            typer.echo(f"\r[..] Waiting for heartbeat... ({elapsed}s)", err=True, nl=False)
+            _time.sleep(1.0)
+
+        typer.echo("", err=True)  # newline after progress
+        typer.echo(
+            f"Timed out after {int(timeout)}s waiting for peek result. "
+            "The runtime may be offline or slow to heartbeat.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+
+# ── 2c. health ──────────────────────────────────────────────────────
 
 
 @app.command()

@@ -10,10 +10,11 @@ from sqlalchemy.orm import Session
 
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
-from agp.models import Agent, utc_now
+from agp.models import Agent, Runtime, utc_now
 from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue
 from agp.schemas import AgentDownRequest, AgentInterruptRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
 from agp.services.agents import agent_down_service, agent_interrupt_service, agent_patch_service, agent_undrain_service, agent_up_service
+from agp.services.peek import peek_store
 
 router = APIRouter()
 
@@ -99,7 +100,7 @@ def get_agent(agent_id: str, db: Session = Depends(get_db)) -> dict:
     return _ok(_serialize_agent_with_queue_depth(agent, backlog, include_updated_at=True))
 
 
-@router.post("/agents/up", response_model=OkResponse[AgentResponse])
+@router.post("/agents/up")
 def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
     agent = agent_up_service(
         db,
@@ -110,7 +111,18 @@ def agent_up(request: AgentUpRequest, db: Session = Depends(get_db)) -> dict:
         runtime_id=request.runtime_id,
     )
     backlog = _agent_backlogs(db, [agent])[agent.agent_id]
-    return _ok(_serialize_agent_with_queue_depth(agent, backlog))
+    data = _serialize_agent_with_queue_depth(agent, backlog)
+    # Inject peek directives if a peek request is pending for this runtime.
+    runtime_id = request.runtime_id
+    if runtime_id:
+        pending = peek_store.get_pending(runtime_id)
+        if pending:
+            data["_directives"] = {
+                "peek_requested": True,
+                "peek_lines": pending.lines,
+                "peek_request_id": pending.request_id,
+            }
+    return _ok(data)
 
 
 @router.patch("/agents/{agent_id}", response_model=OkResponse[AgentResponse])
@@ -153,3 +165,34 @@ def agent_down(agent_id: str, body: AgentDownRequest, http_request: Request, db:
                 return _error_response(403, "forbidden", "force-delete requires operator lifecycle role; use mode=drain for runtime self-deregister")
     result = agent_down_service(db, agent_id=agent_id, mode=body.mode)
     return _ok(result)
+
+
+@router.post("/agents/{agent_id}/peek")
+def request_peek(agent_id: str, lines: int = Query(default=0, ge=0), db: Session = Depends(get_db)) -> dict:
+    """Request a terminal peek for an agent's runtime."""
+    from agp.api.helpers import _error_response
+    from agp.services._helpers import _new_id, _require_agent
+    agent = _require_agent(db, agent_id)
+    runtime = db.scalar(select(Runtime).where(Runtime.agent_id == agent_id))
+    if runtime is None:
+        return _error_response(404, "no_runtime", f"no runtime linked to agent {agent_id}")
+    if runtime.health_status == "unreachable":
+        return _error_response(409, "runtime_unreachable", f"runtime {runtime.runtime_id} is offline")
+    request_id = _new_id("peek")
+    peek_store.request_peek(runtime_id=runtime.runtime_id, lines=lines, request_id=request_id)
+    return _ok({"request_id": request_id, "runtime_id": runtime.runtime_id})
+
+
+@router.get("/agents/{agent_id}/peek")
+def get_peek(agent_id: str, request_id: str = Query(...)) -> dict:
+    """Poll for a peek result."""
+    result = peek_store.get_result(request_id)
+    if result is None:
+        return _ok({"status": "pending"})
+    return _ok({
+        "status": "ready",
+        "text": result.text,
+        "session_id": result.session_id,
+        "host_kind": result.host_kind,
+        "captured_at": result.captured_at.isoformat(),
+    })

@@ -157,6 +157,27 @@ class RuntimeSupervisor:
     ) -> list[ArtifactPayload]:
         return _failure_snapshot_payloads(host=self.host, session=session, error=error)
 
+    def _handle_peek_request(self, *, agent_id: str, request_id: str, lines: int) -> None:
+        """Capture terminal content and upload to CP for a peek request."""
+        try:
+            with self._session_lock:
+                session = getattr(self, "_active_session", None)
+            if session is None:
+                # Idle: get existing persistent session (tmux sessions survive between jobs)
+                session = self.host.get_or_create_session(agent_id=agent_id)
+            if lines and lines > 0:
+                text = self.host.read_scrollback(session, lines=lines)
+            else:
+                text = self.host.read_visible(session)
+            self.client.submit_peek_result(
+                request_id=request_id,
+                text=text,
+                session_id=session.session_id,
+                host_kind=self.host.kind,
+            )
+        except Exception:  # noqa: BLE001
+            _logger.debug("peek request failed for %s", agent_id, exc_info=True)
+
     def check_interrupt(self, claimed: dict[str, Any]) -> None:
         tui_died = getattr(self, "_active_tui_died", None)
         if tui_died is not None and tui_died.is_set():
@@ -352,12 +373,19 @@ class RuntimeSupervisor:
                     elapsed = monotonic() - last_agent_heartbeat
                     if elapsed >= agent_heartbeat_seconds:
                         try:
-                            self.client.agent_up(
+                            up_resp = self.client.agent_up(
                                 agent_id=agent_id,
                                 capabilities=resolved_caps,
                                 metadata=self.client.identity.metadata,
                                 runtime_id=self.client.identity.runtime_id,
                             )
+                            directives = (up_resp or {}).get("_directives") or {}
+                            if directives.get("peek_requested"):
+                                self._handle_peek_request(
+                                    agent_id=agent_id,
+                                    request_id=directives["peek_request_id"],
+                                    lines=directives.get("peek_lines", 0),
+                                )
                         except Exception:  # noqa: BLE001
                             _logger.warning("agent heartbeat failed (CP may be temporarily unreachable)", exc_info=True)
                         last_agent_heartbeat = monotonic()

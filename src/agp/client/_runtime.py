@@ -370,3 +370,26 @@ class RuntimeClient:
             }
         )
         return payload
+
+    def submit_peek_result(
+        self,
+        *,
+        request_id: str,
+        text: str,
+        session_id: str,
+        host_kind: str,
+    ) -> dict:
+        """Upload captured terminal text for a peek request."""
+        response = self._client.post(
+            f"/runtimes/{self.identity.runtime_id}/peek-result",
+            json={
+                "request_id": request_id,
+                "text": text,
+                "session_id": session_id,
+                "host_kind": host_kind,
+            },
+        )
+        response.raise_for_status()
+        payload = response.json()["data"]
+        self._log({"kind": "runtime_client", "action": "submit_peek_result", "request_id": request_id})
+        return payload

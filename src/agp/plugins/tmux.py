@@ -377,8 +377,17 @@ class TmuxHost(TerminalHost):
             "capture-pane", "-t", session.session_id, "-p",
         ])
 
-    def read_scrollback(self, session: TerminalSession) -> str:
-        """Read the full pane including scrollback history."""
+    def read_scrollback(self, session: TerminalSession, *, lines: int | None = None) -> str:
+        """Read the pane including scrollback history.
+
+        If *lines* is given, capture only the last *lines* lines.
+        Otherwise capture the full scrollback (up to scrollback_lines).
+        """
+        if lines is not None and lines > 0:
+            return self._run_retry_missing_pane([
+                "capture-pane", "-t", session.session_id, "-p",
+                "-S", str(-lines),
+            ])
         return self._capture_full(session)
 
     def wait_for_idle(
