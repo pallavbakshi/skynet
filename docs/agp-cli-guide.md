@@ -296,8 +296,9 @@ agp status <job_id>
 # 2. Deep-dive if needed
 agp diagnose agent <agent_id>
 
-# 3. Check the raw terminal (for tmux-hosted agents)
-tmux capture-pane -t <pane_name> -p -S -50
+# 3. Peek at the agent's live terminal (works for local and remote agents)
+agp peek <agent_id>
+agp peek <agent_id> --lines 50    # include scrollback
 ```
 
 **Common causes of apparent stalls:**

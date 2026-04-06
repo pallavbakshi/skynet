@@ -255,16 +255,11 @@ Expected output for the smoke prompt:
 
 ### Terminal view on the Mac
 
-If you used `tmux`:
+Use `agp peek` to inspect any agent's terminal (works for both local and remote agents):
 
 ```bash
-tmux capture-pane -t agp-agt_local -p | tail -40
-```
-
-If you used WezTerm:
-
-```bash
-wezterm cli list --format json
+agp peek agt_local
+agp peek agt_local --lines 40    # include scrollback
 ```
 
 ## 6. Cleanup
@@ -328,7 +323,7 @@ In that mode, send and wait commands should also use:
 | Runtime starts but claims nothing | Wrong agent id | Keep `AGP_RUNTIME_AGENT_ID=agt_local` or reseed a matching agent |
 | Codex opens in the wrong directory | Wrong `workspace_ref` on Ubuntu seed config | Fix `skyops.local.toml`, then `make local-reset && make local-initdb && make local-seed` |
 | No result artifact on Ubuntu | Runtime not using HTTP artifact backend | `make runtime-remote` and `make runtime-wezterm` already set `AGP_ARTIFACT_BACKEND=http` |
-| `tmux capture-pane` shows provider env vars | tmux transcript contains launch env | Treat tmux transcript artifacts as sensitive |
+| `agp peek` shows provider env vars | Terminal transcript contains launch env | Treat terminal transcript artifacts as sensitive |
 
 ## Known Good Path
 

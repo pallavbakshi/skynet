@@ -869,67 +869,26 @@ def _print_job_result(job: dict, client) -> None:
         except Exception:
             typer.echo("(no artifact)")
 
-    if job_status == "failed" and retry_count > 0:
-        typer.echo("")
-        typer.echo(
-            f"Notice: System exhausted best-effort retries ({retry_count} attempts). "
-            "Review the error log and pivot your strategy."
-        )
-
-
-def _peek_tip(agent_id: str) -> str | None:
-    """Return a terminal-specific tip for peeking at an agent's live output.
-
-    Detects the local terminal host by probing for tmux sessions or
-    wezterm panes.  Returns None when no local session is found (remote
-    runtime or non-interactive environment).
-    """
-    import shutil
-    import subprocess
-
-    # Try tmux first
-    if shutil.which("tmux"):
-        try:
-            result = subprocess.run(
-                ["tmux", "has-session", "-t", f"agp-{agent_id}"],
-                capture_output=True, timeout=3,
+    if job_status == "failed":
+        agent_id = job.get("target_agent_id", "")
+        if retry_count > 0:
+            typer.echo("")
+            typer.echo(
+                f"Notice: System exhausted best-effort retries ({retry_count} attempts). "
+                "Review the error log and pivot your strategy."
             )
-            if result.returncode == 0:
-                return (
-                    f"Tip: peek at live output with:\n"
-                    f"  tmux capture-pane -t agp-{agent_id} -p -S -30"
-                )
-        except Exception:
-            pass
+        if agent_id:
+            typer.echo(f"Tip: inspect the agent's terminal:  agp peek {agent_id}")
 
-    # Try wezterm
-    if shutil.which("wezterm"):
-        try:
-            result = subprocess.run(
-                ["wezterm", "cli", "list", "--format", "json"],
-                capture_output=True, text=True, timeout=3,
-            )
-            if result.returncode == 0:
-                import json as _json
-                for pane in _json.loads(result.stdout):
-                    title = pane.get("title", "")
-                    if f"AGP:{agent_id}" in title:
-                        pane_id = pane.get("pane_id")
-                        return (
-                            f"Tip: peek at live output with:\n"
-                            f"  wezterm cli get-text --pane-id {pane_id}"
-                        )
-        except Exception:
-            pass
 
-    return None
+def _peek_tip(agent_id: str) -> str:
+    """Return a tip for peeking at an agent's live terminal output."""
+    return f"Tip: peek at live output with:  agp peek {agent_id}"
 
 
 def _print_peek_tip(agent_id: str) -> None:
-    """Print a peek tip if one is available."""
-    tip = _peek_tip(agent_id)
-    if tip:
-        typer.echo(tip)
+    """Print the peek tip."""
+    typer.echo(_peek_tip(agent_id))
 
 
 def _print_detached(job_id: str, agent_id: str) -> None:
@@ -939,9 +898,10 @@ def _print_detached(job_id: str, agent_id: str) -> None:
     typer.echo(f"STATUS:       IN_PROGRESS")
     typer.echo("")
     typer.echo("Notice: The CLI has detached to free your terminal.")
+    typer.echo(f"- To peek at live output:    agp peek {agent_id}")
     typer.echo(f"- To check status manually:  agp status {job_id}")
     typer.echo(f"- To wait synchronously:     agp wait {job_id}")
-    _print_peek_tip(agent_id)
+    typer.echo(f"- To fetch result later:     agp result {job_id}")
 
 
 def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0):
@@ -952,6 +912,7 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
     start = time.monotonic()
     deadline = start + timeout
     last_heartbeat = start
+    next_peek_tip_at = 30  # first tip at 30s, then decaying frequency
 
     while time.monotonic() < deadline:
         job = client.get_job(job_id)
@@ -999,6 +960,12 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
             except Exception:
                 pass
             typer.echo(f"[..] Agent working... ({elapsed}s elapsed){hint}")
+            # Surface peek tip periodically (30s, then 90s, then every 120s)
+            if elapsed >= next_peek_tip_at:
+                agent_id = job.get("target_agent_id", "")
+                if agent_id:
+                    typer.echo(f"     Tip: agp peek {agent_id}")
+                next_peek_tip_at = elapsed + (60 if next_peek_tip_at < 120 else 120)
             last_heartbeat = now
 
         time.sleep(2)
@@ -1429,6 +1396,9 @@ def send(
       stdin             Pipe or redirect: echo "..." | agp send agent
                         or: agp send agent - < prompt.md
 
+    While waiting, use `agp peek <agent_id>` in another terminal to see
+    what the agent is doing in real time.
+
     Examples:
 
       agp send claude-dev "fix the bug in cli.py"
@@ -1576,6 +1546,10 @@ def reply(
 
     Reply text can be passed as unquoted words after the job ID, via --via-file,
     or piped through stdin.
+
+    While waiting, use `agp peek <agent_id>` in another terminal to see
+    what the agent is doing in real time.
+
     Unknown flags in the reply (e.g. --resume, --no-cache) are passed through.
     If the reply text must contain this command's own option names (--detach,
     --timeout, etc.), insert ``--`` before the reply to stop option parsing:
@@ -2462,7 +2436,11 @@ def wait_cmd(
     server_url: str = typer.Option(None, help="CP URL."),
     timeout: int = typer.Option(300, help="Wait timeout in seconds (default: 300)."),
 ) -> None:
-    """Re-attach to a running job and wait for its result."""
+    """Re-attach to a running job and wait for its result.
+
+    While waiting, use `agp peek <agent_id>` in another terminal to
+    inspect what the agent is doing.
+    """
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
@@ -2497,7 +2475,9 @@ def wait_cmd(
             return
 
         typer.echo("timeout — job still running", err=True)
-        typer.echo(f"Check again with: agp status {job_id}")
+        typer.echo(f"Check again with:   agp status {job_id}")
+        if agent_id and agent_id != "?":
+            typer.echo(f"Peek at terminal:   agp peek {agent_id}")
         raise typer.Exit(1)
 
 
@@ -2561,17 +2541,28 @@ def peek(
 ) -> None:
     """Show live terminal content of an agent's runtime.
 
-    Captures the current screen (or scrollback with --lines N) from the
-    agent's terminal session, whether the runtime is local or remote.
+    Peek is the universal way to inspect what any agent is doing right now.
+    It works regardless of terminal host (tmux, wezterm) and regardless of
+    whether the agent is local or on a remote server.
 
-    For local agents, captures directly from tmux/wezterm (sub-second).
-    For remote agents, requests via the control plane (~5-15s).
+    By default captures the visible screen. Use --lines N to include
+    scrollback history (useful for seeing earlier output or error traces).
 
-    Examples:
+    Local agents:   captured directly from tmux/wezterm (sub-second).
+    Remote agents:  captured via the control plane on the next heartbeat (~5-15s).
 
-      agp peek claude-dev
-      agp peek codex-reviewer --lines 100
-      agp peek claude-reviewer -n 50 --timeout 20
+    Common use cases:
+
+      agp peek claude-dev              # what is it doing right now?
+      agp peek claude-dev -n 200       # show last 200 lines of scrollback
+      agp peek codex-reviewer          # inspect a remote agent on another server
+      agp peek claude-dev --timeout 5  # fail fast if agent is slow to respond
+
+    Use peek when:
+      - A job is running long and you want to see progress
+      - A job failed and you want to see the agent's terminal state
+      - You want to verify an agent is actually working, not stuck
+      - You need to debug a remote agent without SSH access
     """
     import time as _time
     import httpx as _httpx
@@ -2924,6 +2915,9 @@ def _status_job_from_data(job: dict, client) -> None:
                 typer.echo(art.get("content", "(no content)"))
         except Exception:
             pass
+        agent_id = job.get("target_agent_id", "")
+        if agent_id:
+            typer.echo(f"Tip: inspect the agent's terminal:  agp peek {agent_id}")
 
 
 # ── 4. jobs ──────────────────────────────────────────────────────────
@@ -3075,6 +3069,9 @@ def result(
             else:
                 typer.echo(f"WARNING: Job failed. Showing {art_role}.", err=True)
             typer.echo("  Tip: use --role to select a specific artifact (e.g. --role transcript_log).", err=True)
+            target_agent = (job_data or {}).get("target_agent_id", "")
+            if target_agent:
+                typer.echo(f"  Tip: inspect the agent's terminal:  agp peek {target_agent}", err=True)
             typer.echo("---", err=True)
         try:
             data = client.fetch_artifact(art["artifact_id"], content=True)
@@ -3548,24 +3545,20 @@ def _wait_for_tmux_idle(
     idle_after: int = 3,
     timeout_seconds: float = 30.0,
 ) -> bool:
-    """Wait until tmux session output stabilises.  Returns True if idle detected."""
-    import subprocess
+    """Wait until terminal output stabilises.  Returns True if idle detected."""
     import time
+
+    # Derive agent_id from session name (agp-{agent_id} naming convention)
+    # _try_local_peek uses this to probe tmux/wezterm sessions.
+    agent_id = session_name.removeprefix("agp-") if session_name.startswith("agp-") else session_name
 
     last_output = ""
     stable_count = 0
     deadline = time.monotonic() + timeout_seconds
 
     while time.monotonic() < deadline:
-        try:
-            result = subprocess.run(
-                ["tmux", "capture-pane", "-t", session_name, "-p"],
-                capture_output=True, text=True, timeout=5,
-            )
-            current = result.stdout.rstrip()
-        except Exception:
-            time.sleep(poll_seconds)
-            continue
+        current = _try_local_peek(agent_id) or ""
+        current = current.rstrip()
 
         if current == last_output:
             stable_count += 1
