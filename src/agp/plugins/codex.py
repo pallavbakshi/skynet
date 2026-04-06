@@ -349,7 +349,7 @@ class CodexAdapter(AgentAdapter):
         idle_poll_seconds: float = 2.0,
         idle_after: int = 3,
         idle_timeout_seconds: float = 0.0,
-        session_mode: str = "ephemeral",
+        session_mode: str = "sticky",
     ) -> None:
         self.begin_marker = begin_marker
         self.result_marker = result_marker

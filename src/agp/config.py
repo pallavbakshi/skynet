@@ -67,7 +67,7 @@ class Settings(BaseSettings):
     codex_idle_poll_seconds: float = 2.0
     codex_idle_after: int = 3
     codex_idle_timeout_seconds: float = 0.0
-    codex_session_mode: str = "ephemeral"
+    codex_session_mode: str = "sticky"
     claude_code_cli_command: str = "claude"
     claude_code_idle_poll_seconds: float = 2.0
     claude_code_idle_after: int = 3

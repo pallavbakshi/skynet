@@ -209,7 +209,7 @@ nudge-loop: ## Start nudge delivery daemon for orc
 
 # ── Stop targets ─────────────────────────────────────────────────────
 
-.PHONY: stop stop-cp stop-runtime stop-docker stop-kind
+.PHONY: stop stop-cp stop-runtime stop-docker stop-kind restart
 
 stop: stop-cp stop-runtime stop-docker stop-kind ## Stop everything
 
@@ -255,8 +255,8 @@ restart-runtime: ## Restart CP + runtime workers (re-reads code changes, preserv
 		echo "  make claude-reviewer &"; \
 		exit 0; \
 	fi; \
-	echo "1/6 Discovering agents: $$_agents"; \
-	echo "2/6 Stopping runtimes..."; \
+	echo "1/7 Discovering agents: $$_agents"; \
+	echo "2/7 Stopping runtimes..."; \
 	for pid in $$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ {print $$1}'); do \
 		kill $$pid 2>/dev/null || true; \
 	done; \
@@ -264,13 +264,15 @@ restart-runtime: ## Restart CP + runtime workers (re-reads code changes, preserv
 		ps -eo args= 2>/dev/null | grep -q '[a]gp runtime-work-loop' || break; \
 		sleep 0.5; \
 	done; \
-	echo "3/6 Stopping control plane..."; \
+	echo "3/7 Clearing old runtime state..."; \
+	$(MAKE) runtime-clean-state; \
+	echo "4/7 Stopping control plane..."; \
 	$(MAKE) stop-cp; \
-	echo "4/6 Reinstalling editable package..."; \
+	echo "5/7 Reinstalling editable package..."; \
 	uv pip install -e . -q 2>&1 | tail -1; \
-	echo "5/6 Starting control plane..."; \
+	echo "6/7 Starting control plane..."; \
 	$(MAKE) local-serve; \
-	echo "6/6 Restarting runtimes..."; \
+	echo "7/7 Restarting runtimes..."; \
 	for agent in $$_agents; do \
 		case "$$agent" in \
 			claude-*) _adapter=claude_code ;; \
@@ -292,6 +294,8 @@ restart-runtime: ## Restart CP + runtime workers (re-reads code changes, preserv
 	done; \
 	sleep 5; \
 	echo "Done. Check: make status"
+
+restart: restart-runtime ## Restart CP + runtime workers from a clean runtime state
 
 stop-docker: ## Stop docker compose stack
 	@if command -v docker >/dev/null 2>&1; then \
@@ -374,7 +378,7 @@ ps: ## Show docker compose status
 
 # ── Runtime targets ──────────────────────────────────────────────────
 
-.PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-clean-tmux runtime-clean-wezterm runtime-clean runtime-deploy codex-dev codex-reviewer claude-dev claude-reviewer
+.PHONY: runtime runtime-remote runtime-wezterm runtime-stop-remote runtime-stop-agent runtime-clean-tmux runtime-clean-wezterm runtime-clean-state runtime-fresh-agent runtime-clean runtime-deploy codex-dev codex-reviewer claude-dev claude-reviewer
 
 runtime: ## Start a local runtime (agent self-registers with CP)
 	$(call require_provider_env)
@@ -397,6 +401,7 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 	AGP_ARTIFACT_BACKEND=http \
 	$(if $(filter codex,$(ADAPTER_KIND)), \
 		AGP_CODEX_TUI_MODE=true \
+		AGP_CODEX_SESSION_MODE=sticky \
 		AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 		AGP_CODEX_MAX_POLLS=240 \
 		AGP_CODEX_POLL_INTERVAL_SECONDS=2.0 \
@@ -420,15 +425,19 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 # ── Convenience runtime targets ──────────────────────────────────────
 
 codex-dev: ## Start codex-dev agent (code,python capabilities)
+	$(MAKE) runtime-fresh-agent AGP_RUNTIME_ID=rtm-codex-dev AGP_RUNTIME_AGENT_ID=codex-dev
 	$(MAKE) runtime AGP_RUNTIME_ID=rtm-codex-dev AGP_RUNTIME_AGENT_ID=codex-dev AGP_RUNTIME_CAPS=code,python
 
 codex-reviewer: ## Start codex-reviewer agent (review capability)
+	$(MAKE) runtime-fresh-agent AGP_RUNTIME_ID=rtm-codex-reviewer AGP_RUNTIME_AGENT_ID=codex-reviewer
 	$(MAKE) runtime AGP_RUNTIME_ID=rtm-codex-reviewer AGP_RUNTIME_AGENT_ID=codex-reviewer AGP_RUNTIME_CAPS=review
 
 claude-dev: ## Start claude-dev agent (code,python capabilities)
+	$(MAKE) runtime-fresh-agent AGP_RUNTIME_ID=rtm-claude-dev AGP_RUNTIME_AGENT_ID=claude-dev
 	$(MAKE) runtime AGP_RUNTIME_ID=rtm-claude-dev AGP_RUNTIME_AGENT_ID=claude-dev AGP_RUNTIME_CAPS=code,python ADAPTER_KIND=claude_code
 
 claude-reviewer: ## Start claude-reviewer agent (review capability)
+	$(MAKE) runtime-fresh-agent AGP_RUNTIME_ID=rtm-claude-reviewer AGP_RUNTIME_AGENT_ID=claude-reviewer
 	$(MAKE) runtime AGP_RUNTIME_ID=rtm-claude-reviewer AGP_RUNTIME_AGENT_ID=claude-reviewer AGP_RUNTIME_CAPS=review ADAPTER_KIND=claude_code
 
 runtime-remote: ## Start a runtime connecting to remote CP
@@ -440,6 +449,7 @@ runtime-remote: ## Start a runtime connecting to remote CP
 	AGP_RUNTIME_TERMINAL_HOST_KIND=tmux \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
+	AGP_CODEX_SESSION_MODE=sticky \
 	AGP_TMUX_DEFAULT_CWD="$(ROOT)" \
 	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
@@ -461,6 +471,7 @@ runtime-wezterm: ## Start a WezTerm runtime connecting to remote CP
 	AGP_RUNTIME_TERMINAL_HOST_KIND=wezterm \
 	AGP_RUNTIME_AGENT_ADAPTER_KIND=codex \
 	AGP_CODEX_TUI_MODE=true \
+	AGP_CODEX_SESSION_MODE=sticky \
 	AGP_WEZTERM_DEFAULT_CWD="$(ROOT)" \
 	AGP_CODEX_CLI_COMMAND="$(AGP_CODEX_CLI_COMMAND)" \
 	AGP_CODEX_IDLE_TIMEOUT_SECONDS=180.0 \
@@ -479,6 +490,19 @@ runtime-stop-remote: ## Stop local runtime worker process
 	done
 	@echo "Runtime worker stopped."
 
+runtime-stop-agent: ## Stop runtime worker process for AGP_RUNTIME_AGENT_ID
+	@if [ -z "$(AGP_RUNTIME_AGENT_ID)" ]; then \
+		echo "ERROR: AGP_RUNTIME_AGENT_ID is required"; \
+		exit 1; \
+	fi
+	@pids="$$(ps -eo pid=,args= | awk '/[a]gp runtime-work-loop/ && index($$0, "--agent-id $(AGP_RUNTIME_AGENT_ID)") {print $$1}')"; \
+	if [ -n "$$pids" ]; then \
+		for pid in $$pids; do \
+			$(SUDO) kill $$pid 2>/dev/null || kill $$pid 2>/dev/null || true; \
+		done; \
+	fi
+	@echo "Runtime worker stopped for $(AGP_RUNTIME_AGENT_ID)."
+
 runtime-clean-tmux: ## Kill all agp-* tmux sessions (or one if AGP_RUNTIME_AGENT_ID is set)
 	@if command -v tmux >/dev/null 2>&1; then \
 		if [ "$(AGP_RUNTIME_AGENT_ID)" != "agt_local" ]; then \
@@ -496,6 +520,51 @@ runtime-clean-wezterm: ## Kill WezTerm panes for the runtime agent
 		AGP_RUNTIME_AGENT_ID="$(AGP_RUNTIME_AGENT_ID)" wezterm cli list --format json 2>/dev/null | python3 -c 'import json, os, subprocess, sys; raw = sys.stdin.read().strip(); panes = json.loads(raw) if raw else []; agent = "AGP:" + os.environ["AGP_RUNTIME_AGENT_ID"]; [subprocess.run(["wezterm", "cli", "kill-pane", "--pane-id", str(p["pane_id"])], check=False) for p in panes if p.get("pane_id") and agent in (p.get("tab_title") or "")]' || true; \
 	fi
 	@echo "WezTerm panes cleaned."
+
+runtime-clean-state: ## Delete local runtime artifacts, checkpoints, and temp caches
+	@if command -v tmux >/dev/null 2>&1; then \
+		for sess in $$(tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^agp-'); do \
+			tmux kill-session -t "$$sess" 2>/dev/null || true; \
+		done; \
+	fi
+	@if command -v wezterm >/dev/null 2>&1; then \
+		wezterm cli list --format json 2>/dev/null | python3 -c 'import json, subprocess, sys; raw = sys.stdin.read().strip(); panes = json.loads(raw) if raw else []; [subprocess.run(["wezterm", "cli", "kill-pane", "--pane-id", str(p["pane_id"])], check=False) for p in panes if "AGP:" in (p.get("tab_title") or "")]' || true; \
+	fi
+	@uid="$$(id -u)"; \
+	rm -rf \
+		".agp-checkpoints" \
+		"/tmp/agp-launches" \
+		"/tmp/agp-tasks-$$uid" \
+		"/tmp/agp-schemas-$$uid"; \
+	rm -f .agp-logs/rtm-*.out; \
+	mkdir -p .agp-checkpoints .agp-logs
+	@echo "Runtime local state deleted."
+
+runtime-fresh-agent: ## Fully reset one runtime agent before relaunch
+	@if [ -z "$(AGP_RUNTIME_AGENT_ID)" ]; then \
+		echo "ERROR: AGP_RUNTIME_AGENT_ID is required"; \
+		exit 1; \
+	fi
+	@echo "Resetting runtime state for $(AGP_RUNTIME_AGENT_ID)..."
+	@$(MAKE) runtime-stop-agent AGP_RUNTIME_AGENT_ID="$(AGP_RUNTIME_AGENT_ID)"
+	@_url=""; \
+	for u in http://127.0.0.1:$(AGP_PORT) $(AGP_REMOTE_SERVER_URL); do \
+		[ -n "$$u" ] || continue; \
+		if curl -sf --max-time 5 "$$u/ops/health" >/dev/null 2>&1 || curl -sf --max-time 5 "$$u/health" >/dev/null 2>&1; then _url="$$u"; break; fi; \
+	done; \
+	if [ -n "$$_url" ]; then \
+		echo "Deregistering $(AGP_RUNTIME_AGENT_ID) from $$_url"; \
+		$(RUN) agp down "$(AGP_RUNTIME_AGENT_ID)" --force --server-url "$$_url" >/dev/null 2>&1 || true; \
+	else \
+		echo "Control plane not reachable; skipping agent deregistration."; \
+	fi
+	@$(MAKE) runtime-clean-tmux AGP_RUNTIME_AGENT_ID="$(AGP_RUNTIME_AGENT_ID)"
+	@$(MAKE) runtime-clean-wezterm AGP_RUNTIME_AGENT_ID="$(AGP_RUNTIME_AGENT_ID)"
+	@rm -f \
+		".agp-checkpoints/session-agp-$(AGP_RUNTIME_AGENT_ID).output.txt" \
+		".agp-checkpoints/cursor-agp-$(AGP_RUNTIME_AGENT_ID).json" \
+		".agp-logs/$(AGP_RUNTIME_ID).out"
+	@echo "Fresh runtime state ready for $(AGP_RUNTIME_AGENT_ID)."
 
 runtime-clean: ## Tear down ALL agents on the CP + kill local processes and sessions
 	@echo "Tearing down all agents registered with CP..."
@@ -522,6 +591,7 @@ runtime-clean: ## Tear down ALL agents on the CP + kill local processes and sess
 	@if command -v wezterm >/dev/null 2>&1; then \
 		wezterm cli list --format json 2>/dev/null | python3 -c 'import json, subprocess, sys; raw = sys.stdin.read().strip(); panes = json.loads(raw) if raw else []; [subprocess.run(["wezterm", "cli", "kill-pane", "--pane-id", str(p["pane_id"])], check=False) for p in panes if "AGP:" in (p.get("tab_title") or "")]' || true; \
 	fi
+	@$(MAKE) runtime-clean-state
 	@echo "Runtime cleanup complete."
 
 runtime-deploy: ## Generate deploy script for a remote runtime
