@@ -17,9 +17,6 @@ from sqlalchemy import delete, func, select
 from agp.config import settings
 from agp.artifact_store import get_artifact_store
 from agp.control_plane import (
-    _block_job,
-    _require_job,
-    _unblock_job,
     build_app,
     sweep_expired_leases,
 )

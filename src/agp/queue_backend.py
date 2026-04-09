@@ -457,9 +457,6 @@ class InMemoryBrokerQueueBackend:
     def _queued(self, target_queue: str) -> Deque[str]:
         return self._queues.setdefault(target_queue, deque())
 
-    def _job_in_queue(self, target_queue: str, job_id: str) -> bool:
-        return job_id in self._queued(target_queue)
-
     def enqueue_job(self, db: Session, *, job: Job) -> None:  # noqa: ARG002
         if job.job_id in self._dead_lettered_jobs:
             self._dead_lettered_jobs.remove(job.job_id)

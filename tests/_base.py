@@ -56,11 +56,6 @@ def _reset_sqlite_database() -> None:
         conn.commit()
 
 
-def _drop_all_tables_sql() -> None:
-    """Backward-compatible alias for older test modules."""
-    _reset_sqlite_database()
-
-
 class FakeRedisClient:
     """Minimal fake Redis for contract testing without a real Redis server."""
 

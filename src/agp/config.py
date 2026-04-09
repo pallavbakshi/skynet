@@ -64,13 +64,9 @@ class Settings(BaseSettings):
     claude_code_idle_after: int = 3
     claude_code_idle_timeout_seconds: float = 0.0
     claude_code_session_mode: str = "sticky"
-    wezterm_default_cwd: str = ""
     scrollback_lines: int = 50000
     tmux_scrollback_lines: int = 50000
-    tmux_default_cwd: str = ""
     tmux_session_prefix: str = "agp"
-    output_checkpoint_dir: Path = Path(".agp-checkpoints")
-
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> "Settings":
         if self.artifact_backend == "s3":

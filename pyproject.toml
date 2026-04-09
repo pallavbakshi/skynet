@@ -24,7 +24,6 @@ dependencies = [
 
 [project.scripts]
 agp = "agp.cli:app"
-agp-server = "agp.cli:app"
 skyops = "skyops.cli:app"
 
 [tool.uv.sources]

@@ -68,11 +68,6 @@ class PeekStore:
             self._gc()
             return self._pending.get(runtime_id)
 
-    def consume_pending(self, runtime_id: str) -> None:
-        """Remove a pending request after successful result submission."""
-        with self._lock:
-            self._pending.pop(runtime_id, None)
-
     def submit_result(
         self,
         request_id: str,

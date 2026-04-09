@@ -13,7 +13,6 @@ from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc
 from agp.queue_backend import get_queue_backend
 from agp.services._helpers import (
     _record_health_transition,
-    _require_job,
 )
 from agp.services.events import _create_event
 

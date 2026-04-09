@@ -6,13 +6,11 @@ AGP's TerminalSession/SessionHealth types and smallops' SessionInfo.
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 from smallops import SessionInfo as _SessionInfo
 from smallops._protocols import Mux
-from smallops._util import strip_ansi
 
 from agp.runtime._types import (
     OutputCursor,

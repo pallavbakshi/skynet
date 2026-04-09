@@ -7,13 +7,12 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import case, cast, func, literal, or_, select, text, update
+from sqlalchemy import cast, func, literal, select, text, update
 from sqlalchemy.orm import Session
 
 from agp.enums import (
     AgentStatus,
     ArtifactKind,
-    HealthStatus,
     JobStatus,
     LeaseStatus,
     RunStatus,
@@ -33,14 +32,11 @@ from agp.models import (
 )
 from agp.services._helpers import (
     _artifact_store,
-    _capability_queue_for,
     _enqueue_nudge,
     _format_job_nudge,
     _new_id,
     _queue_backend,
     _require_agent,
-    _require_job,
-    _require_runtime,
 )
 from agp.services.events import _create_event
 from agp.services.exceptions import BadRequestError, ConflictError, InternalError

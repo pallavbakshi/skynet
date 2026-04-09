@@ -27,12 +27,9 @@ from agp.runtime._types import (
     AuthFailure,
     ArtifactPayload,
     BootstrapFailure,
-    ExecutionResult,
-    ExecutionTimeout,
     InterruptRequested,
     PaneDied,
     RecoverableExecutionError,
-    SessionHealth,
     StableButIndeterminate,
     TerminalSession,
 )

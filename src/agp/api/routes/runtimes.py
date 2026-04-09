@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
-from agp.enums import HealthStatus, LeaseStatus
+from agp.enums import LeaseStatus
 from agp.models import Agent, Job, Lease, Run, Runtime
 from agp.schemas import OkResponse, PeekResultRequest, RuntimeRegisterRequest, RuntimeResponse
 from agp.services._helpers import _require_runtime

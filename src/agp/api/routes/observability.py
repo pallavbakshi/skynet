@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from agp.api.helpers import (
     _apply_created_cursor,
     _count_by,
-    _decode_cursor,
     _duration_seconds,
     _encode_cursor,
     _ok,
@@ -25,7 +24,6 @@ from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStat
 from agp.logs import read_tail_jsonl_family
 from agp.models import (
     Agent,
-    Capability,
     Event,
     HealthRecord,
     Job,

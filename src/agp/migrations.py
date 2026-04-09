@@ -8,7 +8,6 @@ run the Postgres-dialect SQL; SQLite environments run SQLite-dialect SQL
 
 from __future__ import annotations
 
-import importlib.resources
 import re
 from pathlib import Path
 
@@ -16,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from agp.db import Base, SessionLocal, engine, current_release_version
+from agp.db import SessionLocal, engine, current_release_version
 
 
 def _resolve_migrations_dir(anchor: Path | None = None) -> Path:

@@ -20,11 +20,10 @@ from agp.schemas import (
     CompleteRunRequest,
     FailRunRequest,
     HeartbeatRequest,
-    OkResponse,
     ProgressRequest,
     RecoveryRequest,
 )
-from agp.services._helpers import _require_agent, _require_job, _require_runtime, _write_control_plane_artifact
+from agp.services._helpers import _require_job, _require_runtime, _write_control_plane_artifact
 from agp.services.exceptions import BadRequestError
 from agp.services.runs import (
     _active_lease_for_run,

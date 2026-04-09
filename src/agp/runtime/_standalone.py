@@ -9,7 +9,7 @@ from typing import Any
 
 from agp.runtime._abc import AgentAdapter, TerminalHost
 from agp.runtime._supervisor import _failure_snapshot_payloads
-from agp.runtime._types import ArtifactPayload, ExecutionResult
+from agp.runtime._types import ArtifactPayload
 
 
 @dataclass(slots=True)

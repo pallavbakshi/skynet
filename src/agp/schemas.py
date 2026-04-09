@@ -5,7 +5,6 @@ from typing import Any, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from agp.db import current_release_version
-from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 
 T = TypeVar("T")
 
@@ -91,14 +90,6 @@ class AgentPatchRequest(BaseModel):
     workspace_ref: str | None = None
 
 
-class CreateNudgeRequest(BaseModel):
-    target_agent_id: str
-    priority: int = Field(default=2, ge=1, le=10)  # 1=human, 2=job_completion, 3=agenda_setter, 4=system
-    source: str = "human"
-    payload: str
-    job_id: str | None = None
-
-
 class AgentDownRequest(BaseModel):
     mode: Literal["drain", "force"] = "drain"
 
@@ -158,14 +149,6 @@ class PeekResultRequest(BaseModel):
     text: str = Field(max_length=512 * 1024)  # 512KB max
     session_id: str
     host_kind: str
-
-
-class NudgeInjectRequest(BaseModel):
-    payload: str = Field(max_length=64 * 1024)  # 64KB max
-
-
-class NudgeConfirmRequest(BaseModel):
-    request_id: str
 
 
 class ArtifactReference(BaseModel):
@@ -238,21 +221,6 @@ class CapabilitySeedRequest(BaseModel):
     runtime_requirements: dict[str, Any] = Field(default_factory=dict)
 
 
-class PageEnvelope(BaseModel):
-    offset: int
-    limit: int
-    has_more: bool
-
-
-class EventResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    event_id: str
-    event_seq: int
-    event_type: str
-    created_at: Any
-    body: dict[str, Any]
-
-
 class AgentResponse(BaseModel):
     model_config = ConfigDict(extra="allow")
     agent_id: str
@@ -290,24 +258,3 @@ class JobResponse(BaseModel):
     conversation_id: str | None = None
     timeout_seconds: int | None = Field(default=None, gt=0)
     deadline_at: Any = None
-
-
-class RunResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    run_id: str
-    job_id: str
-    agent_id: str | None = None
-    runtime_id: str
-    attempt: int
-    status: str
-
-
-class LeaseResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    lease_id: str
-    run_id: str
-    agent_id: str | None = None
-    runtime_id: str
-    fencing_token: int
-    status: str
-    expires_at: Any

@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.enums import AgentStatus, ArtifactKind, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+from agp.enums import AgentStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import (
     Artifact,
     Handoff,
@@ -30,11 +30,10 @@ from agp.services._helpers import (
     _queue_backend,
     _queue_for_target,
     _require_agent,
-    _require_job,
     _write_control_plane_artifact,
 )
 from agp.services.events import _create_event
-from agp.services.exceptions import BadRequestError, ConflictError, InternalError, NotFoundError
+from agp.services.exceptions import BadRequestError, ConflictError
 
 
 def _block_job(db: Session, *, job: Job, reason: str) -> None:
