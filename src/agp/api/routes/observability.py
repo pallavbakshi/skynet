@@ -1,9 +1,12 @@
-"""Observability route handlers."""
+"""Observability implementation functions.
+
+These are called by ops.py routes — no router is defined here.
+"""
 
 from __future__ import annotations
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import Depends, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -38,9 +41,6 @@ from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queu
 from agp.services._helpers import _control_plane_log_path, _require_job
 from agp.services.observability import _current_alerts_payload
 
-router = APIRouter()
-
-@router.get("/observability/summary", deprecated=True)
 def observability_summary(db: Session = Depends(get_db)) -> dict:
     latest_event_seq = int(db.scalar(select(func.max(Event.event_seq))) or 0)
     queue_depth = int(db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.QUEUED.value)) or 0)
@@ -59,12 +59,10 @@ def observability_summary(db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.get("/observability/alerts", deprecated=True)
 def observability_alerts(db: Session = Depends(get_db)) -> dict:
     return _ok(_current_alerts_payload(db))
 
 
-@router.post("/observability/alerts/dispatch")
 def observability_dispatch_alerts(db: Session = Depends(get_db)) -> dict:
     if not settings.observability_alert_webhook_url:
         raise HTTPException(status_code=409, detail="observability alert webhook is not configured")
@@ -80,7 +78,6 @@ def observability_dispatch_alerts(db: Session = Depends(get_db)) -> dict:
     return _ok({"delivered": True, "target": settings.observability_alert_webhook_url, "alert_count": len(payload["items"])})
 
 
-@router.get("/observability/metrics", deprecated=True)
 def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
     lines = ["# HELP agp_jobs_total Jobs grouped by status.", "# TYPE agp_jobs_total gauge"]
     for status, count in _count_by(db, Job, Job.status, [s.value for s in JobStatus]).items():
@@ -155,7 +152,6 @@ def observability_metrics(db: Session = Depends(get_db)) -> PlainTextResponse:
     return PlainTextResponse("\n".join(lines) + "\n", media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
-@router.get("/observability/jobs/{job_id}/trace")
 def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
     events = db.scalars(select(Event).where(Event.job_id == job_id).order_by(Event.event_seq.asc())).all()
@@ -190,12 +186,10 @@ def observability_job_trace(job_id: str, db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.get("/observability/logs/control-plane", deprecated=True)
 def observability_control_plane_logs(limit: int = Query(default=100, ge=1, le=500)) -> dict:
     return _ok({"items": read_tail_jsonl_family(_control_plane_log_path(), limit=limit), "source": str(_control_plane_log_path()), "limit": limit})
 
 
-@router.get("/observability/logs/runtimes/{runtime_id}", deprecated=True)
 def observability_runtime_logs(runtime_id: str, limit: int = Query(default=100, ge=1, le=500)) -> dict:
     path = settings.log_root / f"runtime-{runtime_id}.jsonl"
     return _ok({"items": read_tail_jsonl_family(path, limit=limit), "source": str(path), "runtime_id": runtime_id, "limit": limit})
@@ -210,7 +204,6 @@ _AUDIT_EVENT_TYPES = frozenset({
 })
 
 
-@router.get("/observability/audit", deprecated=True)
 def observability_audit(db: Session = Depends(get_db), limit: int = Query(default=100, ge=1, le=500), cursor: str | None = Query(default=None)) -> dict:
     query = select(Event).where(Event.event_type.in_(_AUDIT_EVENT_TYPES))
     query = _apply_created_cursor(query, Event, cursor)
@@ -226,7 +219,6 @@ def observability_audit(db: Session = Depends(get_db), limit: int = Query(defaul
     ))
 
 
-@router.get("/observability/triage", deprecated=True)
 def observability_triage(db: Session = Depends(get_db)) -> dict:
     active_leases = db.scalars(select(Lease).where(Lease.status == LeaseStatus.ACTIVE.value)).all()
     active_by_runtime: dict[str, list[dict]] = {}
@@ -266,7 +258,6 @@ def observability_triage(db: Session = Depends(get_db)) -> dict:
     })
 
 
-@router.get("/observability/health-records", deprecated=True)
 def list_health_records(entity_type: str | None = Query(default=None), entity_id: str | None = Query(default=None), limit: int = Query(default=50, ge=1, le=200), db: Session = Depends(get_db)) -> dict:
     query = select(HealthRecord)
     if entity_type is not None:

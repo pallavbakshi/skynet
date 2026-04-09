@@ -34,7 +34,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         agent = self.client.get(f"/agents/{agent_id}")
         self.assertEqual(agent.status_code, 200)
         self.assertEqual(agent.json()["data"]["status"], "idle")
-        runtime = self.client.get(f"/runtimes/{runtime_id}")
+        runtime = self.client.get(f"/ops/runtimes/{runtime_id}")
         self.assertEqual(runtime.status_code, 200)
         self.assertEqual(runtime.json()["data"]["status"], "idle")
         self.assertEqual(runtime.json()["data"]["active_run_count"], 0)
@@ -43,7 +43,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         agent = self.client.get(f"/agents/{agent_id}")
         self.assertEqual(agent.status_code, 200)
         self.assertEqual(agent.json()["data"]["status"], "busy")
-        runtime = self.client.get(f"/runtimes/{runtime_id}")
+        runtime = self.client.get(f"/ops/runtimes/{runtime_id}")
         self.assertEqual(runtime.status_code, 200)
         self.assertEqual(runtime.json()["data"]["status"], "busy")
         self.assertEqual(runtime.json()["data"]["active_run_count"], active_run_count)
@@ -332,7 +332,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         agent = self.client.get("/agents/agt_run_only_busy")
         self.assertEqual(agent.status_code, 200)
         self.assertEqual(agent.json()["data"]["status"], "busy")
-        runtime = self.client.get("/runtimes/rtm_run_only_busy")
+        runtime = self.client.get("/ops/runtimes/rtm_run_only_busy")
         self.assertEqual(runtime.status_code, 200)
         self.assertEqual(runtime.json()["data"]["status"], "idle")
         self.assertEqual(runtime.json()["data"]["active_run_count"], 0)
@@ -369,7 +369,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         agent = self.client.get("/agents/agt_lease_only_busy")
         self.assertEqual(agent.status_code, 200)
         self.assertEqual(agent.json()["data"]["status"], "idle")
-        runtime = self.client.get("/runtimes/rtm_lease_only_busy")
+        runtime = self.client.get("/ops/runtimes/rtm_lease_only_busy")
         self.assertEqual(runtime.status_code, 200)
         self.assertEqual(runtime.json()["data"]["status"], "busy")
         self.assertEqual(runtime.json()["data"]["active_run_count"], 1)
@@ -1105,7 +1105,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(job.status_code, 200)
         self.assertEqual(job.json()["data"]["status"], "failed")
 
-        trace = self.client.get(f"/observability/jobs/{job_id}/trace")
+        trace = self.client.get(f"/ops/jobs/{job_id}/trace")
         self.assertEqual(trace.status_code, 200)
         self.assertEqual(trace.json()["data"]["runs"][-1]["status"], "failed")
 
@@ -1369,7 +1369,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(agents.status_code, 200)
         self.assertEqual(len(agents.json()["data"]["items"]), 1)
 
-        runtimes = self.client.get("/runtimes", params={"status": "idle", "health_status": "healthy"})
+        runtimes = self.client.get("/ops/runtimes", params={"status": "idle", "health_status": "healthy"})
         self.assertEqual(runtimes.status_code, 200)
         self.assertGreaterEqual(len(runtimes.json()["data"]["items"]), 1)
 

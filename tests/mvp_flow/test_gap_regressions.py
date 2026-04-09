@@ -90,7 +90,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertTrue(claim.json()["data"]["claimed"])
 
         # List runtimes and check claimed_work is present
-        runtimes = self.client.get("/runtimes").json()["data"]["items"]
+        runtimes = self.client.get("/ops/runtimes").json()["data"]["items"]
         rtm = next(r for r in runtimes if r["runtime_id"] == "rtm_cw")
         self.assertIn("claimed_work", rtm)
         self.assertEqual(rtm["active_run_count"], 1)
@@ -113,7 +113,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         })
         self.assertTrue(claim.json()["data"]["claimed"])
 
-        detail = self.client.get("/runtimes/rtm_rd").json()["data"]
+        detail = self.client.get("/ops/runtimes/rtm_rd").json()["data"]
         self.assertEqual(detail["runtime_id"], "rtm_rd")
         self.assertEqual(detail["active_run_count"], 1)
         self.assertTrue(len(detail["claimed_work"]) > 0)
@@ -171,7 +171,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         """Gap 5: Health records are persisted when runtimes register."""
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_hr", "hostname": "host-hr"})
 
-        records = self.client.get("/observability/health-records?entity_id=rtm_hr").json()["data"]["items"]
+        records = self.client.get("/ops/health-records?entity_id=rtm_hr").json()["data"]["items"]
         self.assertTrue(len(records) >= 1)
         self.assertEqual(records[0]["entity_type"], "runtime")
         self.assertEqual(records[0]["entity_id"], "rtm_hr")
@@ -198,7 +198,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         finally:
             session.close()
 
-        records = self.client.get("/observability/health-records?entity_id=rtm_hrt").json()["data"]["items"]
+        records = self.client.get("/ops/health-records?entity_id=rtm_hrt").json()["data"]["items"]
         statuses = [r["health_status"] for r in records]
         self.assertIn("degraded", statuses)
 
@@ -304,7 +304,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         self.assertIn("degraded", claim.json()["error"]["message"])
 
     def test_gap9_operator_triage_endpoint(self) -> None:
-        """Gap 9: GET /observability/triage provides consolidated operator view."""
+        """Gap 9: GET /ops/triage provides consolidated operator view."""
         agent = self.client.post("/agents/up", json={"agent_id": "agt_tri", "capabilities": ["python"]})
         self.assertEqual(agent.status_code, 200)
         runtime = self.client.post("/runtimes/register", json={"runtime_id": "rtm_tri", "hostname": "host-tri"})
@@ -320,7 +320,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         })
         self.assertTrue(claim.json()["data"]["claimed"])
 
-        triage = self.client.get("/observability/triage").json()["data"]
+        triage = self.client.get("/ops/triage").json()["data"]
         self.assertIn("active_jobs_by_runtime", triage)
         self.assertIn("recent_failures", triage)
         self.assertIn("stale_runtimes", triage)
@@ -554,14 +554,14 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         run_id = data["run"]["run_id"]
 
         # Trace must include timeline and durations
-        trace = self.client.get(f"/observability/jobs/{job_id}/trace").json()["data"]
+        trace = self.client.get(f"/ops/jobs/{job_id}/trace").json()["data"]
         self.assertIn("timeline", trace)
         self.assertIn("trace", trace)
         self.assertIn("runs", trace)
         self.assertIn("durations_seconds", trace["trace"])
 
         # Summary must include counts for all key states
-        summary = self.client.get("/observability/summary").json()["data"]
+        summary = self.client.get("/ops/health").json()["data"]
         self.assertIn("jobs", summary)
         self.assertIn("runtimes", summary)
         self.assertIn("agents", summary)

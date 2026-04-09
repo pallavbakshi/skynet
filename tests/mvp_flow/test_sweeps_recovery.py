@@ -104,7 +104,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             session.close()
 
         self.assertEqual(result["resumed_runtimes"], 1)
-        runtimes = self.client.get("/runtimes", params={"status": "idle", "health_status": "healthy"}).json()["data"]["items"]
+        runtimes = self.client.get("/ops/runtimes", params={"status": "idle", "health_status": "healthy"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_drain_done" for item in runtimes))
 
     def test_draining_runtime_stays_draining_with_active_lease(self) -> None:
@@ -136,7 +136,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             session.close()
 
         self.assertEqual(result["resumed_runtimes"], 0)
-        runtimes = self.client.get("/runtimes", params={"status": "draining"}).json()["data"]["items"]
+        runtimes = self.client.get("/ops/runtimes", params={"status": "draining"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_drain_busy" for item in runtimes))
 
     def test_stale_runtime_offlines(self) -> None:
@@ -157,7 +157,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             session.close()
 
         self.assertEqual(result["offline_runtimes"], 1)
-        runtimes = self.client.get("/runtimes", params={"status": "offline"}).json()["data"]["items"]
+        runtimes = self.client.get("/ops/runtimes", params={"status": "offline"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_stale_idle" for item in runtimes))
         # Agent remains idle (exists independently of runtime now)
         agents = self.client.get("/agents", params={"status": "idle"}).json()["data"]["items"]
@@ -270,7 +270,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
         results = service.run_forever(max_iterations=1)
         self.assertEqual(results[0]["offline_runtimes"], 1)
 
-        runtimes = self.client.get("/runtimes", params={"status": "offline"}).json()["data"]["items"]
+        runtimes = self.client.get("/ops/runtimes", params={"status": "offline"}).json()["data"]["items"]
         self.assertTrue(any(item["runtime_id"] == "rtm_service" for item in runtimes))
 
     def test_agent_can_claim_on_new_runtime_after_stale_sweep(self) -> None:

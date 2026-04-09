@@ -534,7 +534,7 @@ def run_failure_injection_scenario(*, scenario: str) -> dict:
                 if final_job_status != "queued":
                     break
 
-            alerts = client.get("/observability/alerts").json()["data"]
+            alerts = client.get("/ops/alerts").json()["data"]
             events = client.get(f"/jobs/{job_id}/events").json()["data"]["items"]
             return {
                 "scenario": scenario,

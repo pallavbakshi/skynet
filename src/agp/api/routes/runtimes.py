@@ -30,7 +30,6 @@ def register_runtime(request: RuntimeRegisterRequest, db: Session = Depends(get_
     )
 
 
-@router.get("/runtimes", deprecated=True)
 def list_runtimes(
     db: Session = Depends(get_db),
     status: str | None = Query(default=None),
@@ -66,7 +65,6 @@ def list_runtimes(
     return _ok(_page(items, limit=limit, next_cursor=next_cursor))
 
 
-@router.get("/runtimes/{runtime_id}", deprecated=True)
 def get_runtime_detail(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     runtime = _require_runtime(db, runtime_id)
     data = _serialize(runtime, ("runtime_id", "hostname", "release_version", "status", "health_status", "metadata_json", "last_heartbeat_at", "created_at"))

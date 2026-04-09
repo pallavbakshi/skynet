@@ -45,7 +45,7 @@ def __getattr__(name: str):
 
 
 # Route modules
-from agp.api.routes import admin, agents, artifacts, jobs, observability, ops, runs, runtimes, security  # noqa: F401
+from agp.api.routes import admin, agents, artifacts, jobs, ops, runs, runtimes, security  # noqa: F401
 
 # Middleware and error handlers
 from agp.api.middleware import auth_middleware
@@ -167,7 +167,6 @@ def build_app() -> FastAPI:
     app.include_router(agents.router)
     app.include_router(runtimes.router)
     app.include_router(artifacts.router)
-    app.include_router(observability.router)
     app.include_router(security.router)
     app.include_router(ops.router)
 
