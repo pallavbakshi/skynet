@@ -2329,169 +2329,6 @@ def review_diagnose_cmd(
                 typer.echo(f"    warning: {w}")
 
 
-# ── 1d. diagnose ────────────────────────────────────────────────────
-
-
-def _diagnose_agent(client, agent_id: str, *, output_json: bool = False) -> None:
-    """Diagnose an agent — show detail, runtime binding, heartbeat, and recent jobs."""
-    import httpx as _httpx
-
-    try:
-        agent = client.get_agent(agent_id)
-    except _httpx.HTTPStatusError as exc:
-        if exc.response.status_code == 404:
-            typer.echo(f"Agent '{agent_id}' not found.", err=True)
-        else:
-            typer.echo(_format_http_error(exc), err=True)
-        raise typer.Exit(1)
-
-    diagnosis: dict = {"agent": agent, "runtime": None, "recent_jobs": []}
-
-    # Runtime binding — query all runtimes and find the one bound to this agent.
-    try:
-        rt_page = client.ops_list_runtimes(limit=200)
-        bound_rts = [
-            rt for rt in rt_page.get("items", [])
-            if rt.get("agent_id") == agent_id
-        ]
-        if bound_rts:
-            diagnosis["runtime"] = bound_rts[0]
-    except Exception:  # noqa: BLE001
-        pass
-
-    # Recent jobs targeting this agent
-    try:
-        jobs_data = client.list_jobs(target_agent_id=agent_id, limit=10)
-        diagnosis["recent_jobs"] = jobs_data.get("items", [])
-    except Exception:  # noqa: BLE001
-        pass
-
-    if output_json:
-        typer.echo(json.dumps(diagnosis, indent=2, default=str))
-        return
-
-    # Pretty print
-    typer.echo(f"Agent: {agent_id}")
-    typer.echo(f"  status:       {agent.get('status', '?')}")
-    typer.echo(f"  capabilities: {', '.join(agent.get('capabilities', [])) or 'none'}")
-    typer.echo(f"  workspace:    {agent.get('workspace_ref') or '(none)'}")
-    typer.echo(f"  registered:   {agent.get('created_at', '?')}")
-
-    # Heartbeat
-    hb = _heartbeat_age_seconds(agent.get("last_heartbeat_at"))
-    typer.echo(f"  heartbeat:    {f'{hb:.0f}s ago' if hb is not None else 'never'}")
-
-    # Queue depth (if available from get_agent)
-    qd = agent.get("queue_depth")
-    if qd is not None:
-        typer.echo(f"  queue_depth:  {qd}")
-
-    # Runtime binding
-    rt = diagnosis["runtime"]
-    if rt:
-        typer.echo(f"\n  Runtime Binding:")
-        typer.echo(f"    runtime_id: {rt.get('runtime_id', '?')}")
-        typer.echo(f"    status:     {rt.get('status', '?')}")
-        typer.echo(f"    host:       {rt.get('hostname', '?')}")
-    else:
-        typer.echo(f"\n  Runtime Binding: none")
-
-    # Recent jobs
-    jobs = diagnosis["recent_jobs"]
-    if jobs:
-        typer.echo(f"\n  Recent Jobs ({len(jobs)}):")
-        for j in jobs:
-            status = j.get("status", "?")
-            created = j.get("created_at", "?")
-            job_id = j.get("job_id", "?")
-            typer.echo(f"    {job_id}  status={status}  created={created}")
-    else:
-        typer.echo(f"\n  Recent Jobs: none")
-
-
-@app.command(name="diagnose")
-def diagnose_cmd(
-    entity_type: str = typer.Argument(..., help="Entity type: 'runtime' or 'agent'"),
-    entity_id: str = typer.Argument(..., help="Runtime or agent ID to diagnose."),
-    server_url: str = typer.Option(None, help="CP URL."),
-    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
-) -> None:
-    """Diagnose a runtime or agent — show registration, heartbeat, jobs, and logs."""
-    if entity_type not in ("runtime", "agent"):
-        typer.echo(f"Unknown entity type '{entity_type}'. Supported: runtime, agent", err=True)
-        raise typer.Exit(1)
-
-    with _cli_client(server_url) as client:
-        if entity_type == "agent":
-            _diagnose_agent(client, entity_id, output_json=output_json)
-            return
-
-        rt = client.ops_get_runtime(entity_id)
-        if rt is None:
-            typer.echo(f"Runtime '{entity_id}' not found.", err=True)
-            raise typer.Exit(1)
-
-        diagnosis: dict = {
-            "runtime": rt,
-            "agents": [],
-            "recent_logs": [],
-        }
-
-        # Use agents already returned by the runtime detail API
-        diagnosis["agents"] = rt.get("agents", [])
-
-        # Recent runtime logs
-        try:
-            logs = client.logs_runtime(entity_id, limit=20)
-            diagnosis["recent_logs"] = logs.get("entries", logs) if isinstance(logs, dict) else logs
-        except Exception as logs_exc:
-            typer.echo(f"[warn] Failed to fetch runtime logs: {logs_exc}", err=True)
-
-        if output_json:
-            typer.echo(json.dumps(diagnosis, indent=2, default=str))
-            return
-
-        # Pretty print
-        typer.echo(f"Runtime: {entity_id}")
-        typer.echo(f"  status:     {rt.get('status', '?')}")
-        hb = rt.get("heartbeat_age_seconds")
-        if hb is None:
-            hb_raw = rt.get("last_heartbeat_at")
-            if hb_raw:
-                from datetime import datetime, timezone
-                try:
-                    hb_dt = datetime.fromisoformat(str(hb_raw).replace("Z", "+00:00"))
-                    if hb_dt.tzinfo is None:
-                        hb_dt = hb_dt.replace(tzinfo=timezone.utc)
-                    hb = (datetime.now(timezone.utc) - hb_dt).total_seconds()
-                except (ValueError, TypeError):
-                    pass
-        typer.echo(f"  heartbeat:  {f'{hb:.0f}s ago' if hb is not None else 'never'}")
-        typer.echo(f"  host:       {rt.get('hostname', '?')}")
-        typer.echo(f"  registered: {rt.get('created_at', '?')}")
-
-        if diagnosis["agents"]:
-            typer.echo(f"\n  Bound Agents:")
-            for a in diagnosis["agents"]:
-                caps = ", ".join(a.get("capabilities", []))
-                typer.echo(f"    {a['agent_id']}  status={a['status']}  caps=[{caps}]")
-        else:
-            typer.echo(f"\n  Bound Agents: none")
-
-        logs = diagnosis.get("recent_logs", [])
-        if logs:
-            entries = logs[-10:] if isinstance(logs, list) else []
-            if entries:
-                typer.echo(f"\n  Recent Logs (last {len(entries)}):")
-                for entry in entries:
-                    if isinstance(entry, dict):
-                        ts = entry.get("created_at", "?")
-                        action = entry.get("action", entry.get("kind", "?"))
-                        typer.echo(f"    [{ts}] {action}")
-                    else:
-                        typer.echo(f"    {str(entry)[:120]}")
-
-
 # ── 2. wait ──────────────────────────────────────────────────────────
 
 
@@ -2792,102 +2629,6 @@ def peek(
         raise typer.Exit(1)
 
 
-# ── 2c. health ──────────────────────────────────────────────────────
-
-
-@app.command()
-def health(
-    server_url: str = typer.Option(None, help="CP URL."),
-    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
-) -> None:
-    """Show control-plane, runtime, and agent health at a glance."""
-    import httpx as _httpx
-
-    with _make_client(server_url) as client:
-        try:
-            cp_health = client.health()
-        except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
-            typer.echo(f"Control plane unreachable: {exc}", err=True)
-            raise typer.Exit(1)
-
-        # Ops health (runtimes, agents, jobs)
-        ops: dict | None = None
-        agents: list[dict] = []
-        runtimes: list[dict] = []
-        try:
-            ops = client.ops_health()
-        except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
-            pass
-        try:
-            page = client.list_agents(limit=200)
-            agents = page.get("items", [])
-        except Exception:
-            pass
-        try:
-            rt_page = client.list_runtimes(limit=200)
-            runtimes = rt_page.get("items", [])
-        except Exception:
-            pass
-
-        # Filter synthetic rtm_ runtimes (created by agent_up, no backing process)
-        runtimes = [rt for rt in runtimes if not rt.get("runtime_id", "").startswith("rtm_")]
-
-        if output_json:
-            typer.echo(json.dumps({
-                "control_plane": cp_health,
-                "ops": ops,
-                "agents": agents,
-                "runtimes": runtimes,
-            }, indent=2, default=str))
-            return
-
-        # Control plane — unwrap {"ok": ..., "data": {...}} envelope
-        cp_data = cp_health.get("data", cp_health)
-        cp_status = cp_data.get("status", "unknown")
-        typer.echo(f"Control Plane: {cp_status}")
-        for k, v in cp_data.get("components", {}).items():
-            typer.echo(f"  {k}: {v}")
-
-        # Runtimes
-        typer.echo(f"\nRuntimes: {len(runtimes)}")
-        for rt in runtimes:
-            rid = rt.get("runtime_id", "?")
-            hb_age = rt.get("heartbeat_age_seconds")
-            if hb_age is None:
-                hb_age = _heartbeat_age_seconds(rt.get("last_heartbeat_at"))
-            hb_str = f"{hb_age:.0f}s ago" if hb_age is not None else "never"
-            # Show bound agent from agent_id field, fall back to claimed_work leases
-            bound_aid = rt.get("agent_id")
-            if bound_aid:
-                agents_bound = bound_aid
-            else:
-                agents_bound = ", ".join(
-                    sorted({w.get("agent_id", "?") for w in rt.get("claimed_work", [])})
-                ) or "none"
-            typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
-
-        # Agents
-        typer.echo(f"\nAgents: {len(agents)}")
-        for agent in agents:
-            aid = agent.get("agent_id", "?")
-            state = agent.get("status", "unknown")
-            caps = ", ".join(agent.get("capabilities", []))
-            qdepth = int(agent.get("queue_depth", 0) or 0)
-            parts = [f"  {aid}  status={state}"]
-            if caps:
-                parts.append(f"caps=[{caps}]")
-            if qdepth > 0:
-                parts.append(f"queue={qdepth}")
-            typer.echo("  ".join(parts))
-
-        # Queue summary
-        if ops:
-            queue = ops.get("queue") or {}
-            depth = int(queue.get("depth") or 0)
-            if depth > 0:
-                typer.echo(f"\nQueue depth: {depth}")
-
-
 # ── 3. status ────────────────────────────────────────────────────────
 
 
@@ -2895,15 +2636,17 @@ def health(
 def status(
     target: str = typer.Argument(None, help="Job ID or agent ID (optional)."),
     server_url: str = typer.Option(None, help="CP URL."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
+    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output — just agent lines."),
 ) -> None:
-    """Check job or agent status.
+    """System dashboard, or job/agent status.
 
+    With no arguments: combined health + agent overview (replaces ``health`` and ``ls``).
     With a job ID: shows full job details + artifacts.
     With an agent ID: shows agent status, heartbeat, and current job.
-    With no arguments: quick reachability check (use ``agp health`` for full details).
     """
     if target is None:
-        _status_ping(server_url)
+        _status_dashboard(server_url, output_json=output_json, quiet=quiet)
         return
     # Try as job first; on 404, try as agent before giving up
     import httpx as _httpx
@@ -2960,19 +2703,177 @@ def _status_agent(agent: dict, client) -> None:
             pass
 
 
-def _status_ping(server_url: str | None) -> None:
-    """Quick CP reachability check."""
-    try:
-        with _make_client(server_url) as client:
-            data = client.health()
-        cp_data = data.get("data", data)
-        components = cp_data.get("components", {})
-        parts = [f"{k}={v}" for k, v in components.items()]
-        typer.echo(f"CP reachable ({', '.join(parts) or 'ok'})")
-        typer.echo("Run `agp health` for full system status.")
-    except Exception as e:
-        typer.echo(f"CP unreachable: {e}", err=True)
-        raise typer.Exit(1)
+def _status_dashboard(server_url: str | None, *, output_json: bool = False, quiet: bool = False) -> None:
+    """Combined system dashboard — health, runtimes, agents, queue."""
+    import httpx as _httpx
+    from datetime import datetime, timezone
+
+    with _make_client(server_url) as client:
+        try:
+            cp_health = client.health()
+        except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
+            typer.echo(f"Control plane unreachable: {exc}", err=True)
+            raise typer.Exit(1)
+
+        ops: dict | None = None
+        agents: list[dict] = []
+        runtimes: list[dict] = []
+        try:
+            ops = client.ops_health()
+        except (_httpx.HTTPStatusError, _httpx.RequestError, RuntimeError):
+            pass
+        try:
+            page = client.list_agents(limit=200)
+            agents = page.get("items", [])
+        except Exception:
+            pass
+        try:
+            rt_page = client.ops_list_runtimes(limit=200)
+            runtimes = rt_page.get("items", [])
+        except Exception:
+            pass
+
+        # Filter synthetic rtm_ runtimes (created by agent_up, no backing process)
+        runtimes = [rt for rt in runtimes if not rt.get("runtime_id", "").startswith("rtm_")]
+
+        # For busy agents, fetch their running job
+        agent_jobs: dict[str, dict] = {}
+        busy_agents = [a for a in agents if a.get("status") == "busy"]
+        if busy_agents:
+            try:
+                running_jobs = client.list_jobs(status="running", limit=100)
+                for j in running_jobs.get("items", []):
+                    tid = j.get("target_agent_id")
+                    if tid:
+                        agent_jobs[tid] = j
+            except Exception:
+                pass
+
+        if output_json:
+            typer.echo(json.dumps({
+                "control_plane": cp_health,
+                "ops": ops,
+                "agents": agents,
+                "runtimes": runtimes,
+            }, indent=2, default=str))
+            return
+
+        if quiet:
+            # Minimal output — just agent lines (matches ls -q)
+            if not agents:
+                typer.echo("(none)")
+                return
+            now = datetime.now(timezone.utc)
+            for agent in agents:
+                aid = agent.get("agent_id", "?")
+                agent_status = agent.get("status", "?").upper()
+                role = ", ".join(agent.get("capabilities", [])) or "-"
+                qdepth = int(agent.get("queue_depth", 0) or 0)
+                job = agent_jobs.get(aid)
+                parts = [f"{aid:<20s}", agent_status]
+                if role != "-":
+                    parts.append(f"caps=[{role}]")
+                if job:
+                    parts.append(f"job={job['job_id']}")
+                    try:
+                        created = datetime.fromisoformat(job["created_at"])
+                        elapsed = (now - created).total_seconds()
+                        parts.append(f"({_format_duration(elapsed)})")
+                    except Exception:
+                        pass
+                if qdepth > 0:
+                    parts.append(f"queue={qdepth}")
+                typer.echo("  ".join(parts))
+            return
+
+        # ── Control plane health
+        cp_data = cp_health.get("data", cp_health)
+        cp_status = cp_data.get("status", "unknown")
+        typer.echo(f"Control Plane: {cp_status}")
+        for k, v in cp_data.get("components", {}).items():
+            typer.echo(f"  {k}: {v}")
+
+        # ── Runtimes
+        typer.echo(f"\nRuntimes: {len(runtimes)}")
+        for rt in runtimes:
+            rid = rt.get("runtime_id", "?")
+            hb_age = rt.get("heartbeat_age_seconds")
+            if hb_age is None:
+                hb_age = _heartbeat_age_seconds(rt.get("last_heartbeat_at"))
+            hb_str = f"{hb_age:.0f}s ago" if hb_age is not None else "never"
+            bound_aid = rt.get("agent_id")
+            if bound_aid:
+                agents_bound = bound_aid
+            else:
+                agents_bound = ", ".join(
+                    sorted({w.get("agent_id", "?") for w in rt.get("claimed_work", [])})
+                ) or "none"
+            typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
+
+        # ── Agents
+        now = datetime.now(timezone.utc)
+        typer.echo(f"\nAgents: {len(agents)}")
+        for agent in agents:
+            aid = agent.get("agent_id", "?")
+            state = agent.get("status", "unknown")
+            caps = ", ".join(agent.get("capabilities", []))
+            qdepth = int(agent.get("queue_depth", 0) or 0)
+            job = agent_jobs.get(aid)
+            parts = [f"  {aid}  status={state}"]
+            if caps:
+                parts.append(f"caps=[{caps}]")
+            if job:
+                job_id = job["job_id"]
+                try:
+                    created = datetime.fromisoformat(job["created_at"])
+                    elapsed = (now - created).total_seconds()
+                    parts.append(f"job={job_id} ({_format_duration(elapsed)})")
+                except Exception:
+                    parts.append(f"job={job_id}")
+            if qdepth > 0:
+                parts.append(f"queue={qdepth}")
+            typer.echo("  ".join(parts))
+
+        # ── Queue summary
+        if ops:
+            queue = ops.get("queue") or {}
+            depth = int(queue.get("depth") or 0)
+            if depth > 0:
+                typer.echo(f"\nQueue depth: {depth}")
+
+        # ── Warnings for agents with queued work but no runtime
+        agent_runtime: dict[str, str] = {}
+        runtime_health: dict[str, tuple[str, str]] = {}
+        for rt in runtimes:
+            rid = rt.get("runtime_id", "")
+            runtime_health[rid] = (
+                str(rt.get("status") or "-").lower(),
+                str(rt.get("health_status") or "-").lower(),
+            )
+            aid = rt.get("agent_id")
+            if aid:
+                agent_runtime[aid] = rid
+        warning_items: list[str] = []
+        for agent in agents:
+            aid = agent.get("agent_id", "?")
+            qdepth = int(agent.get("queue_depth", 0) or 0)
+            if qdepth <= 0:
+                continue
+            bound_rt = agent_runtime.get(aid)
+            if not bound_rt:
+                warning_items.append(
+                    f"- {aid}: {qdepth} queued, no runtime bound. Start or re-register its runtime."
+                )
+            elif bound_rt in runtime_health:
+                rs, hs = runtime_health[bound_rt]
+                if rs in {"degraded", "offline"} or hs in {"degraded", "unreachable"}:
+                    warning_items.append(
+                        f"- {aid}: {qdepth} queued, runtime {bound_rt} heartbeat stale ({hs if hs != '-' else rs}). Restart that runtime."
+                    )
+        if warning_items:
+            typer.echo("\n[WARNINGS]")
+            for item in warning_items:
+                typer.echo(item)
 
 
 def _status_job(job_id: str, server_url: str | None) -> None:
@@ -3299,193 +3200,6 @@ def result(
             raise typer.Exit(1)
 
 
-@app.command()
-def ls(
-    server_url: str = typer.Option(None, help="CP URL."),
-    quiet: bool = typer.Option(False, "--quiet", "-q", help="Minimal output — just agent lines, no banner."),
-) -> None:
-    """List logical agents and available capabilities."""
-    from datetime import datetime, timezone
-    import httpx as _httpx
-
-    warning_items: list[str] = []
-
-    with _cli_client(server_url) as client:
-        try:
-            agents: list[dict] = []
-            cursor: str | None = None
-            _MAX_PAGES = 10
-            for _page_num in range(_MAX_PAGES):
-                page = client.list_agents(limit=200, cursor=cursor)
-                agents.extend(page.get("items", []))
-                cursor = (page.get("page") or {}).get("next_cursor")
-                if not cursor:
-                    break
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
-
-        try:
-            caps_data = client.list_capabilities()
-        except _httpx.HTTPStatusError as exc:
-            typer.echo(_format_http_error(exc), err=True)
-            raise typer.Exit(1)
-        caps = caps_data.get("items", [])
-
-        # Build agent → runtime lookup (1:1 binding)
-        agent_runtime: dict[str, str] = {}
-        runtime_health: dict[str, tuple[str, str]] = {}
-        try:
-            runtimes_data = client.ops_list_runtimes(limit=200)
-            for rt in runtimes_data.get("items", []):
-                runtime_id = rt["runtime_id"]
-                runtime_status = str(rt.get("status") or "-").lower()
-                health_status = str(rt.get("health_status") or "-").lower()
-                runtime_health[runtime_id] = (runtime_status, health_status)
-                aid = rt.get("agent_id")
-                if aid:
-                    agent_runtime[aid] = runtime_id
-        except Exception:
-            pass  # ops endpoint may not be available
-
-        # For busy agents, fetch their running job
-        agent_jobs: dict[str, dict] = {}
-        busy_agents = [a for a in agents if a.get("status") == "busy"]
-        if busy_agents:
-            try:
-                running_jobs = client.list_jobs(status="running", limit=100)
-                for j in running_jobs.get("items", []):
-                    tid = j.get("target_agent_id")
-                    if tid:
-                        agent_jobs[tid] = j
-            except _httpx.HTTPStatusError:
-                pass  # job listing may fail; proceed without job details
-
-        # ── Header
-        if not quiet:
-            typer.echo(_SEPARATOR)
-            typer.echo("      AGP SERVICE DISCOVERY (agp ls)")
-            typer.echo(_SEPARATOR)
-            typer.echo("Logical agent view only. Use `agp health` or `agp diagnose runtime <id>` for runtime health.")
-            typer.echo("")
-
-        # ── Active Agents section
-        active = list(agents)  # All agents in DB are live
-
-        if not quiet:
-            typer.echo("[ACTIVE AGENTS]")
-        if not active:
-            typer.echo("(none)")
-        else:
-            now = datetime.now(timezone.utc)
-            # Build row data for all agents
-            agent_rows = []
-            for a in active:
-                agent_id = a["agent_id"]
-                role = ", ".join(a.get("capabilities", [])) or "-"
-                agent_status = a.get("status", "?").upper()
-                runtime_id = agent_runtime.get(agent_id, "-")
-                workspace = a.get("workspace_ref") or "-"
-                pending = str(a.get("queue_depth", 0))
-                queue_depth = int(a.get("queue_depth", 0) or 0)
-                queue_age_seconds = a.get("oldest_queue_age_seconds")
-                queue_age = _format_duration(queue_age_seconds) if isinstance(queue_age_seconds, (int, float)) else "-"
-                runtime_status, health_status = runtime_health.get(runtime_id, ("-", "-"))
-
-                job = agent_jobs.get(agent_id)
-                if job:
-                    job_id = job["job_id"]
-                    try:
-                        created = datetime.fromisoformat(job["created_at"])
-                        elapsed = (now - created).total_seconds()
-                        time_on_job = _format_duration(elapsed)
-                    except Exception:
-                        time_on_job = "-"
-                else:
-                    job_id = "-"
-                    time_on_job = "-"
-
-                agent_rows.append({
-                    "agent_id": agent_id, "role": role, "status": agent_status,
-                    "runtime_id": runtime_id, "job_id": job_id,
-                    "time_on_job": time_on_job, "pending": pending,
-                    "queue_depth": queue_depth, "queue_age": queue_age,
-                    "workspace": workspace, "runtime_status": runtime_status,
-                    "health_status": health_status,
-                })
-
-            # Compact card view for small fleets; wide table for larger ones
-            if len(agent_rows) <= 5:
-                for r in agent_rows:
-                    parts = [f"{r['agent_id']:<20s}", r["status"]]
-                    if r["role"] != "-":
-                        parts.append(f"caps=[{r['role']}]")
-                    if r["job_id"] != "-":
-                        parts.append(f"job={r['job_id']}")
-                        if r["time_on_job"] != "-":
-                            parts.append(f"({r['time_on_job']})")
-                    if r["queue_depth"] > 0:
-                        parts.append(f"queue={r['pending']}")
-                    typer.echo("  ".join(parts))
-            else:
-                typer.echo(
-                    f"{'ID':<20s} {'ROLE':<18s} {'STATUS':<8s} {'RUNTIME':<16s} "
-                    f"{'JOB_ID':<14s} {'TIME_ON_JOB':<12s} {'PENDING':<7s} {'QUEUE_AGE':<10s} {'WORKSPACE'}"
-                )
-                typer.echo("-" * 142)
-                for r in agent_rows:
-                    typer.echo(
-                        f"{r['agent_id']:<20s} {r['role']:<18s} {r['status']:<8s} {r['runtime_id']:<16s} "
-                        f"{r['job_id']:<14s} {r['time_on_job']:<12s} {r['pending']:<7s} {r['queue_age']:<10s} {r['workspace']}"
-                    )
-
-            # Warnings based on agent state
-            for r in agent_rows:
-                if r["queue_depth"] <= 0:
-                    continue
-                if r["runtime_id"] == "-":
-                    warning_items.append(
-                        f"- {r['agent_id']}: {r['queue_depth']} queued, no runtime bound. Start or re-register its runtime."
-                    )
-                    continue
-                if r["runtime_status"] in {"degraded", "offline"} or r["health_status"] in {"degraded", "unreachable"}:
-                    warning_items.append(
-                        f"- {r['agent_id']}: {r['queue_depth']} queued, runtime {r['runtime_id']} heartbeat stale ({r['health_status'] if r['health_status'] != '-' else r['runtime_status']}). Restart that runtime."
-                    )
-
-        if not quiet:
-            typer.echo("")
-
-        if warning_items:
-            typer.echo("[WARNINGS]")
-            for item in warning_items:
-                typer.echo(item)
-            typer.echo("Action: run `make local-restart` to recover state, or `make local-up` for a clean start.")
-            typer.echo("")
-
-        if quiet:
-            return
-
-        # ── Available Capabilities section
-        typer.echo("[AVAILABLE CAPABILITIES (On-Demand)]")
-        if not caps:
-            typer.echo("(none)")
-        else:
-            typer.echo(
-                f"{'CAPABILITY':<20s} {'MODEL':<20s} {'TIER':<10s} {'VERSION'}"
-            )
-            typer.echo("-" * 70)
-
-            for c in caps:
-                cap_name = c.get("name", c["capability_id"])
-                model = c.get("model_ref", "-") or "-"
-                tier = c.get("resource_tier", "-") or "-"
-                version = c.get("version", "-") or "-"
-                typer.echo(
-                    f"{cap_name:<20s} {model:<20s} {tier:<10s} {version}"
-                )
-
-
 # ── 6. info ──────────────────────────────────────────────────────────
 
 
@@ -3522,17 +3236,27 @@ def _print_capability_blueprint(cap: dict, *, indent: str = "") -> None:
 
 @app.command()
 def info(
-    target: str = typer.Argument(..., help="Agent ID or capability name/ID."),
+    target: str = typer.Argument(..., help="Agent ID, runtime ID, or capability name/ID."),
     server_url: str = typer.Option(None, help="CP URL."),
+    diagnose: bool = typer.Option(False, "--diagnose", "-d", help="Include diagnostic details (runtime logs, registration)."),
+    output_json: bool = typer.Option(False, "--json", help="Output raw JSON."),
 ) -> None:
-    """Deep-dive context for an agent or capability.
+    """Deep-dive context for an agent, runtime, or capability.
 
-    Accepts an agent ID (e.g. agt_local) or capability ID/name (e.g. cap_python).
+    Accepts an agent ID (e.g. agt_local), runtime ID (e.g. rtm_abc),
+    or capability ID/name (e.g. cap_python).
+
+    Use --diagnose to include runtime logs and registration details.
     """
     from datetime import datetime, timezone
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
+        # Runtime detection: if target starts with "rtm_" or "rtm-", try runtime first
+        if target.startswith("rtm_") or target.startswith("rtm-"):
+            _info_runtime(target, client, output_json=output_json, diagnose=diagnose)
+            return
+
         # Try agent first, fall back to capability
         agent = None
         try:
@@ -3543,9 +3267,14 @@ def info(
                 raise typer.Exit(1)
 
         if agent is not None:
-            _info_agent(agent, client)
+            if output_json:
+                _info_agent_json(agent, client, diagnose=diagnose)
+            else:
+                _info_agent(agent, client)
+                if diagnose:
+                    _info_agent_diagnose(agent, client)
         else:
-            _info_capability(target, client)
+            _info_capability(target, client, output_json=output_json)
 
 
 def _info_agent(agent: dict, client) -> None:
@@ -3627,7 +3356,7 @@ def _info_agent(agent: dict, client) -> None:
         pass
 
 
-def _info_capability(target: str, client) -> None:
+def _info_capability(target: str, client, *, output_json: bool = False) -> None:
     import httpx as _httpx
 
     # Try by ID first, then search by name
@@ -3659,11 +3388,163 @@ def _info_capability(target: str, client) -> None:
         typer.echo(f"Not found: {target} (not an agent ID or capability name)", err=True)
         raise typer.Exit(1)
 
+    if output_json:
+        typer.echo(json.dumps(cap, indent=2, default=str))
+        return
+
     cap_name = cap.get("name", cap.get("capability_id", target))
     typer.echo(_SEPARATOR)
     typer.echo(f"      CAPABILITY INFO: {cap_name}")
     typer.echo(_SEPARATOR)
     _print_capability_blueprint(cap)
+
+
+def _info_agent_diagnose(agent: dict, client) -> None:
+    """Print diagnostic details for an agent (runtime binding, logs, registration)."""
+    agent_id = agent["agent_id"]
+
+    # Runtime binding details
+    rt = None
+    try:
+        rt_page = client.ops_list_runtimes(limit=200)
+        bound_rts = [
+            r for r in rt_page.get("items", [])
+            if r.get("agent_id") == agent_id
+        ]
+        if bound_rts:
+            rt = bound_rts[0]
+    except Exception:
+        pass
+
+    typer.echo(f"\n--- DIAGNOSTICS ---")
+    typer.echo(f"REGISTERED:   {agent.get('created_at', '?')}")
+
+    if rt:
+        typer.echo(f"\nRuntime Binding:")
+        typer.echo(f"  runtime_id: {rt.get('runtime_id', '?')}")
+        typer.echo(f"  status:     {rt.get('status', '?')}")
+        typer.echo(f"  host:       {rt.get('hostname', '?')}")
+
+        # Recent runtime logs
+        runtime_id = rt.get("runtime_id")
+        if runtime_id:
+            try:
+                logs = client.logs_runtime(runtime_id, limit=20)
+                entries = logs.get("entries", logs) if isinstance(logs, dict) else logs
+                if isinstance(entries, list) and entries:
+                    entries = entries[-10:]
+                    typer.echo(f"\n  Recent Logs (last {len(entries)}):")
+                    for entry in entries:
+                        if isinstance(entry, dict):
+                            ts = entry.get("created_at", "?")
+                            action = entry.get("action", entry.get("kind", "?"))
+                            typer.echo(f"    [{ts}] {action}")
+                        else:
+                            typer.echo(f"    {str(entry)[:120]}")
+            except Exception as logs_exc:
+                typer.echo(f"  [warn] Failed to fetch runtime logs: {logs_exc}", err=True)
+    else:
+        typer.echo("Runtime Binding: none")
+
+    # Extended job history
+    try:
+        jobs_data = client.list_jobs(target_agent_id=agent_id, limit=10)
+        jobs = jobs_data.get("items", [])
+        if jobs:
+            typer.echo(f"\nJob History ({len(jobs)}):")
+            for j in jobs:
+                typer.echo(f"  {j.get('job_id', '?')}  status={j.get('status', '?')}  created={j.get('created_at', '?')}")
+        else:
+            typer.echo(f"\nJob History: none")
+    except Exception:
+        pass
+
+
+def _info_agent_json(agent: dict, client, *, diagnose: bool = False) -> None:
+    """Output agent info as JSON."""
+    agent_id = agent["agent_id"]
+    payload: dict = {"agent": agent}
+
+    if diagnose:
+        # Runtime binding
+        try:
+            rt_page = client.ops_list_runtimes(limit=200)
+            bound_rts = [
+                r for r in rt_page.get("items", [])
+                if r.get("agent_id") == agent_id
+            ]
+            payload["runtime"] = bound_rts[0] if bound_rts else None
+        except Exception:
+            payload["runtime"] = None
+
+        # Recent jobs
+        try:
+            jobs_data = client.list_jobs(target_agent_id=agent_id, limit=10)
+            payload["recent_jobs"] = jobs_data.get("items", [])
+        except Exception:
+            payload["recent_jobs"] = []
+
+    typer.echo(json.dumps(payload, indent=2, default=str))
+
+
+def _info_runtime(runtime_id: str, client, *, output_json: bool = False, diagnose: bool = False) -> None:
+    """Show runtime info — reuses diagnose runtime rendering."""
+    import httpx as _httpx
+    try:
+        rt = client.ops_get_runtime(runtime_id)
+    except _httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            typer.echo(f"Runtime '{runtime_id}' not found.", err=True)
+            raise typer.Exit(1)
+        raise
+
+    payload: dict = {
+        "runtime": rt,
+        "agents": rt.get("agents", []),
+    }
+
+    if diagnose:
+        payload["recent_logs"] = []
+        try:
+            logs = client.logs_runtime(runtime_id, limit=20)
+            payload["recent_logs"] = logs.get("entries", logs) if isinstance(logs, dict) else logs
+        except Exception as logs_exc:
+            typer.echo(f"[warn] Failed to fetch runtime logs: {logs_exc}", err=True)
+
+    if output_json:
+        typer.echo(json.dumps(payload, indent=2, default=str))
+        return
+
+    typer.echo(f"Runtime: {runtime_id}")
+    typer.echo(f"  status:     {rt.get('status', '?')}")
+    hb = rt.get("heartbeat_age_seconds")
+    if hb is None:
+        hb = _heartbeat_age_seconds(rt.get("last_heartbeat_at"))
+    typer.echo(f"  heartbeat:  {f'{hb:.0f}s ago' if hb is not None else 'never'}")
+    typer.echo(f"  host:       {rt.get('hostname', '?')}")
+    typer.echo(f"  registered: {rt.get('created_at', '?')}")
+
+    if payload["agents"]:
+        typer.echo(f"\n  Bound Agents:")
+        for a in payload["agents"]:
+            caps = ", ".join(a.get("capabilities", []))
+            typer.echo(f"    {a['agent_id']}  status={a['status']}  caps=[{caps}]")
+    else:
+        typer.echo(f"\n  Bound Agents: none")
+
+    if diagnose:
+        logs = payload.get("recent_logs", [])
+        if logs:
+            entries = logs[-10:] if isinstance(logs, list) else []
+            if entries:
+                typer.echo(f"\n  Recent Logs (last {len(entries)}):")
+                for entry in entries:
+                    if isinstance(entry, dict):
+                        ts = entry.get("created_at", "?")
+                        action = entry.get("action", entry.get("kind", "?"))
+                        typer.echo(f"    [{ts}] {action}")
+                    else:
+                        typer.echo(f"    {str(entry)[:120]}")
 
 
 # ── 7. nudge ─────────────────────────────────────────────────────────

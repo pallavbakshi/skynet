@@ -1192,11 +1192,11 @@ class HeartbeatAgeSecondsTest(unittest.TestCase):
         self.assertIsNone(_heartbeat_age_seconds("not-a-date"))
 
 
-class DiagnoseAgentTest(unittest.TestCase):
-    """Tests for the _diagnose_agent CLI code path."""
+class InfoDiagnoseAgentTest(unittest.TestCase):
+    """Tests for the info --diagnose CLI code path."""
 
     @patch("agp.cli._make_client")
-    def test_diagnose_agent_shows_agent_info(self, mock_make: MagicMock) -> None:
+    def test_info_diagnose_agent_shows_agent_info(self, mock_make: MagicMock) -> None:
         from datetime import datetime, timezone, timedelta
         hb_time = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
 
@@ -1226,32 +1226,36 @@ class DiagnoseAgentTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["diagnose", "agent", "agt_test"])
+        result = runner.invoke(app, ["info", "agt_test", "--diagnose"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("agt_test", result.output)
-        self.assertIn("idle", result.output)
+        self.assertIn("IDLE", result.output)
         self.assertIn("rtm-agt_test", result.output)
 
     @patch("agp.cli._make_client")
-    def test_diagnose_agent_404_exits_with_error(self, mock_make: MagicMock) -> None:
+    def test_info_diagnose_agent_404_exits_with_error(self, mock_make: MagicMock) -> None:
         import httpx
         fake_client = MagicMock()
-        resp = httpx.Response(404, request=httpx.Request("GET", "http://x"))
+        resp404 = httpx.Response(404, request=httpx.Request("GET", "http://x"))
         fake_client.get_agent.side_effect = httpx.HTTPStatusError(
-            "not found", request=resp.request, response=resp
+            "not found", request=resp404.request, response=resp404
         )
+        fake_client.get_capability.side_effect = httpx.HTTPStatusError(
+            "not found", request=resp404.request, response=resp404
+        )
+        fake_client.list_capabilities.return_value = {"items": []}
 
         ctx = MagicMock()
         ctx.__enter__ = MagicMock(return_value=fake_client)
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["diagnose", "agent", "agt_missing"])
+        result = runner.invoke(app, ["info", "agt_missing", "--diagnose"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("not found", result.output)
+        self.assertIn("Not found", result.output)
 
     @patch("agp.cli._make_client")
-    def test_diagnose_agent_json_output(self, mock_make: MagicMock) -> None:
+    def test_info_diagnose_agent_json_output(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_agent.return_value = {
             "agent_id": "agt_test",
@@ -1268,14 +1272,14 @@ class DiagnoseAgentTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["diagnose", "agent", "agt_test", "--json"])
+        result = runner.invoke(app, ["info", "agt_test", "--diagnose", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["agent"]["agent_id"], "agt_test")
         self.assertIsNone(data["runtime"])
 
     @patch("agp.cli._make_client")
-    def test_diagnose_agent_finds_runtime_by_agent_id(self, mock_make: MagicMock) -> None:
+    def test_info_diagnose_agent_finds_runtime_by_agent_id(self, mock_make: MagicMock) -> None:
         """Runtime with a non-standard ID is found by agent_id, not name prefix."""
         fake_client = MagicMock()
         fake_client.get_agent.return_value = {
@@ -1302,7 +1306,7 @@ class DiagnoseAgentTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         mock_make.return_value = ctx
 
-        result = runner.invoke(app, ["diagnose", "agent", "reviewer", "--json"])
+        result = runner.invoke(app, ["info", "reviewer", "--diagnose", "--json"])
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["runtime"]["runtime_id"], "custom-runtime-xyz")

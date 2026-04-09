@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
 from agp.enums import AgentStatus, JobStatus
 from agp.models import Event, IdempotencyKey, Job, utc_now
@@ -132,8 +132,8 @@ def list_jobs(
     if created_after is not None:
         query = query.where(Job.created_at >= created_after)
     if cursor_payload is not None:
-        created_at = datetime.fromisoformat(str(cursor_payload["created_at"]))
-        job_id = str(cursor_payload["job_id"])
+        created_at = datetime.fromisoformat(str(_cursor_field(cursor_payload, "created_at")))
+        job_id = str(_cursor_field(cursor_payload, "job_id"))
         query = query.where((Job.created_at < created_at) | ((Job.created_at == created_at) & (Job.job_id < job_id)))
     jobs = db.scalars(query.order_by(Job.created_at.desc(), Job.job_id.desc()).limit(limit + 1)).all()
     page_items = jobs[:limit]
@@ -159,7 +159,7 @@ def get_job_events(job_id: str, db: Session = Depends(get_db), cursor: str | Non
     cursor_payload = _decode_cursor(cursor)
     query = select(Event).where(Event.job_id == job_id)
     if cursor_payload is not None:
-        query = query.where(Event.event_seq > int(cursor_payload["event_seq"]))
+        query = query.where(Event.event_seq > int(_cursor_field(cursor_payload, "event_seq")))
     events = db.scalars(query.order_by(Event.event_seq).limit(limit + 1)).all()
     page_items = events[:limit]
     next_cursor = _encode_cursor({"event_seq": page_items[-1].event_seq}) if len(events) > limit else None

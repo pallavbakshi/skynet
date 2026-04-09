@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,6 +13,8 @@ from agp.db import get_db
 from agp.models import Artifact, JobArtifact, Run, RunArtifact
 from agp.schemas import ArtifactUploadRequest
 from agp.services._helpers import _artifact_store, _require_job
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -73,26 +77,26 @@ def get_artifact_content(
         raise HTTPException(status_code=404, detail=f"artifact not found: {artifact_id}")
     try:
         content = _artifact_store().read_text(storage_ref=artifact.storage_ref)
-    except Exception:
-        content = None
+    except Exception as exc:
+        logger.exception("artifact storage read failed for %s", artifact.storage_ref)
+        raise HTTPException(status_code=502, detail="artifact storage unavailable") from exc
     payload: dict = {
         "artifact_id": artifact.artifact_id,
         "storage_ref": artifact.storage_ref,
         "content_type": artifact.content_type,
         "size_bytes": artifact.size_bytes,
     }
-    if content is not None:
-        total_length = len(content)
-        payload["total_length"] = total_length
-        if offset > 0 or limit > 0:
-            end = offset + limit if limit > 0 else total_length
-            payload["content"] = content[offset:end]
-            payload["offset"] = offset
-            payload["limit"] = limit
-            payload["has_more"] = end < total_length
-        else:
-            payload["content"] = content
-            payload["has_more"] = False
+    total_length = len(content)
+    payload["total_length"] = total_length
+    if offset > 0 or limit > 0:
+        end = offset + limit if limit > 0 else total_length
+        payload["content"] = content[offset:end]
+        payload["offset"] = offset
+        payload["limit"] = limit
+        payload["has_more"] = end < total_length
+    else:
+        payload["content"] = content
+        payload["has_more"] = False
     return _ok(payload)
 
 

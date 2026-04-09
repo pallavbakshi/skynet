@@ -17,7 +17,7 @@ from agp.services._helpers import (
     _require_capability,
 )
 from agp.services.events import _create_event
-from agp.api.helpers import _decode_cursor
+from agp.api.helpers import _cursor_field, _decode_cursor
 
 router = APIRouter()
 
@@ -59,8 +59,8 @@ def list_capabilities(
     if name is not None:
         query = query.where(Capability.name == name)
     if cursor_payload is not None:
-        cursor_name = str(cursor_payload["name"])
-        capability_id = str(cursor_payload["capability_id"])
+        cursor_name = str(_cursor_field(cursor_payload, "name"))
+        capability_id = str(_cursor_field(cursor_payload, "capability_id"))
         query = query.where(
             (Capability.name > cursor_name) | ((Capability.name == cursor_name) & (Capability.capability_id > capability_id))
         )

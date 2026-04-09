@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
 from agp.enums import LeaseStatus
 from agp.models import Agent, Job, Lease, Run, Runtime
@@ -44,8 +44,8 @@ def list_runtimes(
     if health_status is not None:
         query = query.where(Runtime.health_status == health_status)
     if cursor_payload is not None:
-        created_at = datetime.fromisoformat(str(cursor_payload["created_at"]))
-        runtime_id = str(cursor_payload["runtime_id"])
+        created_at = datetime.fromisoformat(str(_cursor_field(cursor_payload, "created_at")))
+        runtime_id = str(_cursor_field(cursor_payload, "runtime_id"))
         query = query.where(
             (Runtime.created_at < created_at) | ((Runtime.created_at == created_at) & (Runtime.runtime_id < runtime_id))
         )

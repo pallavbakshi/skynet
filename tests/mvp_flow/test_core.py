@@ -94,7 +94,13 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 expires_at=now + timedelta(minutes=5),
                 created_at=now,
             )
-            session.add_all([message, job, run, lease])
+            session.add(message)
+            session.flush()
+            session.add(job)
+            session.flush()
+            session.add(run)
+            session.flush()
+            session.add(lease)
             session.commit()
         finally:
             session.close()
@@ -135,7 +141,11 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 started_at=now,
                 created_at=now,
             )
-            session.add_all([message, job, run])
+            session.add(message)
+            session.flush()
+            session.add(job)
+            session.flush()
+            session.add(run)
             session.commit()
         finally:
             session.close()
@@ -187,7 +197,13 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 expires_at=now + timedelta(minutes=5),
                 created_at=now,
             )
-            session.add_all([message, job, run, lease])
+            session.add(message)
+            session.flush()
+            session.add(job)
+            session.flush()
+            session.add(run)
+            session.flush()
+            session.add(lease)
             session.commit()
         finally:
             session.close()
@@ -2246,7 +2262,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         with patch.object(self.agp, "ops_health", side_effect=httpx.HTTPStatusError("forbidden", request=request, response=response)):
             result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("CP reachable", result.output)
+        self.assertIn("Control Plane:", result.output)
 
     def test_agents_api_counts_only_direct_queue_depth(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_depth", "capabilities": ["python"]})
@@ -2298,7 +2314,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIsNotNone(agent["oldest_queued_at"])
         self.assertGreaterEqual(agent["oldest_queue_age_seconds"], 120)
 
-    def test_agp_ls_shows_pending_queue_depth_column(self) -> None:
+    def test_agp_status_shows_pending_queue_depth(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_pending", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
@@ -2337,12 +2353,12 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         finally:
             session.close()
 
-        result = self._cli_invoke(["ls"])
+        result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("queue=1", result.output)
         self.assertIn("agt_pending", result.output)
 
-    def test_agp_ls_warns_when_queued_agent_has_no_runtime_bound(self) -> None:
+    def test_agp_status_warns_when_queued_agent_has_no_runtime_bound(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_warn", "capabilities": ["python"]})
         self.client.post(
             "/messages/send",
@@ -2362,7 +2378,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         finally:
             session.close()
 
-        result = self._cli_invoke(["ls"])
+        result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("[WARNINGS]", result.output)
         self.assertIn("agt_warn: 1 queued, no runtime bound.", result.output)
@@ -2388,13 +2404,13 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
         result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("CP reachable", result.output)
+        self.assertIn("Control Plane:", result.output)
 
-    def test_agp_status_no_args_is_simple_ping(self) -> None:
+    def test_agp_status_no_args_shows_dashboard(self) -> None:
         result = self._cli_invoke(["status"])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("CP reachable", result.output)
-        self.assertIn("agp health", result.output)
+        self.assertIn("Control Plane:", result.output)
+        self.assertIn("Agents:", result.output)
 
     def test_agents_api_real_cursor_flow_reaches_second_page(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_cursor_target", "capabilities": ["python"]})

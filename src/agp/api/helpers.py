@@ -65,6 +65,14 @@ def _decode_cursor(cursor: str | None) -> dict[str, object] | None:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
 
 
+def _cursor_field(cursor_payload: dict[str, object], field: str) -> object:
+    """Extract a required field from a decoded cursor, or 400."""
+    try:
+        return cursor_payload[field]
+    except KeyError:
+        raise HTTPException(status_code=400, detail=f"invalid cursor: missing {field}")
+
+
 def _apply_created_cursor(query, model, cursor: str | None):
     cursor_payload = _decode_cursor(cursor)
     if cursor_payload is None:

@@ -31,8 +31,14 @@ def _seed_full_claim(session, *, agent_id="agt_sw", runtime_id="rtm_sw", job_id=
     job = Job(job_id=job_id, message_id=msg.message_id, target_agent_id=agent_id, target_queue=f"agent:{agent_id}", status=JobStatus.RUNNING.value, created_at=now, updated_at=now)
     run = Run(run_id=f"run_{job_id}", job_id=job_id, agent_id=agent_id, runtime_id=runtime_id, attempt=1, status=RunStatus.RUNNING.value, started_at=now, created_at=now)
     lease = Lease(lease_id=f"lease_{job_id}", run_id=run.run_id, agent_id=agent_id, runtime_id=runtime_id, fencing_token=1, status=LeaseStatus.ACTIVE.value, expires_at=now + timedelta(seconds=lease_ttl), created_at=now)
-    for obj in (rt, ag, msg, job, run, lease):
+    for obj in (rt, ag, msg):
         session.add(obj)
+    session.flush()
+    session.add(job)
+    session.flush()
+    session.add(run)
+    session.flush()
+    session.add(lease)
     session.flush()
     return {"runtime": rt, "agent": ag, "job": job, "run": run, "lease": lease}
 
@@ -116,10 +122,10 @@ class SweepStaleAgentsTest(AgpTestCase):
             session.commit()
             sweep_stale_agents(session, heartbeat_grace_seconds=10)
             evt = session.execute(
-                select(Event).where(Event.event_type == "agent.deleted", Event.agent_id == "agt_evt")
+                select(Event).where(Event.event_type == "agent.deleted")
             ).scalar_one_or_none()
             self.assertIsNotNone(evt, "agent.deleted event should exist")
-            self.assertEqual(evt.agent_id, "agt_evt")
+            self.assertEqual(evt.body_json["agent_id"], "agt_evt")
         finally:
             session.close()
 
@@ -149,13 +155,13 @@ class SweepDrainingTest(AgpTestCase):
             result = sweep_stale_agents(session)
             self.assertEqual(result["deleted_drained"], 1)
             self.assertIsNone(session.get(Agent, "agt_dr"))
-            # The agent.deleted event must retain its agent_id
+            # The agent.deleted event must retain agent_id in body
             from sqlalchemy import select
             evt = session.execute(
-                select(Event).where(Event.event_type == "agent.deleted", Event.agent_id == "agt_dr")
+                select(Event).where(Event.event_type == "agent.deleted")
             ).scalar_one_or_none()
             self.assertIsNotNone(evt, "agent.deleted event should exist for drained agent")
-            self.assertEqual(evt.agent_id, "agt_dr")
+            self.assertEqual(evt.body_json["agent_id"], "agt_dr")
         finally:
             session.close()
 
@@ -197,7 +203,9 @@ class SweepDrainingTest(AgpTestCase):
                 created_at=now,
                 updated_at=now,
             )
-            session.add_all([agent, message, job, delivery])
+            session.add_all([agent, message])
+            session.flush()
+            session.add_all([job, delivery])
             session.commit()
 
             result = sweep_stale_agents(session)

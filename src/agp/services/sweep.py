@@ -17,15 +17,29 @@ from agp.services._helpers import (
 from agp.services.events import _create_event
 
 
-def _nullify_agent_references(db: Session, agent_id: str) -> None:
+def _nullify_agent_references(db: Session, agent_id: str, *, guard_clause: str = '', guard_params: dict | None = None) -> None:
     """Unlink FK references before agent deletion.
 
-    Runs and leases retain agent_id as audit history (no FK constraint in migration 0002).
-    Events are nullified as belt-and-suspenders for the initial-migration FK.
-    Runtimes are unlinked (physical process should not reference a deleted agent).
+    Must run BEFORE the DELETE to satisfy SQLite FK constraints (the SQLite
+    migration DDL lacks ON DELETE SET NULL).  When guard_clause is provided,
+    the UPDATEs only apply if the agent still matches the deletion predicate,
+    preventing reference clearing for agents that recovered.
+
+    Note: under Postgres READ COMMITTED the UPDATE and DELETE use separate
+    statement snapshots, so a concurrent heartbeat could theoretically clear
+    references while the DELETE becomes a no-op.  The window is microseconds
+    and the impact is benign (jobs fall back to capability-based routing).
+    SQLite with BEGIN IMMEDIATE is fully atomic.
     """
-    db.execute(text("UPDATE events SET agent_id = NULL WHERE agent_id = :aid"), {"aid": agent_id})
-    db.execute(text("UPDATE runtimes SET agent_id = NULL WHERE agent_id = :aid"), {"aid": agent_id})
+    params: dict = {'aid': agent_id}
+    if guard_params:
+        params.update(guard_params)
+    guard = ''
+    if guard_clause:
+        guard = f' AND EXISTS (SELECT 1 FROM agents WHERE agent_id = :aid AND {guard_clause})'
+    db.execute(text(f'UPDATE events SET agent_id = NULL WHERE agent_id = :aid{guard}'), params)
+    db.execute(text(f'UPDATE runtimes SET agent_id = NULL WHERE agent_id = :aid{guard}'), params)
+    db.execute(text(f'UPDATE jobs SET target_agent_id = NULL WHERE target_agent_id = :aid{guard}'), params)
 
 
 def _ack_queue_deliveries(db: Session, *, job_ids: list[str], now: datetime) -> None:
@@ -179,6 +193,11 @@ def sweep_stale_agents(
         if has_active_lease:
             continue
 
+        _nullify_agent_references(
+            db, agent.agent_id,
+            guard_clause="status = 'idle' AND last_heartbeat_at < :cutoff",
+            guard_params={'cutoff': cutoff},
+        )
         result = db.execute(
             text(
                 "DELETE FROM agents "
@@ -187,10 +206,9 @@ def sweep_stale_agents(
             {"aid": agent.agent_id, "cutoff": cutoff},
         )
         if result.rowcount:
-            _nullify_agent_references(db, agent.agent_id)
             _create_event(
-                db, agent_id=agent.agent_id, event_type="agent.deleted",
-                body={"reason": "heartbeat_timeout", "grace_seconds": grace},
+                db, event_type="agent.deleted",
+                body={"agent_id": agent.agent_id, "reason": "heartbeat_timeout", "grace_seconds": grace},
             )
             db.expire(agent)
             deleted += 1
@@ -240,6 +258,10 @@ def sweep_stale_agents(
             )
 
         # M2: conditional DELETE for race safety (mirrors Phase 1 pattern)
+        _nullify_agent_references(
+            db, agent.agent_id,
+            guard_clause="status = 'draining'",
+        )
         result = db.execute(
             text(
                 "DELETE FROM agents "
@@ -248,10 +270,9 @@ def sweep_stale_agents(
             {"aid": agent.agent_id},
         )
         if result.rowcount:
-            _nullify_agent_references(db, agent.agent_id)
             _create_event(
-                db, agent_id=agent.agent_id, event_type="agent.deleted",
-                body={"reason": "drain_complete"},
+                db, event_type="agent.deleted",
+                body={"agent_id": agent.agent_id, "reason": "drain_complete"},
             )
             db.expire(agent)
             drained += 1

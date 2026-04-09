@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
 from agp.db import get_db
 from agp.models import Agent, Runtime, utc_now
 from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue
@@ -71,8 +71,8 @@ def list_agents(
     if created_after is not None:
         query = query.where(Agent.created_at >= created_after)
     if cursor_payload is not None:
-        created_at = datetime.fromisoformat(str(cursor_payload["created_at"]))
-        agent_id = str(cursor_payload["agent_id"])
+        created_at = datetime.fromisoformat(str(_cursor_field(cursor_payload, "created_at")))
+        agent_id = str(_cursor_field(cursor_payload, "agent_id"))
         query = query.where(
             (Agent.created_at < created_at) | ((Agent.created_at == created_at) & (Agent.agent_id < agent_id))
         )
