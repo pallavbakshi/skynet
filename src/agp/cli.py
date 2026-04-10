@@ -983,6 +983,62 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
     return client.get_job(job_id), True  # last check before giving up
 
 
+def _poll_jobs_until_done(
+    client,
+    job_ids: list[str],
+    timeout: float,
+    *,
+    on_complete=None,
+    heartbeat_interval: float = 10.0,
+) -> tuple[dict[str, dict], set[str]]:
+    """Poll multiple jobs concurrently until each is terminal or timeout.
+
+    Visits every pending job on each iteration, so completions are surfaced
+    as they happen — not in dispatch order. Calls ``on_complete(job_id, job)``
+    the moment a job becomes terminal, then keeps polling the rest.
+
+    Returns ``(results_by_id, still_pending)``.  ``still_pending`` contains
+    any jobs that hadn't reached a terminal state when the timeout expired.
+    """
+    import time
+
+    pending = set(job_ids)
+    results: dict[str, dict] = {}
+    start = time.monotonic()
+    deadline = start + timeout
+    last_heartbeat = start
+
+    while pending and time.monotonic() < deadline:
+        for jid in list(pending):
+            try:
+                job = client.get_job(jid)
+            except Exception:
+                continue  # transient — retry next iteration
+            if job["status"] in ("completed", "failed", "cancelled"):
+                results[jid] = job
+                pending.discard(jid)
+                if on_complete is not None:
+                    on_complete(jid, job)
+        if not pending:
+            break
+        now = time.monotonic()
+        if now - last_heartbeat >= heartbeat_interval:
+            elapsed = int(now - start)
+            done = len(job_ids) - len(pending)
+            pending_list = ", ".join(sorted(pending))
+            typer.echo(f"[..] {done}/{len(job_ids)} done — waiting on {len(pending)}: {pending_list} ({elapsed}s elapsed)")
+            last_heartbeat = now
+        time.sleep(2)
+
+    # Final snapshot for anything still pending (timeout case)
+    for jid in list(pending):
+        try:
+            results[jid] = client.get_job(jid)
+        except Exception:
+            results[jid] = {"job_id": jid, "status": "unknown"}
+    return results, pending
+
+
 # ── 0a. up ──────────────────────────────────────────────────────────
 
 
@@ -2352,10 +2408,11 @@ def wait_cmd(
     server_url: str = typer.Option(None, help="CP URL."),
     timeout: int = typer.Option(300, "--poll-timeout", "--timeout", help="Wait timeout in seconds (default: 300)."),
 ) -> None:
-    """Re-attach to a running job and wait for its result.
+    """Re-attach to running jobs and wait for their results.
 
-    Accepts one or more job IDs. When multiple IDs are given, waits for each
-    sequentially and prints each result as it arrives.
+    Accepts one or more job IDs. When multiple IDs are given, polls all of
+    them concurrently and prints each result as soon as it is ready — you
+    don't have to wait for the slowest job before seeing faster ones.
 
     The server lets jobs run up to 60 minutes before the CP fails them, but
     the CLI's default ``--poll-timeout`` is 300s. For long tasks (reviews,
@@ -2377,11 +2434,22 @@ def wait_cmd(
 
     had_failure = False
 
+    def _print_timeout_hint(jid: str, agent: str) -> None:
+        typer.echo(f"wait timeout — {jid} IS STILL RUNNING (not failed)", err=True)
+        typer.echo("The CLI stopped polling. Server lets the job run up to 60 minutes total.")
+        typer.echo("DO NOT resend. Be patient. What to do next:")
+        if agent and agent != "?":
+            typer.echo(f"  agp peek {agent}                    # see live terminal")
+        typer.echo(f"  agp wait {jid} --poll-timeout 3600  # block until done")
+        typer.echo(f"  agp result {jid}                    # fetch output once complete")
+
     with _cli_client(server_url) as client:
-        for idx, job_id in enumerate(job_ids):
-            # Quick check — maybe it already finished
+        # Phase 1: triage — print already-done results, collect pending jobs
+        pending: list[str] = []
+        pending_agents: dict[str, str] = {}
+        for jid in job_ids:
             try:
-                job = client.get_job(job_id)
+                job = client.get_job(jid)
             except _httpx.HTTPStatusError as exc:
                 typer.echo(_format_http_error(exc), err=True)
                 had_failure = True
@@ -2390,16 +2458,26 @@ def wait_cmd(
                 _print_job_result(job, client)
                 if job["status"] == "failed":
                     had_failure = True
-                continue
+            else:
+                pending.append(jid)
+                pending_agents[jid] = job.get("target_agent_id", "?")
 
-            agent_id = job.get("target_agent_id", "?")
-            typer.echo(f"[..] Re-attaching to {job_id} (agent={agent_id})...")
+        if not pending:
+            if had_failure:
+                raise typer.Exit(1)
+            return
+
+        # Phase 2a: single pending job — use rich per-job progress
+        if len(pending) == 1:
+            jid = pending[0]
+            agent_id = pending_agents[jid]
+            typer.echo(f"[..] Re-attaching to {jid} (agent={agent_id})...")
             _print_peek_tip(agent_id)
-            # Compute elapsed time since job creation so the timer is continuous
             job_age: float = 0.0
             try:
                 from datetime import datetime, timezone
-                created_raw = job.get("created_at")
+                src_job = client.get_job(jid)
+                created_raw = src_job.get("created_at")
                 if created_raw:
                     created = created_raw if isinstance(created_raw, datetime) else datetime.fromisoformat(str(created_raw))
                     if created.tzinfo is None:
@@ -2408,45 +2486,80 @@ def wait_cmd(
             except Exception:
                 pass
             try:
-                job, timed_out = _poll_until_done(client, job_id, timeout, job_created_at=job_age)
+                job, timed_out = _poll_until_done(client, jid, timeout, job_created_at=job_age)
             except KeyboardInterrupt:
                 import time
-                remaining = job_ids[idx + 1:]
-                all_ids = [job_id] + remaining
                 typer.echo("", err=True)
-                typer.echo(f"Detached {len(all_ids)} job(s) (still running in background):", err=True)
-                for jid in all_ids:
-                    typer.echo(f"  agp wait {jid}", err=True)
-                typer.echo(f"\nCtrl+C again within 2s to stop all jobs.", err=True)
+                typer.echo(f"Detached 1 job (still running in background):", err=True)
+                typer.echo(f"  agp wait {jid}", err=True)
+                typer.echo(f"\nCtrl+C again within 2s to stop it.", err=True)
                 try:
                     time.sleep(2)
                 except KeyboardInterrupt:
-                    typer.echo(f"\nStopping {len(all_ids)} job(s)...", err=True)
-                    for jid in all_ids:
-                        try:
-                            client.interrupt(jid)
-                            typer.echo(f"  {jid} — interrupted", err=True)
-                        except Exception:
-                            typer.echo(f"  {jid} — could not interrupt", err=True)
+                    typer.echo(f"\nStopping {jid}...", err=True)
+                    try:
+                        client.interrupt(jid)
+                        typer.echo(f"  {jid} — interrupted", err=True)
+                    except Exception:
+                        typer.echo(f"  {jid} — could not interrupt", err=True)
                 raise typer.Exit(0)
             except _httpx.HTTPStatusError as exc:
                 typer.echo(_format_http_error(exc), err=True)
                 had_failure = True
-                continue
-
-            if not timed_out:
-                _print_job_result(job, client)
-                if job["status"] == "failed":
+            else:
+                if not timed_out:
+                    _print_job_result(job, client)
+                    if job["status"] == "failed":
+                        had_failure = True
+                else:
+                    _print_timeout_hint(jid, agent_id)
                     had_failure = True
-                continue
+            if had_failure:
+                raise typer.Exit(1)
+            return
 
-            typer.echo(f"wait timeout — {job_id} IS STILL RUNNING (not failed)", err=True)
-            typer.echo("The CLI stopped polling. Server lets the job run up to 60 minutes total.")
-            typer.echo("DO NOT resend. Be patient. What to do next:")
-            if agent_id and agent_id != "?":
-                typer.echo(f"  agp peek {agent_id}                    # see live terminal")
-            typer.echo(f"  agp wait {job_id} --poll-timeout 3600  # block until done")
-            typer.echo(f"  agp result {job_id}                    # fetch output once complete")
+        # Phase 2b: multiple pending jobs — concurrent poll, stream completions
+        typer.echo(f"[..] Waiting on {len(pending)} job(s):")
+        for jid in pending:
+            typer.echo(f"     {jid}  agent={pending_agents[jid]}  (agp peek {pending_agents[jid]})")
+
+        # Caller-side pending set stays in sync via on_complete so Ctrl+C
+        # knows exactly which jobs are still unfinished.
+        pending_set = set(pending)
+
+        def _on_complete(jid: str, job: dict) -> None:
+            nonlocal had_failure
+            _print_job_result(job, client)
+            if job["status"] == "failed":
+                had_failure = True
+            pending_set.discard(jid)
+
+        try:
+            _, still_pending = _poll_jobs_until_done(
+                client, pending, timeout, on_complete=_on_complete,
+            )
+        except KeyboardInterrupt:
+            import time
+            remaining = sorted(pending_set)
+            typer.echo("", err=True)
+            typer.echo(f"Detached {len(remaining)} job(s) (still running in background):", err=True)
+            for jid in remaining:
+                typer.echo(f"  agp wait {jid}", err=True)
+            typer.echo(f"\nCtrl+C again within 2s to stop all jobs.", err=True)
+            try:
+                time.sleep(2)
+            except KeyboardInterrupt:
+                typer.echo(f"\nStopping {len(remaining)} job(s)...", err=True)
+                for jid in remaining:
+                    try:
+                        client.interrupt(jid)
+                        typer.echo(f"  {jid} — interrupted", err=True)
+                    except Exception:
+                        typer.echo(f"  {jid} — could not interrupt", err=True)
+            raise typer.Exit(0)
+
+        for jid in sorted(still_pending):
+            _print_timeout_hint(jid, pending_agents.get(jid, "?"))
             had_failure = True
 
     if had_failure:
