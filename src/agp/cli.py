@@ -989,53 +989,94 @@ def _poll_jobs_until_done(
     timeout: float,
     *,
     on_complete=None,
+    on_error=None,
     heartbeat_interval: float = 10.0,
 ) -> tuple[dict[str, dict], set[str]]:
     """Poll multiple jobs concurrently until each is terminal or timeout.
 
     Visits every pending job on each iteration, so completions are surfaced
     as they happen — not in dispatch order. Calls ``on_complete(job_id, job)``
-    the moment a job becomes terminal, then keeps polling the rest.
+    the moment a job becomes terminal, then keeps polling the rest.  Permanent
+    lookup errors (404) discard the job and call ``on_error(job_id, exc)``.
+
+    ``job_ids`` may contain duplicates; they are deduped internally.
 
     Returns ``(results_by_id, still_pending)``.  ``still_pending`` contains
-    any jobs that hadn't reached a terminal state when the timeout expired.
+    any jobs that hadn't reached a terminal state when the timeout expired —
+    jobs that completed during the final snapshot are NOT in this set.
     """
     import time
+    import httpx as _httpx
 
+    _TERMINAL = ("completed", "failed", "cancelled")
     pending = set(job_ids)
+    dedup_total = len(pending)
     results: dict[str, dict] = {}
     start = time.monotonic()
     deadline = start + timeout
     last_heartbeat = start
 
+    def _maybe_complete(jid: str, job: dict) -> bool:
+        """Record a terminal-state job and notify the caller. Returns True if terminal."""
+        if job.get("status") in _TERMINAL:
+            results[jid] = job
+            pending.discard(jid)
+            if on_complete is not None:
+                on_complete(jid, job)
+            return True
+        return False
+
     while pending and time.monotonic() < deadline:
         for jid in list(pending):
             try:
                 job = client.get_job(jid)
-            except Exception:
-                continue  # transient — retry next iteration
-            if job["status"] in ("completed", "failed", "cancelled"):
-                results[jid] = job
-                pending.discard(jid)
-                if on_complete is not None:
-                    on_complete(jid, job)
+            except _httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    # Job deleted/purged — permanent, stop polling it
+                    pending.discard(jid)
+                    results[jid] = {"job_id": jid, "status": "not_found"}
+                    if on_error is not None:
+                        on_error(jid, exc)
+                    continue
+                # Other HTTP errors (5xx, auth) — warn and retry next iter
+                typer.echo(f"[warn] get_job({jid}): HTTP {exc.response.status_code}", err=True)
+                continue
+            except _httpx.RequestError as exc:
+                typer.echo(f"[warn] get_job({jid}): {exc}", err=True)
+                continue
+            _maybe_complete(jid, job)
         if not pending:
             break
         now = time.monotonic()
         if now - last_heartbeat >= heartbeat_interval:
             elapsed = int(now - start)
-            done = len(job_ids) - len(pending)
+            done = dedup_total - len(pending)
             pending_list = ", ".join(sorted(pending))
-            typer.echo(f"[..] {done}/{len(job_ids)} done — waiting on {len(pending)}: {pending_list} ({elapsed}s elapsed)")
+            typer.echo(f"[..] {done}/{dedup_total} done — waiting on {len(pending)}: {pending_list} ({elapsed}s elapsed)")
             last_heartbeat = now
         time.sleep(2)
 
-    # Final snapshot for anything still pending (timeout case)
+    # Final snapshot for anything still pending (timeout case).
+    # A job may have transitioned between the last poll and this snapshot;
+    # if so, treat it as a normal completion so the caller is NOT told it
+    # "timed out" when it actually finished.
     for jid in list(pending):
         try:
-            results[jid] = client.get_job(jid)
-        except Exception:
+            job = client.get_job(jid)
+        except _httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                pending.discard(jid)
+                results[jid] = {"job_id": jid, "status": "not_found"}
+                if on_error is not None:
+                    on_error(jid, exc)
+                continue
             results[jid] = {"job_id": jid, "status": "unknown"}
+            continue
+        except _httpx.RequestError:
+            results[jid] = {"job_id": jid, "status": "unknown"}
+            continue
+        if not _maybe_complete(jid, job):
+            results[jid] = job  # non-terminal — left in pending
     return results, pending
 
 
@@ -2436,12 +2477,16 @@ def wait_cmd(
 
     def _print_timeout_hint(jid: str, agent: str) -> None:
         typer.echo(f"wait timeout — {jid} IS STILL RUNNING (not failed)", err=True)
-        typer.echo("The CLI stopped polling. Server lets the job run up to 60 minutes total.")
-        typer.echo("DO NOT resend. Be patient. What to do next:")
+        typer.echo("The CLI stopped polling. Server lets the job run up to 60 minutes total.", err=True)
+        typer.echo("DO NOT resend. Be patient. What to do next:", err=True)
         if agent and agent != "?":
-            typer.echo(f"  agp peek {agent}                    # see live terminal")
-        typer.echo(f"  agp wait {jid} --poll-timeout 3600  # block until done")
-        typer.echo(f"  agp result {jid}                    # fetch output once complete")
+            typer.echo(f"  agp peek {agent}                    # see live terminal", err=True)
+        typer.echo(f"  agp wait {jid} --poll-timeout 3600  # block until done", err=True)
+        typer.echo(f"  agp result {jid}                    # fetch output once complete", err=True)
+
+    # Dedupe job_ids while preserving order so `agp wait job_a job_a` doesn't
+    # double-print or skew the N/M heartbeat denominator.
+    job_ids = list(dict.fromkeys(job_ids))
 
     with _cli_client(server_url) as client:
         # Phase 1: triage — print already-done results, collect pending jobs
@@ -2524,19 +2569,30 @@ def wait_cmd(
             typer.echo(f"     {jid}  agent={pending_agents[jid]}  (agp peek {pending_agents[jid]})")
 
         # Caller-side pending set stays in sync via on_complete so Ctrl+C
-        # knows exactly which jobs are still unfinished.
+        # knows exactly which jobs are still unfinished. Discard happens
+        # BEFORE any network-blocking print — otherwise a Ctrl+C during
+        # _print_job_result (which fetches artifacts) would leak a completed
+        # job back into pending_set.
         pending_set = set(pending)
 
         def _on_complete(jid: str, job: dict) -> None:
             nonlocal had_failure
+            pending_set.discard(jid)
             _print_job_result(job, client)
             if job["status"] == "failed":
                 had_failure = True
+
+        def _on_error(jid: str, exc: Exception) -> None:
+            nonlocal had_failure
             pending_set.discard(jid)
+            typer.echo(f"error: {jid} — {exc}", err=True)
+            typer.echo(f"  (job may have been deleted or purged)", err=True)
+            had_failure = True
 
         try:
             _, still_pending = _poll_jobs_until_done(
-                client, pending, timeout, on_complete=_on_complete,
+                client, pending, timeout,
+                on_complete=_on_complete, on_error=_on_error,
             )
         except KeyboardInterrupt:
             import time

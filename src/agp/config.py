@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     queue_max_delivery_attempts: int = 3
     # Default execution deadline applied to every job at dispatch time.
     # The CP fails any job that exceeds this wall-clock duration.
-    # Set to None (via AGP_DEFAULT_JOB_DEADLINE_SECONDS=0 or unset env) to disable.
+    # Set AGP_DEFAULT_JOB_DEADLINE_SECONDS=0 (or any non-positive value) to
+    # disable — the validator below coerces <= 0 to None.
     default_job_deadline_seconds: int | None = 3600
     lease_heartbeat_interval_seconds: int = 10
     agent_heartbeat_grace_seconds: int = 60
@@ -71,6 +72,23 @@ class Settings(BaseSettings):
     scrollback_lines: int = 50000
     tmux_scrollback_lines: int = 50000
     tmux_session_prefix: str = "agp"
+
+    @field_validator("default_job_deadline_seconds", mode="before")
+    @classmethod
+    def _coerce_non_positive_to_none(cls, v: Any) -> Any:
+        """Treat AGP_DEFAULT_JOB_DEADLINE_SECONDS<=0 as 'disabled' (None).
+
+        Without this, 0 would mean 'every job is already past its deadline'
+        and every dispatch would fail immediately.
+        """
+        if v is None or v == "":
+            return None
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return v  # let pydantic raise a proper validation error
+        return None if n <= 0 else n
+
     @model_validator(mode="after")
     def _validate_backend_requirements(self) -> "Settings":
         if self.artifact_backend == "s3":
