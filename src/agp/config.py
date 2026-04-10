@@ -33,6 +33,10 @@ class Settings(BaseSettings):
     redis_queue_key_prefix: str = "agp"
     queue_visibility_timeout_seconds: int = 30
     queue_max_delivery_attempts: int = 3
+    # Default execution deadline applied to every job at dispatch time.
+    # The CP fails any job that exceeds this wall-clock duration.
+    # Set to None (via AGP_DEFAULT_JOB_DEADLINE_SECONDS=0 or unset env) to disable.
+    default_job_deadline_seconds: int | None = 3600
     lease_heartbeat_interval_seconds: int = 10
     agent_heartbeat_grace_seconds: int = 60
     runtime_stale_timeout_seconds: int = 90

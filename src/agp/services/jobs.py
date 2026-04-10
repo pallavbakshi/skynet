@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from agp.config import settings
 from agp.enums import AgentStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
 from agp.models import (
     Artifact,
@@ -163,7 +164,11 @@ def create_and_enqueue_job(
     db.add(message)
     db.flush()
 
-    deadline_at = now + timedelta(seconds=timeout_seconds) if timeout_seconds is not None else None
+    # Operator callers (CLI) don't pass timeout_seconds — the CP applies a
+    # default execution deadline so jobs can't run forever. Internal/automation
+    # callers can still override it per-job via the API.
+    effective_timeout = timeout_seconds if timeout_seconds is not None else settings.default_job_deadline_seconds
+    deadline_at = now + timedelta(seconds=effective_timeout) if effective_timeout is not None else None
 
     job = Job(
         job_id=_new_id("job"),
@@ -178,7 +183,7 @@ def create_and_enqueue_job(
         max_retries=3,
         output_contract_json=output_contract.model_dump() if output_contract else None,
         conversation_id=conversation_id,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=effective_timeout,
         deadline_at=deadline_at,
         created_at=now,
         updated_at=now,

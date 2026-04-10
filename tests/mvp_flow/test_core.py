@@ -960,7 +960,9 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertEqual(job.status_code, 200)
         self.assertEqual(job.json()["data"]["status"], "failed")
 
-    def test_job_without_timeout_remains_backward_compatible(self) -> None:
+    def test_job_without_timeout_uses_cp_default_deadline(self) -> None:
+        """When the client doesn't pass timeout_seconds, the CP applies its default deadline."""
+        from agp.config import settings
         self.client.post("/agents/up", json={"agent_id": "agt_no_timeout", "capabilities": ["python"]})
         self.client.post(
             "/runtimes/register",
@@ -971,7 +973,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             "/messages/send",
             json={
                 "target": {"type": "agent", "id": "agt_no_timeout"},
-                "message": {"text": "legacy no timeout", "metadata": {}},
+                "message": {"text": "no explicit timeout", "metadata": {}},
             },
         )
         self.assertEqual(send.status_code, 200)
@@ -979,8 +981,8 @@ class MvpFlowCoreTest(MvpFlowTestBase):
 
         job = self.client.get(f"/jobs/{job_id}")
         self.assertEqual(job.status_code, 200)
-        self.assertIsNone(job.json()["data"]["timeout_seconds"])
-        self.assertIsNone(job.json()["data"]["deadline_at"])
+        self.assertEqual(job.json()["data"]["timeout_seconds"], settings.default_job_deadline_seconds)
+        self.assertIsNotNone(job.json()["data"]["deadline_at"])
 
         claim = self.client.post(
             "/runs/claim",
@@ -988,8 +990,8 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         )
         self.assertEqual(claim.status_code, 200)
         claim_data = claim.json()["data"]
-        self.assertIsNone(claim_data["job"]["timeout_seconds"])
-        self.assertIsNone(claim_data["job"]["deadline_at"])
+        self.assertEqual(claim_data["job"]["timeout_seconds"], settings.default_job_deadline_seconds)
+        self.assertIsNotNone(claim_data["job"]["deadline_at"])
 
     def test_job_with_output_contract_and_valid_json_result_completes(self) -> None:
         self.client.post("/agents/up", json={"agent_id": "agt_contract", "capabilities": ["python"]})

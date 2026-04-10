@@ -31,7 +31,6 @@ _SEND_REPLY_OPTION_NAMES = {
     "--reply-to",
     "--server-url",
     "--timeout",
-    "--timeout-seconds",
 }
 
 
@@ -893,16 +892,22 @@ def _print_peek_tip(agent_id: str) -> None:
 
 
 def _print_detached(job_id: str, agent_id: str) -> None:
-    _print_banner("ACCEPTED", "Task Detached (Running Long)")
+    _print_banner("ACCEPTED", "Task Detached — Still Running")
     typer.echo(f"JOB_ID:       {job_id}")
     typer.echo(f"AGENT:        {agent_id}")
     typer.echo(f"STATUS:       IN_PROGRESS")
     typer.echo("")
-    typer.echo(f"Task still running.  Get result when done:")
-    typer.echo(f"  agp wait {job_id}")
-    typer.echo(f"  agp peek {agent_id}        # live terminal view")
-    typer.echo(f"  agp status {job_id}        # check job status")
-    typer.echo(f"  agp result {job_id}        # fetch result once done")
+    typer.echo("The CLI stopped waiting — the job IS STILL RUNNING on the server.")
+    typer.echo("The control plane will let it run up to 60 minutes before failing it.")
+    typer.echo("")
+    typer.echo("DO NOT resend the task. DO NOT assume it is stuck. Be patient.")
+    typer.echo("")
+    typer.echo("What to do next:")
+    typer.echo(f"  agp peek {agent_id}                    # see what the agent is doing RIGHT NOW")
+    typer.echo(f"  agp wait {job_id} --poll-timeout 3600  # block until done (up to CP limit)")
+    typer.echo(f"  agp result {job_id}                    # fetch output once complete")
+    typer.echo("")
+    typer.echo("Tip: next time, pass --poll-timeout 1800 on `agp send` to avoid detaching.")
 
 
 def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: float = 10.0, *, job_created_at: float | None = None):
@@ -1372,8 +1377,7 @@ def send(
     task: str | None = typer.Argument(None, help="Task text to send (reads from stdin when omitted or '-')."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     fire_and_forget: bool = typer.Option(False, "--fire-and-forget", help="Return immediately after dispatch — no sync window."),
-    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before exiting. The agent keeps running in the background."),
-    timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
+    timeout: int = typer.Option(300, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before detaching. Agent keeps running in the background up to the CP's execution deadline (default 60m)."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (useful with --fire-and-forget)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     review: bool = typer.Option(False, "--review", help=(
@@ -1390,13 +1394,22 @@ def send(
 ) -> None:
     """Send a task to an agent.
 
-    By default the CLI waits up to 90 seconds for the agent to finish.
-    If the agent is still working after that window, the CLI exits and
-    the agent keeps running in the background — use ``agp wait <job_id>``
-    to pick it back up.
+    Two independent timers to keep straight:
 
-    Use --fire-and-forget to skip the wait entirely and return immediately.
-    Use --poll-timeout to change how long the CLI waits (e.g. --poll-timeout 300).
+    - CLI poll window (--poll-timeout, default 300s): how long THIS terminal
+      blocks waiting for the result. When it expires, the CLI detaches and
+      returns — the job keeps running.
+    - Server execution deadline (60 minutes, CP-enforced): how long the job
+      is allowed to run before the control plane fails it. Not configurable
+      from the CLI — this is server policy.
+
+    When the CLI detaches, DO NOT assume the job failed. It is still running
+    on the server. Use ``agp peek <agent>`` to see live progress, or
+    ``agp wait <job_id> --poll-timeout 3600`` to block until the CP limit.
+    Never resend the same task — you will get duplicate work.
+
+    Use --fire-and-forget to return immediately after dispatch.
+    Use --poll-timeout to change how long the CLI waits (e.g. --poll-timeout 1800).
     Use --nudge <orc_id> to get a push notification when the task finishes.
 
     Task input (in priority order):
@@ -1518,7 +1531,6 @@ def send(
                 output_contract=parsed_output_contract,
                 conversation_id=conversation_id,
                 reply_to_message_id=reply_to,
-                timeout_seconds=timeout_seconds,
                 attachments=attachments,
                 idempotency_key=_cli_idempotency_key("cli"),
             )
@@ -1579,8 +1591,7 @@ def reply(
     task: str | None = typer.Argument(None, help="Reply text to send; if omitted, read from stdin."),
     server_url: str = typer.Option(None, help="CP URL (default: AGP_SERVER_URL or localhost:7860)."),
     fire_and_forget: bool = typer.Option(False, "--fire-and-forget", help="Return immediately after dispatch — no sync window."),
-    timeout: int = typer.Option(90, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before exiting. The agent keeps running in the background."),
-    timeout_seconds: int | None = typer.Option(None, "--timeout-seconds", help="Per-job execution timeout hint in seconds."),
+    timeout: int = typer.Option(300, "--poll-timeout", "--timeout", help="Seconds the CLI waits for completion before detaching. Agent keeps running in the background up to the CP's execution deadline (default 60m)."),
     nudge_target: str = typer.Option(None, "--nudge", help="Agent ID to nudge when job completes (useful with --fire-and-forget)."),
     output_contract: str | None = typer.Option(None, "--output-contract", help="JSON string describing the structured output contract."),
     review: bool = typer.Option(False, "--review", help=(
@@ -1599,11 +1610,13 @@ def reply(
     Reply text can be passed as unquoted words after the job ID, via --via-file,
     or piped through stdin.
 
-    Like ``send``, the CLI waits up to 90 seconds for completion, then exits.
-    Use --fire-and-forget to return immediately.
+    Like ``send``, the CLI waits up to ``--poll-timeout`` seconds (default 300)
+    for completion, then detaches. The agent keeps running in the background
+    up to the CP's 60-minute execution deadline. Use --fire-and-forget to
+    return immediately.
 
-    While waiting, use ``agp peek <agent_id>`` in another terminal to see
-    what the agent is doing in real time.
+    When the CLI detaches, DO NOT resend — use ``agp peek`` to check progress
+    or ``agp wait <job_id> --poll-timeout 3600`` to block until done.
 
     Examples:
 
@@ -1731,7 +1744,6 @@ def reply(
                 output_contract=parsed_output_contract,
                 conversation_id=conversation_id,
                 reply_to_message_id=message_id,
-                timeout_seconds=timeout_seconds,
                 attachments=attachments,
                 idempotency_key=_cli_idempotency_key("cli-reply"),
             )
@@ -2342,17 +2354,24 @@ def wait_cmd(
 ) -> None:
     """Re-attach to a running job and wait for its result.
 
-    Accepts one or more job IDs.  When multiple IDs are given, waits for
-    each sequentially and prints each result as it arrives.
+    Accepts one or more job IDs. When multiple IDs are given, waits for each
+    sequentially and prints each result as it arrives.
 
-    While waiting, use ``agp peek <agent_id>`` in another terminal to
-    inspect what the agent is doing.
+    The server lets jobs run up to 60 minutes before the CP fails them, but
+    the CLI's default ``--poll-timeout`` is 300s. For long tasks (reviews,
+    full-codebase scans), pass a larger window up front:
+
+      agp wait job_abc123 --poll-timeout 3600   # block up to the CP limit
+
+    If ``wait`` times out, the job IS STILL RUNNING — do not panic, do not
+    resend. Re-run ``agp wait`` with a larger ``--poll-timeout``, or use
+    ``agp peek <agent>`` to see live terminal state.
 
     Examples:
 
       agp wait job_abc123
       agp wait job_abc123 job_def456 job_ghi789
-      agp wait job_abc123 --poll-timeout 600
+      agp wait job_abc123 --poll-timeout 3600
     """
     import httpx as _httpx
 
@@ -2421,10 +2440,13 @@ def wait_cmd(
                     had_failure = True
                 continue
 
-            typer.echo(f"timeout — {job_id} still running", err=True)
-            typer.echo(f"Check again with:   agp status {job_id}")
+            typer.echo(f"wait timeout — {job_id} IS STILL RUNNING (not failed)", err=True)
+            typer.echo("The CLI stopped polling. Server lets the job run up to 60 minutes total.")
+            typer.echo("DO NOT resend. Be patient. What to do next:")
             if agent_id and agent_id != "?":
-                typer.echo(f"Peek at terminal:   agp peek {agent_id}")
+                typer.echo(f"  agp peek {agent_id}                    # see live terminal")
+            typer.echo(f"  agp wait {job_id} --poll-timeout 3600  # block until done")
+            typer.echo(f"  agp result {job_id}                    # fetch output once complete")
             had_failure = True
 
     if had_failure:

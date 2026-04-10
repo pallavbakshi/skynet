@@ -395,8 +395,6 @@ class ReplyCommandTest(unittest.TestCase):
                 "Review",
                 "--resume",
                 "job_123",
-                "--timeout-seconds",
-                "45",
                 "--fire-and-forget",
             ],
         )
@@ -404,7 +402,8 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[2], "Review --resume job_123")
-        self.assertEqual(fake_client.send.call_args.kwargs["timeout_seconds"], 45)
+        # --timeout-seconds was removed from the CLI — operators don't set deadlines.
+        self.assertNotIn("timeout_seconds", fake_client.send.call_args.kwargs)
 
     @patch("agp.cli._make_client")
     def test_send_passes_short_flags_and_no_prefix_flags_in_task(self, mock_make: MagicMock) -> None:
@@ -465,8 +464,8 @@ class ReplyCommandTest(unittest.TestCase):
         mock_make.assert_not_called()
 
     @patch("agp.cli._make_client")
-    def test_reply_passes_timeout_seconds_and_attachments(self, mock_make: MagicMock) -> None:
-        """reply --timeout-seconds and --attach are wired through to client.send()."""
+    def test_reply_passes_attachments(self, mock_make: MagicMock) -> None:
+        """reply --attach is wired through to client.send()."""
         import tempfile
 
         fake_client = MagicMock()
@@ -489,7 +488,6 @@ class ReplyCommandTest(unittest.TestCase):
         try:
             result = runner.invoke(app, [
                 "reply", "job_src", "fix this",
-                "--timeout-seconds", "120",
                 "--attach", f"{tmp_path}:context",
                 "--fire-and-forget",
             ])
@@ -500,7 +498,8 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.send.assert_called_once()
         kwargs = fake_client.send.call_args.kwargs
-        self.assertEqual(kwargs["timeout_seconds"], 120)
+        # --timeout-seconds was removed from the CLI — operators don't set deadlines.
+        self.assertNotIn("timeout_seconds", kwargs)
         self.assertEqual(len(kwargs["attachments"]), 1)
         self.assertEqual(kwargs["attachments"][0]["role"], "context")
 
