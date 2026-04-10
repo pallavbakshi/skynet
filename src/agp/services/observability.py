@@ -2,22 +2,34 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agp.config import settings
-from agp.enums import HealthStatus, JobStatus, LeaseStatus
-from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Runtime, utc_now
+from agp.enums import HealthStatus, JobStatus
+from agp.models import Agent, Event, Job, QueueDeliveryRecord, Runtime, utc_now
 from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue, queue_oldest_queued_at
 
 
 def _current_alerts_payload(db: Session) -> dict:
+    _alert_window = utc_now() - timedelta(seconds=settings.runtime_stale_timeout_seconds * 2)
     expired_leases = int(
-        db.scalar(select(func.count()).select_from(Lease).where(Lease.status == LeaseStatus.EXPIRED.value)) or 0
+        db.scalar(
+            select(func.count()).select_from(Event).where(
+                Event.event_type == "lease.expired",
+                Event.created_at >= _alert_window,
+            )
+        ) or 0
     )
     dead_lettered_deliveries = int(
-        db.scalar(select(func.count()).select_from(QueueDeliveryRecord).where(QueueDeliveryRecord.state == "dead_lettered"))
-        or 0
+        db.scalar(
+            select(func.count()).select_from(QueueDeliveryRecord).where(
+                QueueDeliveryRecord.state == "dead_lettered",
+                QueueDeliveryRecord.dead_lettered_at >= _alert_window,
+            )
+        ) or 0
     )
     global_queue_depth = int(
         db.scalar(select(func.count()).select_from(Job).where(Job.status == JobStatus.QUEUED.value)) or 0

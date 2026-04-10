@@ -62,10 +62,23 @@ def _fail_exhausted_queued_jobs(db: Session, *, target_queues: list[str]) -> int
             Job.target_queue.in_(target_queues),
         )
     ).all()
+    if not jobs:
+        return 0
+    now = utc_now()
+    failed_job_ids: list[str] = []
     for job in jobs:
         job.status = JobStatus.FAILED.value
-        job.updated_at = utc_now()
+        job.updated_at = now
         _create_event(db, job_id=job.job_id, event_type="job.failed", body={"reason": "retry_budget_exhausted", "retry_count": job.retry_count})
+        failed_job_ids.append(job.job_id)
+    from agp.services.sweep import _ack_queue_deliveries
+    _ack_queue_deliveries(db, job_ids=failed_job_ids, now=now)
+    qb = _queue_backend()
+    by_queue: dict[str, list[str]] = {}
+    for job in jobs:
+        by_queue.setdefault(job.target_queue, []).append(job.job_id)
+    for queue, ids in by_queue.items():
+        qb.remove_jobs(db, target_queue=queue, job_ids=ids)
     return len(jobs)
 
 

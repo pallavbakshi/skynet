@@ -85,6 +85,7 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[override
         or path == "/agents/up"
         or (path.startswith("/agents/") and path.endswith("/down"))
         or (path.startswith("/runtimes/") and path.endswith("/peek-result"))
+        or path == "/artifacts/upload"
     )
     required_role = _required_operator_role(method, path)
     # Runtime-write endpoints are authed by runtime token, not operator token

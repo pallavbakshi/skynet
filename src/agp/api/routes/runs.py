@@ -54,6 +54,7 @@ def _fail_if_job_timed_out(
     agent: Agent | None,
     runtime,
     lease,
+    artifacts: list | None = None,
 ) -> None:
     deadline_at = job.deadline_at
     if deadline_at is None:
@@ -70,7 +71,7 @@ def _fail_if_job_timed_out(
         runtime=runtime,
         lease=lease,
         error="job exceeded deadline",
-        artifacts=[],
+        artifacts=artifacts or [],
         summary={"reason": "timeout", "deadline_at": deadline_at.isoformat()},
     )
     raise HTTPException(status_code=409, detail="job deadline exceeded")
@@ -235,7 +236,7 @@ def complete_run(run_id: str, request: CompleteRunRequest, db: Session = Depends
     job = _require_job(db, run.job_id)
     agent = db.get(Agent, run.agent_id) if run.agent_id else None
     runtime = _require_runtime(db, run.runtime_id)
-    _fail_if_job_timed_out(db, job=job, run=run, agent=agent, runtime=runtime, lease=lease)
+    _fail_if_job_timed_out(db, job=job, run=run, agent=agent, runtime=runtime, lease=lease, artifacts=request.artifacts)
     try:
         validate_output_contract_completion(job=job, artifacts=request.artifacts)
     except BadRequestError as exc:

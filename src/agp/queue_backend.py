@@ -619,7 +619,12 @@ class RedisQueueBackend:
             flushdb()
 
     def enqueue_job(self, db: Session, *, job: Job) -> None:
-        existing = db.scalar(select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job.job_id))
+        existing = db.scalar(
+            select(QueueDeliveryRecord).where(
+                QueueDeliveryRecord.job_id == job.job_id,
+                QueueDeliveryRecord.state.in_(("pending", "delivered")),
+            )
+        )
         now = utc_now()
         if existing is None:
             existing = QueueDeliveryRecord(
@@ -677,7 +682,10 @@ class RedisQueueBackend:
                 if job is None or job.status != JobStatus.QUEUED.value or job.retry_count >= job.max_retries:
                     continue
                 # Ensure SQL delivery record exists
-                record = db.scalar(select(QueueDeliveryRecord).where(QueueDeliveryRecord.job_id == job_id))
+                record = db.scalar(select(QueueDeliveryRecord).where(
+                    QueueDeliveryRecord.job_id == job_id,
+                    QueueDeliveryRecord.state.in_(("pending", "delivered")),
+                ))
                 if record is None:
                     record = QueueDeliveryRecord(
                         delivery_id=_new_delivery_id(),

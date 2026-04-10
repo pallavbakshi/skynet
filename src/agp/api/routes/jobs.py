@@ -59,32 +59,41 @@ def send_message(
     if request.target.type == "agent":
         target_agent = _require_agent(db, request.target.id)
         detach_mode = request.detach_policy.get("mode", "auto")
-        if detach_mode == "inline" and target_agent.status == AgentStatus.IDLE.value:
-            result = execute_inline(db, job=job, agent=target_agent, message=message)
-            response = _ok({
-                "kind": result.kind,
-                "job_id": result.job_id,
-                "result_artifact_id": result.result_artifact_id,
-                "status": result.status,
-            })
-            if idempotency_key is not None:
-                db.add(IdempotencyKey(
-                    idempotency_key=idempotency_key, endpoint="/messages/send",
-                    request_hash=request_hash, response_json=response,
-                    expires_at=utc_now() + timedelta(days=1),
-                ))
-            try:
-                db.commit()
-            except IntegrityError:
-                db.rollback()
+        if detach_mode == "inline":
+            from agp.services.runs import _atomic_reserve_agent
+            if _atomic_reserve_agent(db, target_agent.agent_id):
+                db.refresh(target_agent)
+                result = execute_inline(db, job=job, agent=target_agent, message=message)
+                # Inline path completes synchronously — ack the delivery record
+                # that create_and_enqueue_job created so it doesn't pollute the queue.
+                from agp.services._helpers import _queue_backend
+                from agp.services.sweep import _ack_queue_deliveries
+                _ack_queue_deliveries(db, job_ids=[job.job_id], now=utc_now())
+                _queue_backend().remove_jobs(db, target_queue=job.target_queue, job_ids=[job.job_id])
+                response = _ok({
+                    "kind": result.kind,
+                    "job_id": result.job_id,
+                    "result_artifact_id": result.result_artifact_id,
+                    "status": result.status,
+                })
                 if idempotency_key is not None:
-                    existing = db.get(IdempotencyKey, {"idempotency_key": idempotency_key, "endpoint": "/messages/send"})
-                    if existing is not None:
-                        if existing.request_hash != request_hash:
-                            raise HTTPException(status_code=409, detail="idempotency key reused with different payload")
-                        return existing.response_json
-                raise
-            return response
+                    db.add(IdempotencyKey(
+                        idempotency_key=idempotency_key, endpoint="/messages/send",
+                        request_hash=request_hash, response_json=response,
+                        expires_at=utc_now() + timedelta(days=1),
+                    ))
+                try:
+                    db.commit()
+                except IntegrityError:
+                    db.rollback()
+                    if idempotency_key is not None:
+                        existing = db.get(IdempotencyKey, {"idempotency_key": idempotency_key, "endpoint": "/messages/send"})
+                        if existing is not None:
+                            if existing.request_hash != request_hash:
+                                raise HTTPException(status_code=409, detail="idempotency key reused with different payload")
+                            return existing.response_json
+                    raise
+                return response
 
     # Async path
     response = _ok({
@@ -172,9 +181,11 @@ def get_job_events(job_id: str, db: Session = Depends(get_db), cursor: str | Non
 @router.post("/jobs/{job_id}/interrupt")
 def interrupt_job(job_id: str, db: Session = Depends(get_db)) -> dict:
     job = _require_job(db, job_id)
+    was_queued = False
     if job.status == JobStatus.QUEUED.value:
         job.status = JobStatus.CANCELLED.value
         event_type = "job.cancelled"
+        was_queued = True
     elif job.status == JobStatus.RUNNING.value:
         job.status = JobStatus.INTERRUPT_REQUESTED.value
         event_type = "job.interrupt_requested"
@@ -182,6 +193,11 @@ def interrupt_job(job_id: str, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=409, detail=f"job cannot be interrupted from state {job.status}")
     job.updated_at = utc_now()
     _create_event(db, job_id=job.job_id, event_type=event_type, body={"status": job.status})
+    if was_queued:
+        from agp.services._helpers import _queue_backend
+        from agp.services.sweep import _ack_queue_deliveries
+        _ack_queue_deliveries(db, job_ids=[job.job_id], now=utc_now())
+        _queue_backend().remove_jobs(db, target_queue=job.target_queue, job_ids=[job.job_id])
     db.commit()
     return _ok({"job_id": job.job_id, "status": job.status})
 
