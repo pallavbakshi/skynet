@@ -114,6 +114,7 @@ class RuntimeSupervisor:
         adapter: AgentAdapter,
         artifact_root: str | Path = ".agp-artifacts",
         artifact_store: ArtifactStore | None = None,
+        workspace_ref: str | None = None,
     ) -> None:
         # Ensure the client has structured logging wired in when used
         # inside the supervisor (the SDK default is no logging).
@@ -127,6 +128,7 @@ class RuntimeSupervisor:
             settings.artifact_backend, self.artifact_root,
             server_url=client.identity.server_url,
         )
+        self._workspace_ref = workspace_ref
         self._registered = False
         self._session_lock = Lock()
 
@@ -161,7 +163,7 @@ class RuntimeSupervisor:
                 session = getattr(self, "_active_session", None)
             if session is None:
                 # Idle: get existing persistent session (tmux sessions survive between jobs)
-                session = self.host.get_or_create_session(agent_id=agent_id)
+                session = self.host.get_or_create_session(agent_id=agent_id, workspace_ref=self._workspace_ref)
             if lines and lines > 0:
                 text = self.host.read_scrollback(session, lines=lines)
             else:
@@ -507,7 +509,7 @@ class RuntimeSupervisor:
 
         run = claimed["run"]
         lease = claimed["lease"]
-        session = self.host.get_or_create_session(agent_id=claimed["agent_id"])
+        session = self.host.get_or_create_session(agent_id=claimed["agent_id"], workspace_ref=self._workspace_ref)
         with self._session_lock:
             self._active_session = session
         stop = Event()

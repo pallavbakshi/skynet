@@ -420,6 +420,7 @@ runtime: ## Start a local runtime (agent self-registers with CP)
 		--adapter-kind $(ADAPTER_KIND) \
 		--agent-id $(AGP_RUNTIME_AGENT_ID) \
 		--capabilities $(AGP_RUNTIME_CAPS) \
+		$(if $(CWD),--workspace $(CWD)) \
 	>> .agp-logs/$(AGP_RUNTIME_ID).out 2>&1
 
 # ── Convenience runtime targets ──────────────────────────────────────

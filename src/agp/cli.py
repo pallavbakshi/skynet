@@ -555,6 +555,7 @@ def runtime_work_loop(
     max_local_recoveries: int = 1,
     host_kind: str = typer.Option(None, help="Terminal host kind (default: AGP_RUNTIME_TERMINAL_HOST_KIND or inprocess)."),
     adapter_kind: str = typer.Option(None, help="Agent adapter kind (default: AGP_RUNTIME_AGENT_ADAPTER_KIND or default)."),
+    workspace: str | None = typer.Option(None, help="Working directory for the agent's terminal session (default: runtime's cwd)."),
     log_level: str = typer.Option("WARNING", help="Python log level (DEBUG, INFO, WARNING, ERROR)."),
 ) -> None:
     """Continuously claim and execute jobs until stopped or iteration bound is hit."""
@@ -604,6 +605,7 @@ def runtime_work_loop(
             host=build_terminal_host(actual_host_kind, workspace=settings.wezterm_workspace),
             adapter=build_agent_adapter(actual_adapter_kind),
             artifact_root=artifact_root,
+            workspace_ref=workspace,
         )
         import httpx as _httpx
         try:
