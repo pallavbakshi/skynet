@@ -9,6 +9,7 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from agp._local_state import ensure_local_control_plane_stopped
 from agp.config import settings
 from agp.artifact_store import get_artifact_store
 from agp.db import SessionLocal, engine

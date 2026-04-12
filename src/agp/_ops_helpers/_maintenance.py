@@ -11,7 +11,7 @@ from agp.artifact_store import get_artifact_store
 from agp.db import SessionLocal
 from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
-from agp.models import Artifact, Job, QueueDeliveryRecord, utc_now
+from agp.models import Artifact, HandoffArtifact, Job, JobArtifact, QueueDeliveryRecord, RunArtifact, utc_now
 from agp.queue_backend import get_queue_backend
 
 
