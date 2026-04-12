@@ -585,7 +585,7 @@ class TestRuntimeDeploy(unittest.TestCase):
         with patch("skyops._runtime_deploy.load_config", return_value=cfg):
             result = runner.invoke(
                 app,
-                ["runtime", "deploy", "rtm_local", "--agent-id", "agt_missing"],
+                ["debug", "runtime", "deploy", "rtm_local", "--agent-id", "agt_missing"],
             )
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("agent not found", result.output)
@@ -594,7 +594,7 @@ class TestRuntimeDeploy(unittest.TestCase):
         cfg = SkyopsConfig()
         cfg.security.runtime_token = "rtok"
         with patch("skyops._runtime_deploy.load_config", return_value=cfg):
-            result = runner.invoke(app, ["runtime", "deploy", "rtm_local", "--format", "command"])
+            result = runner.invoke(app, ["debug", "runtime", "deploy", "rtm_local", "--format", "command"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("AGP_RUNTIME_BEARER_TOKEN=rtok", result.output)
 
@@ -1089,7 +1089,7 @@ class TestDispatchCapabilities(unittest.TestCase):
     def test_list_capabilities_command(self):
         mock_client = _mock_agp_client(list_capabilities={"items": [{"capability_id": "cap_python", "name": "python", "version": "v1"}]})
         with patch("skyops._dispatch._client", return_value=mock_client):
-            result = runner.invoke(app, ["capabilities"])
+            result = runner.invoke(app, ["capability", "list"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("cap_python", result.output)
 
@@ -1105,7 +1105,7 @@ class TestDispatchCapabilities(unittest.TestCase):
         )
         mock_client.get_capability.side_effect = [not_found, {"capability_id": "cap_python", "name": "python"}]
         with patch("skyops._dispatch._client", return_value=mock_client):
-            result = runner.invoke(app, ["capability", "python"])
+            result = runner.invoke(app, ["capability", "inspect", "python"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("cap_python", result.output)
         mock_client.list_capabilities.assert_called_once_with(name="python", limit=100)
@@ -1119,7 +1119,7 @@ class TestDispatchCapabilities(unittest.TestCase):
         mock_client = _mock_agp_client()
         mock_client.get_capability.side_effect = server_error
         with patch("skyops._dispatch._client", return_value=mock_client):
-            result = runner.invoke(app, ["capability", "cap_python"])
+            result = runner.invoke(app, ["capability", "inspect", "cap_python"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertNotIn("Capability not found", result.output)
 
@@ -1139,7 +1139,7 @@ class TestDispatchCapabilities(unittest.TestCase):
         )
         mock_client.get_capability.side_effect = not_found
         with patch("skyops._dispatch._client", return_value=mock_client):
-            result = runner.invoke(app, ["capability", "python"])
+            result = runner.invoke(app, ["capability", "inspect", "python"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("ambiguous", result.output.lower())
         self.assertIn("cap_python_v1", result.output)
@@ -1155,8 +1155,8 @@ class TestMonitorMetrics(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._monitor._client", return_value=mock_client):
-                    result = runner.invoke(app, ["metrics"])
+            with patch("skyops._health.build_client", return_value=mock_client):
+                    result = runner.invoke(app, ["health", "--metrics"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("total_jobs", result.output)
 
@@ -1170,8 +1170,8 @@ class TestMonitorAlerts(unittest.TestCase):
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
             cfg = load_config(toml_path)
-            with patch("skyops._monitor._client", return_value=mock_client):
-                    result = runner.invoke(app, ["alerts"])
+            with patch("skyops._health.build_client", return_value=mock_client):
+                    result = runner.invoke(app, ["health", "--alerts"])
         self.assertEqual(result.exit_code, 0, result.output)
 
 
@@ -1184,7 +1184,7 @@ class TestMonitorEvents(unittest.TestCase):
             }
         )
         with patch("skyops._monitor._client", return_value=mock_client):
-            result = runner.invoke(app, ["events", "job_123"])
+            result = runner.invoke(app, ["job", "events", "job_123"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("job.accepted", result.output)
         self.assertIn("job.queued", result.output)
@@ -1260,11 +1260,11 @@ class TestCLIHelp(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         for cmd in [
             "init", "config", "status", "deps", "up", "down", "restart", "ps",
-            "db", "health", "send", "watch", "jobs", "agents", "capabilities", "capability",
-            "interrupt", "fetch", "deliveries", "metrics", "alerts",
-            "trace", "events", "logs", "backup", "secrets", "upgrade", "drill",
-            "host", "adapter", "plugin", "queue", "job", "sweep",
-            "validate", "smoke", "k8s-smoke", "runtime", "workspace",
+            "db", "health", "send", "watch", "jobs", "agents", "capability",
+            "interrupt", "fetch", "deliveries",
+            "logs", "backup", "secrets", "upgrade", "drill",
+            "queue", "job", "sweep",
+            "test", "debug",
         ]:
             self.assertIn(cmd, result.output, f"Command '{cmd}' not found in --help output")
 
@@ -1352,7 +1352,7 @@ class TestValidateCommand(unittest.TestCase):
             with patch("skyops._validate.load_config", return_value=cfg):
                 with patch("skyops._validate.shutil") as mock_shutil:
                     mock_shutil.which.return_value = None  # no docker/kubectl
-                    result = runner.invoke(app, ["validate"])
+                    result = runner.invoke(app, ["test", "validate"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("ok", result.output)
 
@@ -1518,7 +1518,7 @@ class TestQueueInspect(unittest.TestCase):
 
 class TestRuntimeDebug(unittest.TestCase):
     def test_runtime_subcommands_exist(self):
-        result = runner.invoke(app, ["runtime", "--help"])
+        result = runner.invoke(app, ["debug", "runtime", "--help"])
         self.assertEqual(result.exit_code, 0, result.output)
         for name in ["register", "claim", "work-once", "work-loop", "deploy", "list", "inspect"]:
             self.assertIn(name, result.output)
@@ -1526,7 +1526,7 @@ class TestRuntimeDebug(unittest.TestCase):
     def test_runtime_list_command(self):
         mock_client = _mock_agp_client(list_runtimes={"items": [{"runtime_id": "rtm_local"}]})
         with patch("skyops._runtime_debug.build_client", return_value=mock_client):
-            result = runner.invoke(app, ["runtime", "list", "--cursor", "cur_123"])
+            result = runner.invoke(app, ["debug", "runtime", "list", "--cursor", "cur_123"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("rtm_local", result.output)
         mock_client.list_runtimes.assert_called_once_with(
@@ -1536,7 +1536,7 @@ class TestRuntimeDebug(unittest.TestCase):
     def test_runtime_inspect_command(self):
         mock_client = _mock_agp_client(get_runtime={"runtime_id": "rtm_local", "status": "idle"})
         with patch("skyops._runtime_debug.build_client", return_value=mock_client):
-            result = runner.invoke(app, ["runtime", "inspect", "rtm_local"])
+            result = runner.invoke(app, ["debug", "runtime", "inspect", "rtm_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("rtm_local", result.output)
         self.assertIn("idle", result.output)
@@ -1555,7 +1555,7 @@ class TestRuntimeDebug(unittest.TestCase):
         with patch("skyops._runtime_debug.load_config", return_value=cfg), \
              patch("skyops._runtime_debug.build_profile", return_value=type("Profile", (), {"server_url": "http://cp:7860"})()), \
              patch("agp.cli.runtime_work_loop", side_effect=_fake_work_loop):
-            result = runner.invoke(app, ["runtime", "work-loop", "rtm_local"])
+            result = runner.invoke(app, ["debug", "runtime", "work-loop", "rtm_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(observed["token"], "rtok")
         self.assertEqual(observed["server_url"], "http://cp:7860")
@@ -1575,7 +1575,7 @@ class TestRuntimeDebug(unittest.TestCase):
              patch("skyops._runtime_debug.load_config", return_value=cfg), \
              patch("skyops._runtime_debug.build_profile", return_value=type("Profile", (), {"server_url": "http://cp:7860"})()), \
              patch("agp.cli.runtime_work_loop", side_effect=_fake_work_loop):
-            result = runner.invoke(app, ["runtime", "work-loop", "rtm_local"])
+            result = runner.invoke(app, ["debug", "runtime", "work-loop", "rtm_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertEqual(observed["token"], "rtok")
         self.assertEqual(observed["server_url"], "http://cp:7860")
@@ -1590,7 +1590,7 @@ class TestWorkspaceCommands(unittest.TestCase):
             "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
-            result = runner.invoke(app, ["workspace", "resolve", "agt_local"])
+            result = runner.invoke(app, ["debug", "workspace", "resolve", "agt_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("/workspace/main", result.output)
         self.assertIn("/srv/repo:/workspace/main", result.output)
@@ -1603,7 +1603,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         })
         with patch("skyops._workspace.load_config", return_value=cfg), \
              patch("skyops._workspace.Path.exists", return_value=True):
-            result = runner.invoke(app, ["workspace", "validate", "agt_local"])
+            result = runner.invoke(app, ["debug", "workspace", "validate", "agt_local"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn('"ok": true', result.output.lower())
 
@@ -1615,7 +1615,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         })
         with patch("skyops._workspace.load_config", return_value=cfg), \
              patch("skyops._workspace.Path.exists", return_value=False):
-            result = runner.invoke(app, ["workspace", "validate", "agt_local", "--host-profile", "server-a"])
+            result = runner.invoke(app, ["debug", "workspace", "validate", "agt_local", "--host-profile", "server-a"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn('"verified_locally": false', result.output.lower())
 
@@ -1645,7 +1645,7 @@ class TestWorkspaceCommands(unittest.TestCase):
         with patch("skyops._workspace.load_config", return_value=cfg), \
              patch("skyops._workspace.shutil.which", return_value="/usr/bin/git"), \
              patch("skyops._workspace.Path.exists", side_effect=lambda *args, **kwargs: str(args[-1]) == "/srv/git/agt_local"):
-            result = runner.invoke(app, ["workspace", "validate", "agt_local"])
+            result = runner.invoke(app, ["debug", "workspace", "validate", "agt_local"])
         self.assertNotEqual(result.exit_code, 0)
 
     def test_workspace_resolve_unknown_agent_fails(self):
@@ -1653,7 +1653,7 @@ class TestWorkspaceCommands(unittest.TestCase):
             "agents": {"agt_local": {"capabilities": ["python"]}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
-            result = runner.invoke(app, ["workspace", "resolve", "agt_missing"])
+            result = runner.invoke(app, ["debug", "workspace", "resolve", "agt_missing"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("agent not found", result.output)
 
@@ -1669,7 +1669,7 @@ class TestWorkspaceCommands(unittest.TestCase):
             "agents": {"agt_local": {"capabilities": ["python"], "workspace_profile": "main"}},
         })
         with patch("skyops._workspace.load_config", return_value=cfg):
-            result = runner.invoke(app, ["workspace", "resolve", "agt_local"])
+            result = runner.invoke(app, ["debug", "workspace", "resolve", "agt_local"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("host_profile is required", result.output)
 

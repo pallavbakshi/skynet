@@ -14,6 +14,12 @@ queue_app = typer.Typer(help="Queue management commands.")
 job_app = typer.Typer(help="Job management commands.")
 sweep_app = typer.Typer(help="One-shot sweep operations.")
 
+# Import trace/events from monitor and register on job_app
+from skyops._monitor import trace as _trace_cmd, events as _events_cmd  # noqa: E402
+
+job_app.command("trace")(_trace_cmd)
+job_app.command("events")(_events_cmd)
+
 
 def _emit(data: object) -> None:
     typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))

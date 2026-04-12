@@ -11,6 +11,7 @@ import typer
 from skyops._client import build_client
 
 dispatch_app = typer.Typer(help="Work dispatch and job management.")
+capability_app = typer.Typer(help="Capability management.")
 
 
 def _client():
@@ -73,7 +74,7 @@ def list_agents(
     _emit(result)
 
 
-@dispatch_app.command("capabilities")
+@capability_app.command("list")
 def list_capabilities(
     name: str | None = typer.Option(None, "--name", "-n", help="Filter by capability name."),
     limit: int = typer.Option(50, "--limit", "-l", help="Max results."),
@@ -84,7 +85,7 @@ def list_capabilities(
     _emit(result)
 
 
-@dispatch_app.command("capability")
+@capability_app.command("inspect")
 def inspect_capability(
     target: str = typer.Argument(help="Capability ID or display name."),
 ) -> None:

@@ -2,21 +2,42 @@
 
 from __future__ import annotations
 
+import json
 from urllib.parse import urlparse
 
 import typer
 
 from skyops.config import load_config
-from skyops._client import resolve_server_url, resolve_host_for_url
+from skyops._client import resolve_server_url, resolve_host_for_url, build_client
 from skyops._status import _probe_tcp, _probe_http_health
 
 health_app = typer.Typer(help="Deep health check.")
 
 
+def _emit(data: object) -> None:
+    typer.echo(json.dumps(data, indent=2, sort_keys=True, default=str))
+
+
 @health_app.callback(invoke_without_command=True)
-def health(ctx: typer.Context) -> None:
+def health(
+    ctx: typer.Context,
+    metrics: bool = typer.Option(False, "--metrics", help="Show observability metrics (JSON)."),
+    alerts: bool = typer.Option(False, "--alerts", help="Show active alerts (JSON)."),
+    prometheus: bool = typer.Option(False, "--prometheus", help="Show raw Prometheus metrics."),
+) -> None:
     """Check health of all stack components."""
     if ctx.invoked_subcommand is not None:
+        return
+
+    # Short-circuit for metrics/alerts flags
+    if metrics or alerts or prometheus:
+        with build_client() as client:
+            if prometheus:
+                typer.echo(client.observability_metrics())
+            elif alerts:
+                _emit(client.observability_alerts())
+            else:
+                _emit(client.ops_health())
         return
 
     cfg = load_config()
@@ -60,8 +81,6 @@ def health(ctx: typer.Context) -> None:
     # ── API + runtime heartbeats ──────────────────────────────────
     if cp_health:
         try:
-            from skyops._client import build_client
-
             with build_client(cfg) as client:
                 summary = client.ops_health()
                 jobs_total = summary.get("total_jobs", "?")

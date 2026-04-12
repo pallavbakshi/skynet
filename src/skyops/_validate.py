@@ -11,7 +11,7 @@ import typer
 
 from skyops.config import load_config
 
-validate_app = typer.Typer(help="Validation and smoke test commands.")
+test_app = typer.Typer(help="Validation and smoke test commands.")
 
 
 def _emit(data: object) -> None:
@@ -28,7 +28,7 @@ def _run(*args: str, cwd: str | Path | None = None) -> dict:
     }
 
 
-@validate_app.command("validate")
+@test_app.command("validate")
 def validate() -> None:
     """Lint compose and k8s manifest syntax."""
     cfg = load_config()
@@ -72,7 +72,7 @@ def validate() -> None:
         raise typer.Exit(1)
 
 
-@validate_app.command("smoke")
+@test_app.command("smoke")
 def smoke() -> None:
     """End-to-end smoke test against running stack.
 
@@ -146,7 +146,7 @@ def smoke() -> None:
     typer.echo("Smoke test passed.")
 
 
-@validate_app.command("k8s-smoke")
+@test_app.command("k8s-smoke")
 def k8s_smoke(
     cluster_name: str = typer.Option("agp-phase3", "--cluster", help="Kind cluster name."),
     control_plane_image: str = typer.Option("agp-control-plane:latest", "--control-plane-image", help="Control-plane Docker image to build and load."),

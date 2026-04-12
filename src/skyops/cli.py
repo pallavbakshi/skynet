@@ -12,21 +12,15 @@ from skyops._infra import deps_app
 from skyops._lifecycle import lifecycle_app
 from skyops._db import db_app
 from skyops._health import health_app
-from skyops._dispatch import dispatch_app
-from skyops._monitor import monitor_app, logs_app
+from skyops._dispatch import dispatch_app, capability_app
+from skyops._monitor import logs_app
 from skyops._backup import backup_app
 from skyops._security import security_app
 from skyops._upgrade import upgrade_app
 from skyops._drill import drill_app
-from skyops._plugins import host_app, adapter_app, plugin_app
 from skyops._queue import queue_app, job_app, sweep_app
-from skyops._validate import validate_app
-from skyops._runtime_debug import runtime_debug_app
-from skyops._runtime_deploy import register_deploy_command
-from skyops._agent_debug import agent_debug_app
-from skyops._workspace import workspace_app
-
-register_deploy_command(runtime_debug_app)
+from skyops._validate import test_app
+from skyops._debug import debug_app
 
 app = typer.Typer(
     name="skyops",
@@ -48,22 +42,17 @@ app.add_typer(health_app, name="health", invoke_without_command=True)
 
 # Phase D: operator commands
 app.add_typer(dispatch_app)
-app.add_typer(monitor_app)
+app.add_typer(capability_app, name="capability")
 app.add_typer(logs_app, name="logs")
 app.add_typer(backup_app, name="backup")
 app.add_typer(security_app, name="secrets")
 app.add_typer(upgrade_app, name="upgrade")
 app.add_typer(drill_app, name="drill")
-app.add_typer(host_app, name="host")
-app.add_typer(adapter_app, name="adapter")
-app.add_typer(plugin_app, name="plugin")
 app.add_typer(queue_app, name="queue")
 app.add_typer(job_app, name="job")
 app.add_typer(sweep_app, name="sweep")
-app.add_typer(validate_app)
-app.add_typer(runtime_debug_app, name="runtime")
-app.add_typer(agent_debug_app, name="agent")
-app.add_typer(workspace_app, name="workspace")
+app.add_typer(test_app, name="test")
+app.add_typer(debug_app, name="debug")
 
 if __name__ == "__main__":
     app()

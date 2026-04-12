@@ -372,7 +372,7 @@ class MvpFlowRuntimePluginsTest(MvpFlowTestBase):
             result = self.cli_runner.invoke(
                 skyops_app,
                 [
-                    "plugin", "run", "inprocess", "default", "agt_plugin",
+                    "debug", "plugin", "run", "inprocess", "default", "agt_plugin",
                     "--task", "hello plugin",
                     "--output-root", str(tmp),
                 ],
