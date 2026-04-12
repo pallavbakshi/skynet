@@ -507,6 +507,7 @@ class RuntimeSupervisor:
             _append_runtime_log(self.client.identity.runtime_id, {"kind": "runtime_worker", "action": "idle_no_claim"})
             return {"claimed": False}
 
+        # -- Session & heartbeat setup --
         run = claimed["run"]
         lease = claimed["lease"]
         session = self.host.get_or_create_session(agent_id=claimed["agent_id"], workspace_ref=self._workspace_ref)
@@ -653,6 +654,7 @@ class RuntimeSupervisor:
                 # an in-flight request if stop was set mid-heartbeat.
                 pass
 
+        # -- Execution phase --
         self._active_tui_died = tui_died
         self._active_tui_died_reason = "tui exited during execution"
         try:
@@ -835,6 +837,7 @@ class RuntimeSupervisor:
                         extend_seconds=lease_ttl_seconds,
                     )
                     attempts += 1
+            # -- Completion phase --
             # Persist extraction diagnostics as a separate artifact when present
             if result.diagnostics:
                 result.artifacts.append(ArtifactPayload(
@@ -913,6 +916,7 @@ class RuntimeSupervisor:
                 },
             )
             return {"claimed": True, "claim": claimed, "result": completed}
+        # -- Interrupt handling --
         except InterruptRequested as exc:
             try:
                 self.host.interrupt(session)
@@ -933,6 +937,7 @@ class RuntimeSupervisor:
                 _logger.warning("cancel() rejected for run %s: %s", run["run_id"], cancel_exc)
                 return {"claimed": True, "claim": claimed, "cancelled": True, "error": str(cancel_exc)}
             return {"claimed": True, "claim": claimed, "cancelled": True, "result": cancelled}
+        # -- Failure handling --
         except Exception as exc:
             _append_runtime_log(
                 self.client.identity.runtime_id,
@@ -1008,6 +1013,7 @@ class RuntimeSupervisor:
                     "result": {"job_status": "failed", "run_status": "failed", "fail_rejected": True},
                 }
             return {"claimed": True, "claim": claimed, "error": str(exc), "result": failed}
+        # -- Cleanup --
         finally:
             with self._session_lock:
                 self._active_session = None
