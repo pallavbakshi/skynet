@@ -2744,7 +2744,7 @@ def attach(
 def peek(
     agent_id: str = typer.Argument(..., help="Agent ID to peek at."),
     lines: int = typer.Option(0, "--lines", "-n", help="Scrollback lines to capture (0 = visible screen only)."),
-    timeout: float = typer.Option(30.0, "--timeout", help="Max seconds to wait for remote peek result."),
+    timeout: float = typer.Option(45.0, "--timeout", help="Max seconds to wait for remote peek result."),
     server_url: str = typer.Option(None, help="CP URL."),
 ) -> None:
     """Show live terminal content of an agent's runtime.
