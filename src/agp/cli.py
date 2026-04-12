@@ -3284,7 +3284,7 @@ def jobs(
             except Exception:
                 pass
             typer.echo(
-                f"  {j['job_id']}  {status_str:<20s}  agent={j.get('target_agent_id', '?'):<14s}  {time_info}{retry}"
+                f"  {j['job_id']}  {status_str:<20s}  agent={(j.get('target_agent_id') or '?'):<14s}  {time_info}{retry}"
             )
 
 

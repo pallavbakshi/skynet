@@ -1,139 +1,122 @@
-# AGP CLI Guide for Agents
+# AGP CLI Guide
 
-You have access to the `agp` command-line tool for orchestrating work across a fleet of AI agents. This guide covers everything you need to delegate tasks, collect results, run review loops, and manage agent lifecycle.
+Practical guide to orchestrating work across AI agents using the `agp` command-line tool.
 
 ## Core Concepts
 
-- **Agent**: A running AI instance (Claude, Codex, etc.) registered with the control plane. Each has an ID (e.g. `claude-dev`, `codex-reviewer`) and one or more capabilities (e.g. `code`, `review`).
-- **Job**: A unit of work sent to an agent. Has a lifecycle: `queued` -> `running` -> `completed`/`failed`/`cancelled`.
-- **Artifact**: Output attached to a job. Common roles: `result` (clean output), `transcript_log` (full session transcript), `exec_log` (raw execution log), `prompt` (what was sent).
-- **Control Plane (CP)**: The coordination server at `http://127.0.0.1:7860` (default). All `agp` commands talk to it.
+- **Control Plane (CP)** — coordination server at `http://127.0.0.1:7860`. All commands talk to it. Stores all state.
+- **Agent** — a registered AI worker (Claude, Codex, etc.) with an ID and capabilities. One agent per runtime.
+- **Runtime** — supervisor process that heartbeats to the CP, claims work, drives the agent in a terminal session.
+- **Job** — a unit of work: `queued` → `running` → `completed` / `failed` / `cancelled`.
+- **Artifact** — output attached to a job. Roles: `result` (clean output), `transcript_log` (full session), `exec_log` (raw log), `prompt` (what was sent).
 
-## Discovery: What's Available?
+## Quick Reference
 
-Before sending work, check what agents are running and healthy.
-
-```bash
-# Quick health check: CP, runtimes, agents
-agp health
-
-# List all agents with status, capabilities, and queue depth
-agp ls
-
-# Deep-dive into a specific agent: config, recent jobs, heartbeat
-agp info <agent_id>
+```
+agp status                          # system dashboard
+agp send <agent> "task"             # send work, wait for result
+agp send <agent> "task" --detach    # fire and forget
+agp wait <job_id> [job_id2 ...]     # wait for one or more jobs
+agp result <job_id>                 # get clean output
+agp peek <agent>                    # see agent's live terminal
+agp info <agent>                    # agent deep-dive
+agp jobs                            # list recent jobs
 ```
 
-**Pick the right agent for the task.** Match agent capabilities to your need:
-- Agents with `code` or `python` capabilities do implementation work.
-- Agents with `review` capability do code review and analysis.
+## Status and Discovery
+
+```bash
+# System dashboard — CP health, runtimes, agents, queue depth
+agp status
+
+# Minimal agent list (good for scripts)
+agp status -q
+
+# Machine-readable
+agp status --json
+
+# Check a specific job or agent
+agp status <job_id>
+agp status <agent_id>
+
+# Agent deep-dive — capabilities, heartbeat, workspace, current job
+agp info <agent_id>
+
+# Add runtime logs and registration details
+agp info <agent_id> --diagnose
+
+# Runtime info — bound agents, heartbeat, host
+agp info <runtime_id>
+```
 
 ## Sending Tasks
 
-### Basic send (synchronous wait)
+### Basics
 
 ```bash
-agp send <agent_id> "Your task description here"
-```
+# Wait for result (auto-detaches after 90s if still running)
+agp send <agent_id> "Your task here"
 
-This waits up to 90 seconds for the result. If the agent finishes in time, you get the output inline. If not, it auto-detaches and gives you a job ID.
+# No quoting needed — words after agent ID are joined
+agp send <agent_id> Read src/main.py and find bugs
 
-### Unquoted multi-word tasks
-
-You don't need to quote the task. Extra words after the agent ID are joined:
-
-```bash
-agp send <agent_id> Read the file src/main.py and find bugs
-```
-
-If the task text contains `send`/`reply` option-looking tokens, unknown ones
-are treated as task text, but known flags for that command still need `--` to
-terminate option parsing. Near-miss typos of real flags (for example
-`--detatch`) are rejected so they don't get silently swallowed into the task:
-
-```bash
-agp send <agent_id> -- Explain how --detach differs from auto-detach
-```
-
-### Fire-and-forget
-
-```bash
-agp send <agent_id> "Long running task" --detach
-```
-
-Returns immediately with a job ID. The agent keeps working.
-
-### Longer wait window
-
-```bash
+# Longer wait window
 agp send <agent_id> "Complex analysis" --timeout 300
+
+# Fire-and-forget — returns job ID immediately
+agp send <agent_id> "Long task" --detach
 ```
 
-Waits up to 300 seconds before auto-detaching.
-
-### Piping from stdin
+### Complex prompts
 
 ```bash
-echo "Analyze this code" | agp send <agent_id> -
-cat requirements.txt | agp send <agent_id> "Check these deps for vulnerabilities" -
+# Read task from a file (avoids shell quoting issues)
+agp send <agent_id> --via-file /tmp/task.md
+
+# Pipe from stdin
+echo "Analyze this" | agp send <agent_id> -
+cat report.txt | agp send <agent_id> "Summarize this" -
+
+# Attach files as context
+agp send <agent_id> "Review this" --attach config.yaml:context
+agp send <agent_id> "Merge these" --attach a.py:input --attach b.py:input
 ```
 
-The `-` reads from stdin. You can also omit the task argument entirely to read from stdin.
+### Output contracts
 
-### Attaching files
-
-```bash
-agp send <agent_id> "Review this config" --attach config.yaml:context
-agp send <agent_id> "Merge these" --attach file1.py:input --attach file2.py:input
-```
-
-Format: `<path>:<role>`. Role is freeform (e.g. `context`, `input`, `reference`).
-
-### Structured output contracts
-
-Force the agent to respond with a specific JSON schema:
+Force structured JSON output:
 
 ```bash
 agp send <agent_id> "Classify this bug" \
-  --output-contract '{"format":"json","json_schema":{"type":"object","required":["severity","category"],"properties":{"severity":{"type":"string","enum":["high","medium","low"]},"category":{"type":"string"}}}}'
+  --output-contract '{"format":"json","json_schema":{"type":"object","required":["severity"],"properties":{"severity":{"type":"string","enum":["high","medium","low"]}}}}'
 ```
-
-### Execution timeout hint
-
-Tell the runtime to cap execution time:
-
-```bash
-agp send <agent_id> "Quick check" --timeout-seconds 60
-```
-
-This is separate from `--timeout` (which controls how long the CLI waits). `--timeout-seconds` tells the agent runtime to stop after that many seconds.
 
 ## Collecting Results
 
-### Re-attach to a running job
+### Wait for jobs
 
 ```bash
+# Single job — blocks until done, prints result inline
 agp wait <job_id>
-agp wait <job_id> --timeout 600
+
+# Multiple jobs — streams results as each completes
+agp wait <job_a> <job_b> <job_c>
+
+# With timeout
+agp wait <job_id> --poll-timeout 600
 ```
 
-### Get clean output
+`wait` prints the result inline — you don't need a separate `result` call unless you want to re-fetch later.
+
+### Fetch result separately
 
 ```bash
 # Default: prefers transcript_log > result > exec_log
-# For jobs with output contracts (e.g. --review): prefers result > transcript_log
 agp result <job_id>
 
 # Specific artifact role
 agp result <job_id> --role result
 agp result <job_id> --role transcript_log
-agp result <job_id> --role exec_log
-```
-
-### Check job status
-
-```bash
-agp status <job_id>
 ```
 
 ### List recent jobs
@@ -142,235 +125,186 @@ agp status <job_id>
 agp jobs
 agp jobs --limit 20
 agp jobs --agent <agent_id>
-agp jobs --status completed
-agp jobs --agent <agent_id> --status failed
+agp jobs --status failed
 ```
 
-## Multi-Turn Conversations (Reply)
+## Parallel Dispatch
 
-Continue a conversation with an agent by replying to a completed job:
+Send to multiple agents, then wait for all:
 
 ```bash
-agp reply <job_id> "Follow up on your previous analysis"
-agp reply <job_id> "Now fix what you found" --detach
+# Dispatch (note job IDs from output)
+agp send reviewer-a "Review for correctness" --detach   # → job_aaa
+agp send reviewer-b "Review for security" --detach      # → job_bbb
+
+# Wait for both — results stream as each finishes
+agp wait job_aaa job_bbb --poll-timeout 300
 ```
 
-Reply preserves conversation context: the agent sees the original prompt and its previous response. Supports the same flags as `send`: `--attach`, `--timeout`, `--timeout-seconds`, `--output-contract`, `--detach`.
+The faster reviewer's result appears immediately; you don't block on the slower one.
 
-## Parallel Dispatch Pattern
+## Live Inspection
 
-Send work to multiple agents simultaneously:
+### Peek — terminal snapshot
 
 ```bash
-# Fire-and-forget to two reviewers
-agp send reviewer-a "Review src/api.py for security issues" --detach
-# note the job ID from output, e.g. job_aaa
-agp send reviewer-b "Review src/api.py for performance issues" --detach
-# note the job ID from output, e.g. job_bbb
+# See what the agent is doing right now
+agp peek <agent_id>
 
-# Wait for both
-agp wait job_aaa --timeout 300
-agp wait job_bbb --timeout 300
-
-# Or just check results when ready
-agp result job_aaa
-agp result job_bbb
+# Include scrollback history
+agp peek <agent_id> --lines 200
 ```
 
-## Automated Review Loops
+Works for local agents (instant via tmux) and remote agents (via CP heartbeat, ~5-15s).
 
-**Prefer `agp review` over manual `agp send` for review tasks.** The built-in review loop enforces a structured JSON output contract, so reviewers return machine-readable findings instead of transcript-heavy prose. Manual `agp send` to a reviewer returns free-form text that you have to parse yourself.
+### Attach — interactive terminal
 
-If you must use manual sends (e.g. to run two reviewers in parallel), add `--review` to get the same structured output:
+```bash
+agp attach <agent_id>
+```
+
+Opens the agent's tmux session directly. Local agents only. Use `peek` for remote agents.
+
+### Nudge — inject text into terminal
+
+```bash
+agp nudge <agent_id> "Stop what you're doing and prioritize the auth fix"
+```
+
+Injects text directly into the agent's terminal session via the next heartbeat.
+
+## Multi-Turn Conversations
+
+Reply to a completed job — the agent sees its previous work:
+
+```bash
+agp reply <job_id> "Now fix what you found"
+agp reply <job_id> "Follow up on the security issue" --detach
+```
+
+Supports the same flags as `send` (`--attach`, `--timeout`, `--via-file`, etc.).
+
+## Review Loops
+
+### Automated review (recommended)
+
+```bash
+# Reviewer checks output of a dev job
+agp review <source_job_id> <reviewer_agent_id>
+
+# With a specific dev agent for fix cycles
+agp review <source_job_id> <reviewer_agent_id> --dev <dev_agent_id>
+
+# Attach local git diff as context
+agp review <source_job_id> <reviewer_agent_id> --diff
+
+# Max rounds (default: 3)
+agp review <source_job_id> <reviewer_agent_id> --max-rounds 5
+```
+
+The review loop: reviewer returns `{"verdict": "approved"|"changes_requested", "findings": [...]}`. If changes requested, findings go to the dev agent, dev fixes, reviewer re-reviews. Repeats until approved or max rounds.
+
+### Manual dual review
+
+When you want two reviewers in parallel, use `--review` for structured output:
 
 ```bash
 agp send reviewer-a "Review this change" --review --detach
 agp send reviewer-b "Review this change" --review --detach
+agp wait <job_a> <job_b>
 ```
 
-### Built-in review loop (recommended)
+### Review session management
 
 ```bash
-# Basic review: reviewer checks the output of a dev job
-agp review <source_job_id> <reviewer_agent_id>
-
-# Specify the dev agent for fix cycles (defaults to the source job's agent)
-agp review <source_job_id> <reviewer_agent_id> --dev <dev_agent_id>
-
-# Attach local git diff as supplementary context
-agp review <source_job_id> <reviewer_agent_id> --diff
-
-# Control max rounds (default: 3)
-agp review <source_job_id> <reviewer_agent_id> --max-rounds 5
-```
-
-The review loop:
-1. Sends the source job's result to the reviewer.
-2. Reviewer responds with `{"verdict": "approved"|"changes_requested", "summary": "...", "findings": [...]}`.
-3. If changes requested: findings go to the dev agent for fixes.
-4. Dev fixes and responds. Reviewer re-reviews.
-5. Repeats until approved or max rounds reached.
-
-### Managing review sessions
-
-```bash
-# Check review progress
-agp review-status <source_job_id>
-
-# Diagnose a stuck review
-agp review-diagnose <source_job_id>
-
-# Resume a detached/interrupted review
-agp review --resume <source_job_id>
+agp review-status <source_job_id>       # check progress
+agp review-diagnose <source_job_id>     # diagnose stuck session
+agp review --resume <source_job_id>     # resume interrupted review
 ```
 
 ## Agent Lifecycle
 
-### Provision a new agent
-
 ```bash
-# From a registered capability
+# Provision from a registered capability
 agp up <capability_name>
 agp up <capability_name> --agent-id my-custom-name
 agp up <capability_name> --workspace /path/to/workdir
-```
 
-### Tear down an agent
-
-```bash
-# Idle agents
+# Tear down
 agp down <agent_id>
+agp down <agent_id> --force    # cancels active jobs
 
-# Busy agents (cancels active jobs)
-agp down <agent_id> --force
-```
-
-### Interrupt work
-
-```bash
-# Stop an agent's current job (agent stays alive, picks up next queued job)
+# Interrupt current work (agent stays alive)
 agp interrupt <agent_id>
-
-# Cancel a specific job
-agp interrupt <job_id>
-
-# Stop current job AND purge the queue
-agp interrupt <agent_id> --purge
+agp interrupt <agent_id> --purge   # also clear the queue
+agp interrupt <job_id>             # cancel a specific job
 ```
 
-## Diagnostics
+## Diagnosing Stalls
 
-### Agent health
-
-```bash
-agp diagnose agent <agent_id>
-```
-
-Shows registration, heartbeat age, recent jobs, and runtime binding.
-
-### Runtime health
+When a job appears stuck:
 
 ```bash
-agp diagnose runtime <runtime_id>
-```
-
-### Nudge an orchestrator
-
-Send a human message to an orchestrator agent's terminal:
-
-```bash
-agp nudge <agent_id> "Please prioritize the auth fix"
-```
-
-### Diagnosing slow or stalled jobs
-
-When a job appears stuck, **diagnose before attributing the stall to the agent.** Most stalls are caused by infrastructure — permission gates, TUI prompts, network delays — not agent quality.
-
-```bash
-# 1. Check what the agent is actually doing
+# 1. Check job status and activity
 agp status <job_id>
-# ACTIVITY shows the semantic state: "working", "dismissing prompt",
-# "blocked: requires login", "idle", or the last content line.
-# LAST_SEEN shows heartbeat freshness — >30s suggests a real stall.
 
-# 2. Deep-dive if needed
-agp diagnose agent <agent_id>
-
-# 3. Peek at the agent's live terminal (works for local and remote agents)
+# 2. Look at the agent's terminal
 agp peek <agent_id>
-agp peek <agent_id> --lines 50    # include scrollback
+agp peek <agent_id> --lines 50
+
+# 3. Agent diagnostics — runtime binding, logs, job history
+agp info <agent_id> --diagnose
 ```
 
-**Common causes of apparent stalls:**
-- **Permission gate**: The runtime auto-dismisses these, but each one adds ~5-10s. Multiple consecutive gates (trust folder, tool approval) can look like a long stall.
-- **Status bar misread**: Text like `⏵⏵ bypass permissions on (shift+tab to cycle)` is the TUI's permission mode indicator — it is always visible and does NOT mean the agent is stuck on a prompt.
-- **Context window compaction**: Long sessions trigger compaction (`✻ Conversation compacted`) which pauses output for several seconds.
-- **Network/API latency**: The model may take 30-60s on complex queries. Check LAST_SEEN — if heartbeats are fresh, the agent is alive.
-
-**Do not conclude an agent is "unreliable" or "drifting" based solely on it not returning results in your expected time window.** Use `agp status` and `agp diagnose` to establish the actual cause first.
+**Common causes** — most stalls are infrastructure, not the agent:
+- **Permission gates** — auto-dismissed but each adds ~5-10s
+- **Context compaction** — long sessions trigger compaction, pausing output for several seconds
+- **Network latency** — model may take 30-60s on complex queries. If heartbeats are fresh, the agent is alive
 
 ## Workflow Recipes
 
-### Dev + Dual Review
+### Dev + dual review pipeline
 
 ```bash
-# 1. Send implementation task
+# 1. Dev implements
 agp send dev-agent "Implement rate limiting on /api/submit" --detach
-# -> job_impl
+agp wait job_impl --poll-timeout 600
 
-# 2. Wait for completion
-agp wait job_impl --timeout 600
+# 2. Two reviewers in parallel
+agp send reviewer-a "Review for correctness" --review --detach
+agp send reviewer-b "Review for security" --review --detach
+agp wait job_rev_a job_rev_b --poll-timeout 300
 
-# 3. Send to two reviewers in parallel
-agp send reviewer-a "Review the rate limiting implementation at src/api/submit.py. Check for correctness and edge cases." --detach
-agp send reviewer-b "Review the rate limiting implementation at src/api/submit.py. Check for security and performance." --detach
-
-# 4. Collect both reviews
-agp result job_review_a
-agp result job_review_b
+# 3. Dev fixes based on review findings
+agp reply job_impl "Fix these issues: <paste findings>" --detach
 ```
 
-### Iterative Fix Cycle
+### Chain agent outputs
 
 ```bash
-# 1. Dev does initial work
-agp send dev-agent "Fix the memory leak in worker.py" --timeout 300
-# -> job_fix
-
-# 2. Review it
-agp review job_fix reviewer-agent --dev dev-agent --diff --max-rounds 3
-```
-
-### Pipeline: Output of One Agent Feeds Another
-
-```bash
-# 1. Agent A produces analysis
-agp send analyst-agent "Analyze error rates in the last 24h" --timeout 120
-# -> job_analysis
-
-# 2. Feed the result to agent B
+# Agent A analyzes, agent B acts on it
+agp send analyst "Find the top 5 error patterns" --timeout 120
 agp result job_analysis | agp send dev-agent -
 ```
 
-### Quick Status Check
+### Iterative fix + review
 
 ```bash
-# What's everyone doing?
-agp ls
-
-# Any failures recently?
-agp jobs --status failed --limit 5
-
-# Is the infra healthy?
-agp health
+agp send dev-agent "Fix the memory leak in worker.py" --timeout 300
+agp review job_fix reviewer-agent --dev dev-agent --diff --max-rounds 3
 ```
 
 ## Tips
 
-- **Job IDs are everywhere.** Every `send`, `reply`, and `review` returns a job ID. Save them.
-- **`--detach` is your friend for parallel work.** Send multiple tasks with `--detach`, then collect results when you're ready.
-- **Use `--timeout` for the CLI wait, `--timeout-seconds` for agent execution.** They're different: one controls your terminal, the other controls the agent runtime.
-- **`agp result` defaults to transcript over result.** If you want the clean extracted output, use `--role result`. If you want the full session log, default is fine.
-- **`agp status` works for both jobs and agents.** Pass a job ID or agent ID.
-- **Review loops auto-detach if interrupted.** Resume with `agp review --resume <source_job_id>`.
-- **Stdin with `-` works on both `send` and `reply`.** Pipe output from other tools directly into agents.
+- **`wait` accepts multiple job IDs** — `agp wait job_a job_b job_c` streams results as each completes. No need to wait sequentially.
+- **`--detach` for parallel work** — send multiple tasks with `--detach`, then collect with one `agp wait`.
+- **`--via-file` for complex prompts** — avoids shell quoting nightmares. Write your prompt in a file, pass the path.
+- **`peek` works remotely** — as long as CLI and runtime talk to the same CP. Timeout is 45s to accommodate heartbeat cycles over tunnels.
+- **`status` is the dashboard** — no args for system overview, pass a job/agent ID for details.
+- **`result` is for re-fetching** — `wait` already prints results inline when jobs complete.
+
+## Housekeeping
+
+```bash
+agp cleanup    # remove temp artifacts and stale result files
+```
