@@ -195,6 +195,9 @@ def db_status() -> None:
     except subprocess.TimeoutExpired as e:
         typer.echo(f"Database status timed out: {e}", err=True)
         raise typer.Exit(1)
+    except subprocess.CalledProcessError:
+        typer.echo("Connection: FAILED (Docker unavailable or container not running)", err=True)
+        raise typer.Exit(1)
     except Exception as e:
         typer.echo(f"Connection: FAILED ({e})", err=True)
         raise typer.Exit(1)

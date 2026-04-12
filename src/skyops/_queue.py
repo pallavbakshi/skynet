@@ -172,7 +172,11 @@ def queue_inspect() -> None:
                 "print(json.dumps(_inspect_queue_state(), indent=2, sort_keys=True, default=str))"
             ),
         ]
-        subprocess.run(cmd, check=True, timeout=30)
+        try:
+            subprocess.run(cmd, check=True, timeout=30)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            typer.echo(f"Docker unavailable: {exc}", err=True)
+            raise typer.Exit(1)
         return
     _emit(_inspect_queue_state())
 

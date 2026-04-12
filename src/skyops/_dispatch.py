@@ -174,7 +174,13 @@ def undrain(
 ) -> None:
     """Lift draining status and return agent to IDLE."""
     with _client() as client:
-        result = client.agent_undrain(agent_id)
+        try:
+            result = client.agent_undrain(agent_id)
+        except httpx.HTTPStatusError as exc:
+            body = exc.response.json() if exc.response else {}
+            msg = (body.get("error", {}).get("message") or body.get("detail") or str(exc))
+            typer.echo(f"undrain failed: {msg}", err=True)
+            raise typer.Exit(1)
     _emit(result)
 
 

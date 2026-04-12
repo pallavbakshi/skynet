@@ -324,7 +324,11 @@ def ps() -> None:
     cfg = load_config()
     if cfg.stack.mode == "docker":
         cmd = _compose_cmd(cfg) + ["ps", "-a"]
-        subprocess.run(cmd, check=True)
+        try:
+            subprocess.run(cmd, check=True)
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            typer.echo(f"Docker unavailable: {exc}", err=True)
+            raise typer.Exit(1)
     else:
         pdir = _pid_directory(cfg)
         services = list_pidfiles(pdir)
