@@ -43,4 +43,9 @@ from agp.cli._review import (  # noqa: F401,E402
     _review_attachment_note as _review_attachment_note,
     _review_fix_attachment_note as _review_fix_attachment_note,
 )
-from agp.cli._infra import runtime_work_loop as runtime_work_loop  # noqa: F401,E402
+from agp.cli._infra import (  # noqa: F401,E402
+    runtime_work_loop as runtime_work_loop,
+    serve as serve,
+    sweep_loop as sweep_loop,
+    sweep_runtimes_loop as sweep_runtimes_loop,
+)

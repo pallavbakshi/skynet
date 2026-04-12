@@ -13,7 +13,7 @@ import typer
 from agp.cli import app
 from agp.cli._helpers import (
     _cli_client, _cli_idempotency_key, _extract_trailing_json_payload,
-    _format_http_error, _make_client, _parse_attachment_option,
+    _format_http_error, _heartbeat_age_seconds, _make_client, _parse_attachment_option,
     _peek_tip, _poll_until_done, _print_banner, _print_job_result,
     _print_peek_tip, _repair_json_string, _strip_tui_action_traces,
     _REVIEW_OUTPUT_CONTRACT, _SEPARATOR,
