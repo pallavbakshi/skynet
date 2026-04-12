@@ -43,9 +43,11 @@ from agp.services.exceptions import BadRequestError, ConflictError, InternalErro
 
 # Agent statuses that must NOT be reverted to IDLE when a run completes/fails.
 # These represent operator-set or sweeper-set states that take precedence.
-_PRESERVE_AGENT_STATUSES = frozenset({
+# Also used by agent_interrupt_service in agents.py — import from here.
+PRESERVE_AGENT_STATUSES = frozenset({
     AgentStatus.DRAINING.value,
 })
+_PRESERVE_AGENT_STATUSES = PRESERVE_AGENT_STATUSES
 from agp.services.jobs import _fail_exhausted_queued_jobs
 
 _TERMINAL_RUN_STATES = frozenset({

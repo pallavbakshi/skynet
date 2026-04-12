@@ -80,6 +80,8 @@ def get_artifact_content(
     except Exception as exc:
         logger.exception("artifact storage read failed for %s", artifact.storage_ref)
         raise HTTPException(status_code=502, detail="artifact storage unavailable") from exc
+    if content is None:
+        raise HTTPException(status_code=404, detail="artifact content not found or unavailable")
     payload: dict = {
         "artifact_id": artifact.artifact_id,
         "storage_ref": artifact.storage_ref,
@@ -105,14 +107,17 @@ def upload_artifact(request: ArtifactUploadRequest, db: Session = Depends(get_db
     if not request.content_type.strip():
         raise HTTPException(status_code=400, detail="content_type must not be empty")
     store = _artifact_store()
-    stored = store.write_text(
-        namespace=request.namespace,
-        job_id=request.job_id,
-        name=request.name,
-        content=request.content,
-        role=request.role,
-        content_type=request.content_type,
-    )
+    try:
+        stored = store.write_text(
+            namespace=request.namespace,
+            job_id=request.job_id,
+            name=request.name,
+            content=request.content,
+            role=request.role,
+            content_type=request.content_type,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     result = {
         "storage_ref": stored.storage_ref,
         "checksum": stored.checksum,

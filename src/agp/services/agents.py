@@ -429,10 +429,8 @@ def agent_interrupt_service(
     ) or 0
 
     # ── Update agent status ──
-    _PRESERVE_STATUSES = frozenset({
-        AgentStatus.DRAINING.value,
-    })
-    if active_job is None and agent.status not in _PRESERVE_STATUSES:
+    from agp.services.runs import PRESERVE_AGENT_STATUSES
+    if active_job is None and agent.status not in PRESERVE_AGENT_STATUSES:
         agent.status = AgentStatus.IDLE.value
     agent.updated_at = now
 

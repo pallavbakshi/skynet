@@ -5,10 +5,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, unquote
 from uuid import uuid4
 from typing import Protocol
+
+
+def _sanitize_name(name: str) -> str:
+    """Validate an artifact name — must be a single path-safe component.
+
+    Rejects names containing path separators or ``..`` to prevent traversal.
+    """
+    if not name or name in (".", ".."):
+        raise ValueError(f"invalid artifact name: {name!r}")
+    if "/" in name or "\\" in name:
+        raise ValueError(f"artifact name must not contain path separators: {name!r}")
+    if PurePosixPath(name).name in ("", ".", ".."):
+        raise ValueError(f"invalid artifact name: {name!r}")
+    return name
 
 
 try:
@@ -93,7 +107,7 @@ class LocalFsArtifactStore:
     ) -> StoredArtifact:
         target = self.root / namespace / job_id
         target.mkdir(parents=True, exist_ok=True)
-        path = target / name
+        path = target / _sanitize_name(name)
         path.write_text(content, encoding="utf-8")
         checksum, size_bytes = _checksum_text(content)
         return StoredArtifact(
@@ -146,7 +160,7 @@ class SharedFsArtifactStore:
         role: str,
         content_type: str = "text/plain",
     ) -> StoredArtifact:
-        relative = Path(namespace) / job_id / uuid4().hex[:12] / name
+        relative = Path(namespace) / job_id / uuid4().hex[:12] / _sanitize_name(name)
         path = self.root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
@@ -244,7 +258,7 @@ class RegistryFsArtifactStore:
         role: str,
         content_type: str = "text/plain",
     ) -> StoredArtifact:
-        relative = Path(namespace) / job_id / uuid4().hex[:12] / name
+        relative = Path(namespace) / job_id / uuid4().hex[:12] / _sanitize_name(name)
         object_path = self._object_path(relative)
         metadata_path = self._metadata_path(relative)
         object_path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +359,7 @@ class S3ArtifactStore:
         self._client.create_bucket(**kwargs)
 
     def _key_for(self, *, namespace: str, job_id: str, name: str) -> str:
-        return f"{namespace}/{job_id}/{uuid4().hex[:12]}/{name}"
+        return f"{namespace}/{job_id}/{uuid4().hex[:12]}/{_sanitize_name(name)}"
 
     def _parse_ref(self, storage_ref: str) -> tuple[str, str] | None:
         if not storage_ref.startswith(self._scheme):

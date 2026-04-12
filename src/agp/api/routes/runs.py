@@ -127,6 +127,8 @@ def claim_run(request: ClaimRunRequest, db: Session = Depends(get_db)) -> dict:
     # separately before evaluating status-based availability.
     if runtime.health_status == HealthStatus.DEGRADED.value:
         raise HTTPException(status_code=409, detail="runtime is degraded")
+    if runtime.status == RuntimeStatus.OFFLINE.value:
+        raise HTTPException(status_code=409, detail="runtime is offline")
     if runtime.status == RuntimeStatus.DRAINING.value:
         raise HTTPException(status_code=409, detail="runtime is draining")
     if runtime.status == RuntimeStatus.BUSY.value:

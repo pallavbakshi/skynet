@@ -192,7 +192,10 @@ def create_and_enqueue_job(
     db.flush()
 
     for attachment in attachments or []:
-        stored = _write_control_plane_artifact(job_id=job.job_id, name=attachment.name, content=attachment.content, role=attachment.role)
+        try:
+            stored = _write_control_plane_artifact(job_id=job.job_id, name=attachment.name, content=attachment.content, role=attachment.role)
+        except ValueError as exc:
+            raise BadRequestError(str(exc)) from exc
         artifact = Artifact(
             artifact_id=_new_id("art"),
             job_id=job.job_id,
@@ -327,6 +330,8 @@ def execute_handoff(
             max_retries=3,
             output_contract_json=message_payload.output_contract.model_dump() if message_payload.output_contract else None,
             conversation_id=message_payload.conversation_id,
+            timeout_seconds=source_job.timeout_seconds,
+            deadline_at=source_job.deadline_at,
         )
         db.add(child)
         db.flush()

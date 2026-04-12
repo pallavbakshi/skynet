@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
@@ -60,6 +60,8 @@ def _ack_queue_deliveries(db: Session, *, job_ids: list[str], now: datetime) -> 
 def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[str, int]:
     """Expire leases whose TTL has passed, abandon runs, requeue or fail jobs."""
     now = now or utc_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     queue_backend = get_queue_backend(settings.queue_backend)
     expired = db.scalars(
         select(Lease).where(
@@ -96,6 +98,18 @@ def sweep_expired_leases(db: Session, *, now: datetime | None = None) -> dict[st
             job.retry_count += 1
             job.status = JobStatus.FAILED.value
             failed += 1
+        elif job.deadline_at is not None:
+            # deadline_at may be timezone-naive (SQLite); normalize for comparison.
+            deadline = job.deadline_at.replace(tzinfo=UTC) if job.deadline_at.tzinfo is None else job.deadline_at
+            if deadline <= now:
+                job.retry_count += 1
+                job.status = JobStatus.FAILED.value
+                failed += 1
+            else:
+                job.retry_count += 1
+                job.status = JobStatus.QUEUED.value
+                queue_backend.enqueue_job(db, job=job)
+                requeued += 1
         else:
             job.retry_count += 1
             job.status = JobStatus.QUEUED.value
@@ -357,13 +371,17 @@ def sweep_stale_agents(
         resumed += 1
 
     # ── Phase 5: Fail orphaned queued jobs whose target agent no longer exists ──
-    # When a stale agent is deleted (Phase 1), jobs with target_agent_id pointing
-    # at it become permanently stranded — no agent will ever claim them. (M12)
+    # After Phase 1/2 delete agents, queued jobs in agent-specific queues
+    # become permanently stranded — no agent will ever claim them.
+    # We detect these by target_queue rather than target_agent_id, because
+    # _nullify_agent_references already set target_agent_id to NULL.
+    active_agent_ids = db.scalars(select(Agent.agent_id)).all()
+    active_agent_queues = {f"agent:{aid}" for aid in active_agent_ids}
     orphaned_jobs = db.scalars(
         select(Job).where(
-            Job.target_agent_id.is_not(None),
             Job.status == JobStatus.QUEUED.value,
-            ~Job.target_agent_id.in_(select(Agent.agent_id)),
+            Job.target_queue.like("agent:%"),
+            ~Job.target_queue.in_(active_agent_queues),
         )
     ).all()
     orphaned = 0
@@ -372,7 +390,7 @@ def sweep_stale_agents(
         job.updated_at = now
         _create_event(
             db, job_id=job.job_id, event_type="job.failed",
-            body={"reason": "target_agent_deleted", "target_agent_id": job.target_agent_id},
+            body={"reason": "target_agent_deleted", "target_agent_id": job.target_agent_id, "target_queue": job.target_queue},
         )
         orphaned += 1
 
