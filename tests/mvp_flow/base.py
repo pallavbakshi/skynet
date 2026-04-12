@@ -191,7 +191,7 @@ class MvpFlowTestBase(unittest.TestCase):
         from unittest.mock import patch
         from agp.cli import app as cli_app
 
-        with patch("agp.cli._make_client") as mock:
+        with patch("agp.cli._helpers._make_client") as mock:
             mock.return_value.__enter__ = lambda s: self.agp
             mock.return_value.__exit__ = lambda *a: None
             return self.cli_runner.invoke(cli_app, args)

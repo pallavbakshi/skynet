@@ -159,7 +159,7 @@ class CliHelpersTest(unittest.TestCase):
 class CliClientTransportErrorTest(unittest.TestCase):
     """Verify _cli_client catches transport errors and exits cleanly."""
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_transport_error_prints_friendly_message(self, mock_make: MagicMock) -> None:
         import httpx
 
@@ -183,7 +183,7 @@ class CliClientTransportErrorTest(unittest.TestCase):
 
         self.assertEqual(cm.exception.exit_code, 1)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_http_status_error_passes_through(self, mock_make: MagicMock) -> None:
         import httpx
 
@@ -205,7 +205,7 @@ class CliClientTransportErrorTest(unittest.TestCase):
 
 
 class ReplyCommandTest(unittest.TestCase):
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_accepts_task_from_stdin_when_argument_omitted(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_job.return_value = {
@@ -227,7 +227,7 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[:3], ("agent", "agt_reply", "follow-up from stdin"))
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_accepts_unquoted_multi_word_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_job.return_value = {
@@ -251,7 +251,7 @@ class ReplyCommandTest(unittest.TestCase):
         sent_task = fake_client.send.call_args.args[2]
         self.assertIn("Three findings need fixes", sent_task)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_accepts_unknown_option_like_tokens_in_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_job.return_value = {
@@ -279,7 +279,7 @@ class ReplyCommandTest(unittest.TestCase):
             "Please investigate --resume job_123",
         )
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_uses_double_dash_for_known_option_names_inside_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_job.return_value = {
@@ -304,7 +304,7 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[2], "Explain --timeout semantics")
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_rejects_option_like_job_id(self, mock_make: MagicMock) -> None:
         result = runner.invoke(app, ["reply", "--detatch", "job_src", "task"])
 
@@ -312,7 +312,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("job_id looks like an option", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
         result = runner.invoke(app, ["reply", "job_src", "task", "--tiemout"])
 
@@ -321,7 +321,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("--timeout", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_accepts_unquoted_multi_word_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.send.return_value = {"job_id": "job_new"}
@@ -339,7 +339,7 @@ class ReplyCommandTest(unittest.TestCase):
         sent_task = fake_client.send.call_args.args[2]
         self.assertIn("Analyze the code", sent_task)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_accepts_unknown_option_like_tokens_in_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.send.return_value = {"job_id": "job_new"}
@@ -358,7 +358,7 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[2], "Review this --resume job_123")
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_uses_double_dash_for_known_option_names_inside_task(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.send.return_value = {"job_id": "job_new"}
@@ -377,7 +377,7 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[2], "Explain --fire-and-forget semantics")
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_preserves_known_flags_while_absorbing_unknown_option_like_tokens(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.send.return_value = {"job_id": "job_new"}
@@ -405,7 +405,7 @@ class ReplyCommandTest(unittest.TestCase):
         # --timeout-seconds was removed from the CLI — operators don't set deadlines.
         self.assertNotIn("timeout_seconds", fake_client.send.call_args.kwargs)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_passes_short_flags_and_no_prefix_flags_in_task(self, mock_make: MagicMock) -> None:
         """Short flags (-v, -xvs) and --no-* flags in task text are passed through."""
         fake_client = MagicMock()
@@ -425,7 +425,7 @@ class ReplyCommandTest(unittest.TestCase):
         fake_client.send.assert_called_once()
         self.assertEqual(fake_client.send.call_args.args[2], "run pytest -xvs --no-cache")
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_rejects_option_like_agent_id(self, mock_make: MagicMock) -> None:
         result = runner.invoke(app, ["send", "--detatch", "agent_x", "task"])
 
@@ -433,7 +433,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("agent_id looks like an option", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_rejects_suspicious_option_typo_in_task(self, mock_make: MagicMock) -> None:
         result = runner.invoke(app, ["send", "agent_x", "task", "--tiemout"])
 
@@ -442,8 +442,8 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("--timeout", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
-    @patch("agp.cli.sys.stdin.read", side_effect=AssertionError("stdin should not be read"))
+    @patch("agp.cli._helpers._make_client")
+    @patch("agp.cli._send.sys.stdin.read", side_effect=AssertionError("stdin should not be read"))
     def test_reply_validates_output_contract_before_reading_stdin(
         self,
         _mock_stdin_read: MagicMock,
@@ -455,7 +455,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("invalid JSON for --output-contract", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_rejects_empty_stdin_when_argument_omitted(self, mock_make: MagicMock) -> None:
         result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget"], input="\n")
 
@@ -463,7 +463,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("task is required", result.output)
         mock_make.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_passes_attachments(self, mock_make: MagicMock) -> None:
         """reply --attach is wired through to client.send()."""
         import tempfile
@@ -503,7 +503,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertEqual(len(kwargs["attachments"]), 1)
         self.assertEqual(kwargs["attachments"][0]["role"], "context")
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_poll_timeout_alias(self, mock_make: MagicMock) -> None:
         """reply --poll-timeout is an alias for --timeout."""
         fake_client = MagicMock()
@@ -530,7 +530,7 @@ class ReplyCommandTest(unittest.TestCase):
         ])
         self.assertEqual(result.exit_code, 0, result.output)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_send_review_flag_applies_output_contract(self, mock_make: MagicMock) -> None:
         """send --review should set output_contract to _REVIEW_OUTPUT_CONTRACT."""
         from agp.cli import _REVIEW_OUTPUT_CONTRACT
@@ -553,7 +553,7 @@ class ReplyCommandTest(unittest.TestCase):
         self.assertIn("verdict", props)
         self.assertIn("findings", props)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_reply_review_flag_applies_output_contract(self, mock_make: MagicMock) -> None:
         """reply --review should set output_contract to _REVIEW_OUTPUT_CONTRACT."""
         from agp.cli import _REVIEW_OUTPUT_CONTRACT
@@ -595,8 +595,8 @@ class ReplyCommandTest(unittest.TestCase):
 
 
 class ReviewCommandTest(unittest.TestCase):
-    @patch("agp.cli._poll_until_done")
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._review._poll_until_done")
+    @patch("agp.cli._helpers._make_client")
     def test_review_forwards_normalized_json_findings_to_dev(
         self,
         mock_make: MagicMock,
@@ -655,8 +655,8 @@ class ReviewCommandTest(unittest.TestCase):
 class ReviewResumeTest(unittest.TestCase):
     """Tests for resumable review loop state persistence and --resume."""
 
-    @patch("agp.cli._poll_until_done")
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._review._poll_until_done")
+    @patch("agp.cli._helpers._make_client")
     def test_review_state_uploaded_on_session_start(
         self,
         mock_make: MagicMock,
@@ -707,8 +707,8 @@ class ReviewResumeTest(unittest.TestCase):
         self.assertIn("review_session_id", state)
         self.assertEqual(state["phase"], "send_to_reviewer")
 
-    @patch("agp.cli._poll_until_done")
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._review._poll_until_done")
+    @patch("agp.cli._helpers._make_client")
     def test_resume_fetches_state_and_reenters_loop(
         self,
         mock_make: MagicMock,
@@ -785,8 +785,8 @@ class ReviewResumeTest(unittest.TestCase):
         # Should have loaded state via list_job_artifacts
         fake_client.list_job_artifacts.assert_called_once_with("job_src", role="review-state")
 
-    @patch("agp.cli._poll_until_done")
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._review._poll_until_done")
+    @patch("agp.cli._helpers._make_client")
     def test_resume_handles_completed_pending_reviewer_job(
         self,
         mock_make: MagicMock,
@@ -1194,7 +1194,7 @@ class HeartbeatAgeSecondsTest(unittest.TestCase):
 class InfoDiagnoseAgentTest(unittest.TestCase):
     """Tests for the info --diagnose CLI code path."""
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_info_diagnose_agent_shows_agent_info(self, mock_make: MagicMock) -> None:
         from datetime import datetime, timezone, timedelta
         hb_time = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
@@ -1231,7 +1231,7 @@ class InfoDiagnoseAgentTest(unittest.TestCase):
         self.assertIn("IDLE", result.output)
         self.assertIn("rtm-agt_test", result.output)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_info_diagnose_agent_404_exits_with_error(self, mock_make: MagicMock) -> None:
         import httpx
         fake_client = MagicMock()
@@ -1253,7 +1253,7 @@ class InfoDiagnoseAgentTest(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Not found", result.output)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_info_diagnose_agent_json_output(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.get_agent.return_value = {
@@ -1277,7 +1277,7 @@ class InfoDiagnoseAgentTest(unittest.TestCase):
         self.assertEqual(data["agent"]["agent_id"], "agt_test")
         self.assertIsNone(data["runtime"])
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_info_diagnose_agent_finds_runtime_by_agent_id(self, mock_make: MagicMock) -> None:
         """Runtime with a non-standard ID is found by agent_id, not name prefix."""
         fake_client = MagicMock()
@@ -1320,7 +1320,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         ctx.__exit__ = MagicMock(return_value=False)
         return ctx
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_result_default_prefers_result_over_transcript(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {
@@ -1338,7 +1338,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_result_contract_job_prefers_result(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {
@@ -1356,7 +1356,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.fetch_artifact.assert_called_once_with("art_result", content=True)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_result_failed_contract_prefers_failure_evidence(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {
@@ -1375,7 +1375,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         fake_client.fetch_artifact.assert_called_once_with("art_failure", content=True)
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_result_explicit_role_overrides_preference(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {
@@ -1394,7 +1394,7 @@ class ResultArtifactPreferenceTest(unittest.TestCase):
         # get_job should NOT be called when --role is explicit
         fake_client.get_job.assert_not_called()
 
-    @patch("agp.cli._make_client")
+    @patch("agp.cli._helpers._make_client")
     def test_result_cancelled_job_reports_interrupted_message_before_generic_missing_artifact(self, mock_make: MagicMock) -> None:
         fake_client = MagicMock()
         fake_client.list_job_artifacts.return_value = {"items": []}
