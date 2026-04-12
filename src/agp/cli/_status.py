@@ -90,7 +90,8 @@ def _status_dashboard(server_url: str | None, *, output_json: bool = False, quie
     import httpx as _httpx
     from datetime import datetime, timezone
 
-    with _cli_client(server_url) as client:
+    from agp.cli._helpers import _make_client as _mk
+    with _mk(server_url) as client:
         try:
             cp_health = client.health()
         except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
