@@ -285,7 +285,7 @@ def _drill_repeated_fencing(client: TestClient, *, job_id: str, agent_id: str, r
     }
 
 
-def _sweep_only(job_id: str) -> dict:
+def _sweep_only() -> dict:
     """Sweep expired leases without re-enqueueing."""
     session = SessionLocal()
     try:
@@ -298,7 +298,7 @@ def _sweep_only(job_id: str) -> dict:
 
 
 def _drill_lease_expiry(client: TestClient, *, job_id: str, run_id: str) -> dict:
-    sweep = _sweep_only(job_id)
+    sweep = _sweep_only()
     job = client.get(f"/jobs/{job_id}").json()["data"]
     return {
         "scenario": "lease_expiry_requeue",
