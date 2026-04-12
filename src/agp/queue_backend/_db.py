@@ -81,8 +81,6 @@ class DbQueueBackend:
         visibility_timeout_seconds: int,
         max_delivery_attempts: int,  # noqa: ARG002
     ) -> dict[str, int]:
-        from datetime import timedelta
-
         now = utc_now()
         cutoff = now - timedelta(seconds=visibility_timeout_seconds)
         result = db.execute(

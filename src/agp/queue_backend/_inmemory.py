@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import time
 from collections import deque
 from typing import Deque
 
@@ -134,11 +133,6 @@ class InMemoryBrokerQueueBackend:
         for delivery_id, inflight in list(self._inflight.items()):
             if inflight.target_queue == target_queue and inflight.job_id in job_id_set:
                 self._inflight.pop(delivery_id, None)
-
-
-_INMEMORY_BROKER = InMemoryBrokerQueueBackend()
-_REDIS_BACKENDS: dict[tuple[str, str], "RedisQueueBackend"] = {}
-_REDIS_CLIENT_FACTORY = None
 
 
 _INMEMORY_BROKER = InMemoryBrokerQueueBackend()
