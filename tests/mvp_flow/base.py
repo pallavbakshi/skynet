@@ -165,7 +165,8 @@ class MvpFlowTestBase(unittest.TestCase):
         settings.observability_dead_letter_alert_threshold = 1
         settings.observability_terminal_failure_sample_size = 3
         settings.observability_terminal_failure_rate_threshold = 0.5
-        queue_backend_module._REDIS_CLIENT_FACTORY = None
+        from agp.queue_backend import _redis as _redis_mod
+        _redis_mod._REDIS_CLIENT_FACTORY = None
         reset_queue_backend_state()
         reset_artifact_store_state()
         from agp.services.events import reset_event_seq
@@ -191,9 +192,15 @@ class MvpFlowTestBase(unittest.TestCase):
         from unittest.mock import patch
         from agp.cli import app as cli_app
 
-        with patch("agp.cli._helpers._make_client") as mock:
+        def _mock_setup(mock):
             mock.return_value.__enter__ = lambda s: self.agp
             mock.return_value.__exit__ = lambda *a: None
+
+        with patch("agp.cli._helpers._make_client") as m1, \
+             patch("agp.cli._lifecycle._make_client") as m2, \
+             patch("agp.cli._status._make_client", new=m1) as m3:
+            _mock_setup(m1)
+            _mock_setup(m2)
             return self.cli_runner.invoke(cli_app, args)
 
 

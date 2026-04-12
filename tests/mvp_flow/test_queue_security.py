@@ -1,3 +1,4 @@
+from agp.queue_backend import _redis as _qb_redis_mod
 """Queueing, handoff, auth, security, and compatibility flows."""
 
 from tests.mvp_flow.base import *
@@ -194,7 +195,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
     def test_redis_backend_claims_and_redrives_with_shadow_delivery_records(self) -> None:
         settings.queue_backend = "redis"
         fake_redis = FakeRedisClient()
-        queue_backend_module._REDIS_CLIENT_FACTORY = lambda url: fake_redis
+        _qb_redis_mod._REDIS_CLIENT_FACTORY = lambda url: fake_redis
         reset_queue_backend_state("redis")
 
         self.client.post("/agents/up", json={"agent_id": "agt_redis", "capabilities": ["python"]})

@@ -609,6 +609,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
 
     def test_agp_up_skips_warning_when_bound_runtime_exists(self) -> None:
         self.client.post("/runtimes/register", json={"runtime_id": "rtm_agt_bound", "hostname": "worker-1"})
+        # Bind the runtime to the agent by heartbeating with runtime_id
+        self.client.post("/agents/up", json={"agent_id": "agt_bound", "capabilities": ["python"], "runtime_id": "rtm_agt_bound"})
         result = self._cli_invoke(["up", "Python Tester", "--agent-id", "agt_bound"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertNotIn("WARNING: No runtime bound.", result.output)

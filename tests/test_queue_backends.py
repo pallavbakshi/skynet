@@ -24,6 +24,7 @@ from agp.queue_backend import (
     queue_oldest_queued_at,
 )
 import agp.queue_backend as queue_backend_module
+from agp.queue_backend import _redis as _qb_redis_mod
 from agp.services.jobs import _block_job, _unblock_job
 
 from tests._base import AgpTestCase, FakeRedisClient
@@ -558,7 +559,7 @@ class RedisBackendContractTest(AgpTestCase):
 
     def setUp(self) -> None:
         super().setUp()
-        queue_backend_module._REDIS_CLIENT_FACTORY = lambda url: FakeRedisClient()
+        _qb_redis_mod._REDIS_CLIENT_FACTORY = lambda url: FakeRedisClient()
 
     def _make_backend(self) -> RedisQueueBackend:
         backend = RedisQueueBackend(redis_url="redis://fake", key_prefix="test")

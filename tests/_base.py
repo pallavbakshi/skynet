@@ -15,6 +15,7 @@ from agp.queue_backend import reset_queue_backend_state
 from agp.artifact_store import reset_artifact_store_state
 from agp.services.events import reset_event_seq
 import agp.queue_backend as queue_backend_module
+from agp.queue_backend import _redis as _qb_redis_mod
 
 
 def _reset_sqlite_database() -> None:
@@ -135,7 +136,7 @@ class AgpTestCase(unittest.TestCase):
         settings.observability_dead_letter_alert_threshold = 1
         settings.observability_terminal_failure_sample_size = 3
         settings.observability_terminal_failure_rate_threshold = 0.5
-        queue_backend_module._REDIS_CLIENT_FACTORY = None
+        _qb_redis_mod._REDIS_CLIENT_FACTORY = None
         reset_queue_backend_state()
         reset_artifact_store_state()
         reset_event_seq()
