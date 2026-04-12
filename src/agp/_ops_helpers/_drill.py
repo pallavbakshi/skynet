@@ -194,38 +194,40 @@ def _drill_queue_redelivery(client: TestClient, *, job_id: str, agent_id: str, r
     finally:
         session.close()
 
-    claim_data = _register_and_claim(client, runtime_id=runtime_id, agent_id=agent_id, lease_ttl=30)
-    run_id = claim_data["run"]["run_id"]
-
-    artifacts = _write_drill_artifacts(job_id)
-    complete = client.post(
-        f"/runs/{run_id}/complete",
-        json={
-            "runtime_id": runtime_id,
-            "lease_id": claim_data["lease"]["lease_id"],
-            "fencing_token": claim_data["lease"]["fencing_token"],
-            "artifacts": artifacts,
-            "summary": {"scenario": "queue_redelivery_after_consumer_restart"},
-        },
-    )
-    session = SessionLocal()
     try:
-        run_count = int(session.scalar(select(func.count()).select_from(Run).where(Run.job_id == job_id)) or 0)
+        claim_data = _register_and_claim(client, runtime_id=runtime_id, agent_id=agent_id, lease_ttl=30)
+        run_id = claim_data["run"]["run_id"]
+
+        artifacts = _write_drill_artifacts(job_id)
+        complete = client.post(
+            f"/runs/{run_id}/complete",
+            json={
+                "runtime_id": runtime_id,
+                "lease_id": claim_data["lease"]["lease_id"],
+                "fencing_token": claim_data["lease"]["fencing_token"],
+                "artifacts": artifacts,
+                "summary": {"scenario": "queue_redelivery_after_consumer_restart"},
+            },
+        )
+        session = SessionLocal()
+        try:
+            run_count = int(session.scalar(select(func.count()).select_from(Run).where(Run.job_id == job_id)) or 0)
+        finally:
+            session.close()
+        job = client.get(f"/jobs/{job_id}").json()["data"]
+        return {
+            "scenario": "queue_redelivery_after_consumer_restart",
+            "job_id": job_id,
+            "run_id": run_id,
+            "job_status": job["status"],
+            "redrive": redrive,
+            "claim_succeeded": True,
+            "run_count": run_count,
+            "complete_status_code": complete.status_code,
+            "event_types": _job_events(client, job_id),
+        }
     finally:
-        session.close()
-    job = client.get(f"/jobs/{job_id}").json()["data"]
-    settings.queue_backend = original_backend
-    return {
-        "scenario": "queue_redelivery_after_consumer_restart",
-        "job_id": job_id,
-        "run_id": run_id,
-        "job_status": job["status"],
-        "redrive": redrive,
-        "claim_succeeded": True,
-        "run_count": run_count,
-        "complete_status_code": complete.status_code,
-        "event_types": _job_events(client, job_id),
-    }
+        settings.queue_backend = original_backend
 
 
 def _drill_repeated_fencing(client: TestClient, *, job_id: str, agent_id: str, runtime_id: str) -> dict:
@@ -283,8 +285,20 @@ def _drill_repeated_fencing(client: TestClient, *, job_id: str, agent_id: str, r
     }
 
 
+def _sweep_only(job_id: str) -> dict:
+    """Sweep expired leases without re-enqueueing."""
+    session = SessionLocal()
+    try:
+        return sweep_expired_leases(
+            session,
+            now=utc_now().replace(microsecond=0) + timedelta(seconds=2),
+        )
+    finally:
+        session.close()
+
+
 def _drill_lease_expiry(client: TestClient, *, job_id: str, run_id: str) -> dict:
-    sweep = _sweep_and_requeue(job_id)
+    sweep = _sweep_only(job_id)
     job = client.get(f"/jobs/{job_id}").json()["data"]
     return {
         "scenario": "lease_expiry_requeue",
