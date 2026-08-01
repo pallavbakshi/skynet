@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 from smallops._types import IdleReason, ParsedResponse, Status
-from smallops.tui.codex._classify import classify_idle
+from smallops.tui.codex._classify import (
+    classify_idle,
+    ends_with_prompt,
+    is_shell_returned,
+)
 from smallops.tui.codex._gates import gate_response
 from smallops.tui.codex._parse import capture, parse, parse_response, parse_status
 
@@ -31,6 +35,12 @@ class CodexTui:
 
     def gate_response(self, screen: str) -> str | None:
         return gate_response(screen)
+
+    def ends_with_prompt(self, screen: str) -> bool:
+        return ends_with_prompt(screen)
+
+    def is_shell_returned(self, screen: str) -> bool:
+        return is_shell_returned(screen)
 
     def is_fatal_gate(self, screen: str) -> bool:
         from smallops.tui.codex._gates import FATAL_GATE_PATTERNS

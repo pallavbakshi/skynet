@@ -34,25 +34,27 @@ from agp.runtime._types import (
     TerminalSession,
 )
 from smallops import (
+    BootstrapTimeout as _BootstrapTimeout,
+)
+from smallops import (
     CodexTui,
     Session,
 )
 from smallops import (
     Config as SmallopsConfig,
 )
-from smallops._types import (
-    BootstrapTimeout as _BootstrapTimeout,
-)
-from smallops._types import (
+from smallops import (
     FatalGate as _FatalGate,
 )
-from smallops._types import (
+from smallops import (
     PaneDied as _PaneDied,
 )
-from smallops._types import (
+from smallops import (
     SendTimeout as _SendTimeout,
 )
-from smallops._util import strip_ansi as _strip_ansi
+from smallops import (
+    strip_ansi as _strip_ansi,
+)
 
 if TYPE_CHECKING:
     from agp.runtime._supervisor import RuntimeSupervisor
@@ -159,18 +161,14 @@ class CodexAdapter(AgentAdapter):
     def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
         clean = _strip_ansi(text)
         tui = CodexTui(cli=self.cli_command)
-        from smallops.tui.codex._classify import (
-            ends_with_prompt,
-            is_shell_returned,
-        )
         return {
             "adapter_kind": self.kind,
             "mode": "tui",
             "run_id": run_id,
             "cleaned_output": tui.parse_response(clean, ""),
-            "looks_like_ready": ends_with_prompt(clean),
+            "looks_like_ready": tui.ends_with_prompt(clean),
             "looks_like_gate_prompt": tui.gate_response(clean) is not None,
-            "looks_like_shell_returned": is_shell_returned(clean),
+            "looks_like_shell_returned": tui.is_shell_returned(clean),
             "supported": True,
         }
 

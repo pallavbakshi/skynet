@@ -635,7 +635,9 @@ test-docker: ## Run smallops Docker first-run tests
 	@exit 1
 
 lint: ## Run linter
-	$(RUN) python -m ruff check src/ tests/ smallops_tests/ scripts/inspect-smallops-corpus.py
+	$(RUN) python -m ruff check src/ tests/ smallops_tests/ scripts/inspect-smallops-corpus.py scripts/check-smallops-boundary.py
+	$(RUN) python scripts/check-smallops-boundary.py
+	$(RUN) lint-imports
 
 capture: ## Capture pane to smallops corpus (usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer])
 	@test -n "$(CAT)" && test -n "$(NAME)" || (echo "Usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer]" >&2; exit 1)

@@ -16,8 +16,8 @@ from agp.runtime._types import (
     SessionHealth,
     TerminalSession,
 )
+from smallops import Mux
 from smallops import SessionInfo as _SessionInfo
-from smallops._protocols import Mux
 
 _logger = logging.getLogger(__name__)
 

@@ -9,8 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from smallops import ClaudeCodeTui
-from smallops._util import normalize_screen, strip_ansi
+from smallops import ClaudeCodeTui, normalize_screen, strip_ansi
 
 CORPUS = ROOT / "smallops_tests" / "claude_code" / "corpus"
 

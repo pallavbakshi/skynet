@@ -58,6 +58,7 @@ __all__ = [
     "FatalGate",
     "IdleReason",
     "Meta",
+    "Mux",
     "PaneDied",
     "ParsedResponse",
     "Response",
@@ -67,7 +68,10 @@ __all__ = [
     "SmallopsError",
     "Status",
     "TmuxMux",
+    "Tui",
     "WezTermMux",
+    "normalize_screen",
+    "strip_ansi",
 ]
 
 
