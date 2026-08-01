@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
 from agp.models import Job, QueueDeliveryRecord, utc_now
-from agp.queue_backend import QueueDelivery, _new_delivery_id, _peek_queued_jobs, db_dialect_name
+from agp.queue_backend import (
+    QueueDelivery,
+    _new_delivery_id,
+    _peek_queued_jobs,
+    db_dialect_name,
+)
 
 
 class DeliveryTableQueueBackend:
@@ -92,7 +97,7 @@ class DeliveryTableQueueBackend:
     def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
         return _peek_queued_jobs(db, target_queues=target_queues)
 
-    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
+    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is None:
             return
@@ -156,7 +161,7 @@ class DeliveryTableQueueBackend:
             "dead_lettered_deliveries": dead_lettered,
         }
 
-    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:
         if not job_ids:
             return
         now = utc_now()

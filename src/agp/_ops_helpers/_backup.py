@@ -10,11 +10,11 @@ from pathlib import Path
 from sqlalchemy import select
 
 from agp._local_state import ensure_local_control_plane_stopped
-from agp.config import settings
-from agp.artifact_store import get_artifact_store
-from agp.db import SessionLocal, engine
-from agp.models import Artifact, HandoffArtifact, JobArtifact, RunArtifact
 from agp._ops_helpers._maintenance import reconstruct_queue_from_state
+from agp.artifact_store import get_artifact_store
+from agp.config import settings
+from agp.db import SessionLocal, engine
+from agp.models import Artifact
 
 
 def _sqlite_db_path() -> Path:

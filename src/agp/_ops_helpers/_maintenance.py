@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from sqlalchemy import delete, select
 
 from agp.config import settings
-from agp.artifact_store import get_artifact_store
 from agp.db import SessionLocal
 from agp.enums import JobStatus
 from agp.logs import prune_rotated_jsonl_family
-from agp.models import Artifact, HandoffArtifact, Job, JobArtifact, QueueDeliveryRecord, RunArtifact, utc_now
+from agp.models import (
+    Artifact,
+    HandoffArtifact,
+    Job,
+    JobArtifact,
+    QueueDeliveryRecord,
+    RunArtifact,
+)
 from agp.queue_backend import get_queue_backend
 
 

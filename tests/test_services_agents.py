@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+from _base import AgpTestCase
+
 from agp.db import SessionLocal
 from agp.enums import AgentStatus
 from agp.models import Agent, utc_now
 from agp.services.agents import agent_down_service
 from agp.services.exceptions import BadRequestError
-
-from _base import AgpTestCase
 
 
 def _seed_idle_agent(session, agent_id: str = "agt_down") -> Agent:

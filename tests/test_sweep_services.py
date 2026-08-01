@@ -8,9 +8,28 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+from _base import AgpTestCase
+
 from agp.db import SessionLocal
-from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
-from agp.models import Agent, Event, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
+from agp.enums import (
+    AgentStatus,
+    HealthStatus,
+    JobStatus,
+    LeaseStatus,
+    RunStatus,
+    RuntimeStatus,
+)
+from agp.models import (
+    Agent,
+    Event,
+    Job,
+    Lease,
+    Message,
+    QueueDeliveryRecord,
+    Run,
+    Runtime,
+    utc_now,
+)
 from agp.queue_backend import reset_queue_backend_state
 from agp.services.sweep import (
     sweep_draining_runtimes,
@@ -18,8 +37,6 @@ from agp.services.sweep import (
     sweep_stale_agents,
     sweep_stale_runtimes,
 )
-
-from _base import AgpTestCase
 
 
 def _seed_full_claim(session, *, agent_id="agt_sw", runtime_id="rtm_sw", job_id="job_sw", lease_ttl=30):

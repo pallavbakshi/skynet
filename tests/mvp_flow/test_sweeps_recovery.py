@@ -75,7 +75,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             },
             headers={"Idempotency-Key": "drain-queue-1"},
         )
-        job_id = sent.json()["data"]["job_id"]
+        sent.json()["data"]["job_id"]
         down = self.client.post("/agents/agt_drain_queue/down", json={"mode": "drain"})
         self.assertEqual(down.status_code, 200)
 
@@ -572,9 +572,8 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
             state["calls"] += 1
             if state["calls"] <= 2:
                 raise RecoverableExecutionError("temporary cli failure")
-            return None
 
-        def recover(_: dict, *, attempt: int, error: Exception) -> None:  # noqa: ARG001
+        def recover(_: dict, *, attempt: int, error: Exception) -> None:
             sleep(0.03)
 
         worker = RuntimeSupervisor(
@@ -671,11 +670,11 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
                 self.register_calls += 1
                 return {"runtime_id": self.identity.runtime_id}
 
-            def agent_up(self, **kwargs) -> dict:  # noqa: ARG002
+            def agent_up(self, **kwargs) -> dict:
                 self.agent_up_calls += 1
                 return {"status": "ok"}
 
-            def agent_down(self, **kwargs) -> dict:  # noqa: ARG002
+            def agent_down(self, **kwargs) -> dict:
                 self.agent_down_calls += 1
                 return {"status": "ok"}
 
@@ -689,7 +688,7 @@ class MvpFlowSweepsRecoveryTest(MvpFlowTestBase):
                 )
                 self.calls = 0
 
-            def run_once(self, **kwargs) -> dict[str, object]:  # noqa: ARG002
+            def run_once(self, **kwargs) -> dict[str, object]:
                 self.calls += 1
                 if self.calls == 1:
                     raise RuntimeError("worker crashed")

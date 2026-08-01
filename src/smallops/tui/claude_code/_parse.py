@@ -12,6 +12,7 @@ import re
 
 from smallops._types import Block, BlockKind, ParsedResponse, Status
 from smallops.tui.claude_code._markers import (
+    _WORKING_VERBS,
     NOISE_PREFIXES,
     PROMPT_PREFIX,
     RESPONSE_PREFIXES,
@@ -21,9 +22,7 @@ from smallops.tui.claude_code._markers import (
     STATUS_CONTINUATION_RE,
     STATUS_LINE_RE,
     STATUS_TAIL_RE,
-    _WORKING_VERBS,
 )
-
 
 # ── Tool-use detection ──────────────────────────────────────────────
 # Claude Code renders tool calls as: ⏺ ToolName(arguments)
@@ -227,9 +226,7 @@ def is_status(line: str) -> bool:
         return True
     if STATUS_TAIL_RE.match(s):
         return True
-    if STATUS_CONTINUATION_RE.match(s):
-        return True
-    return False
+    return bool(STATUS_CONTINUATION_RE.match(s))
 
 
 def is_noise(line: str) -> bool:
@@ -248,9 +245,7 @@ def is_noise(line: str) -> bool:
     if s.startswith("1:") and "dismiss" in s.lower():
         return True
     # Working indicator lines — require spinner char + known verb
-    if _is_working_line(s):
-        return True
-    return False
+    return bool(_is_working_line(s))
 
 
 def _is_working_line(s: str) -> bool:

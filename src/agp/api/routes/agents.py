@@ -8,12 +8,33 @@ from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import (
+    _cursor_field,
+    _decode_cursor,
+    _encode_cursor,
+    _ok,
+    _page,
+    _serialize,
+)
 from agp.db import get_db
 from agp.models import Agent, Runtime, utc_now
 from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue
-from agp.schemas import AgentDownRequest, AgentInterruptRequest, AgentPatchRequest, AgentResponse, AgentUpRequest, OkResponse, PagedData
-from agp.services.agents import agent_down_service, agent_interrupt_service, agent_patch_service, agent_undrain_service, agent_up_service
+from agp.schemas import (
+    AgentDownRequest,
+    AgentInterruptRequest,
+    AgentPatchRequest,
+    AgentResponse,
+    AgentUpRequest,
+    OkResponse,
+    PagedData,
+)
+from agp.services.agents import (
+    agent_down_service,
+    agent_interrupt_service,
+    agent_patch_service,
+    agent_undrain_service,
+    agent_up_service,
+)
 from agp.services.peek import peek_store
 
 router = APIRouter()
@@ -59,8 +80,9 @@ def list_agents(
         query = query.where(Agent.status == status)
     if capability is not None:
         # Filter by self-declared capability in JSONB array
-        from agp.db import engine
         from sqlalchemy import text as _text
+
+        from agp.db import engine
         if str(engine.url).startswith("postgresql"):
             from sqlalchemy import cast, literal
             from sqlalchemy.dialects.postgresql import JSONB
@@ -156,7 +178,11 @@ def agent_interrupt(agent_id: str, request: AgentInterruptRequest = AgentInterru
 def agent_down(agent_id: str, body: AgentDownRequest, http_request: Request, db: Session = Depends(get_db)) -> dict:
     # M6: force-delete requires operator lifecycle auth, not just runtime token.
     if body.mode == "force":
-        from agp.api.middleware import _extract_bearer_token, _operator_role_for_token, _OPERATOR_ROLE_RANK
+        from agp.api.middleware import (
+            _OPERATOR_ROLE_RANK,
+            _extract_bearer_token,
+            _operator_role_for_token,
+        )
         from agp.config import settings
         if settings.operator_bearer_token or settings.operator_token_roles_json:
             token = _extract_bearer_token(http_request.headers.get("Authorization"))
@@ -173,7 +199,7 @@ def request_peek(agent_id: str, lines: int = Query(default=0, ge=0), db: Session
     """Request a terminal peek for an agent's runtime."""
     from agp.api.helpers import _error_response
     from agp.services._helpers import _new_id, _require_agent
-    agent = _require_agent(db, agent_id)
+    _require_agent(db, agent_id)
     runtime = db.scalar(select(Runtime).where(Runtime.agent_id == agent_id))
     if runtime is None:
         return _error_response(404, "no_runtime", f"no runtime linked to agent {agent_id}")

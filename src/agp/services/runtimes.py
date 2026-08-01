@@ -7,7 +7,11 @@ from sqlalchemy.orm import Session
 
 from agp.enums import HealthStatus, LeaseStatus, RuntimeStatus
 from agp.models import Lease, Runtime, utc_now
-from agp.services._helpers import _assert_supported_runtime_skew, _new_id, _record_health_transition
+from agp.services._helpers import (
+    _assert_supported_runtime_skew,
+    _new_id,
+    _record_health_transition,
+)
 from agp.services.events import _create_event
 
 

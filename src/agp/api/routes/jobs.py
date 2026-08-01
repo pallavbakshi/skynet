@@ -10,11 +10,24 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import (
+    _cursor_field,
+    _decode_cursor,
+    _encode_cursor,
+    _ok,
+    _page,
+    _serialize,
+)
 from agp.db import get_db
-from agp.enums import AgentStatus, JobStatus
+from agp.enums import JobStatus
 from agp.models import Event, IdempotencyKey, Job, utc_now
-from agp.schemas import HandoffRequest, JobResponse, OkResponse, PagedData, SendMessageRequest
+from agp.schemas import (
+    HandoffRequest,
+    JobResponse,
+    OkResponse,
+    PagedData,
+    SendMessageRequest,
+)
 from agp.services._helpers import _require_agent, _require_job
 from agp.services.events import _create_event
 from agp.services.jobs import (

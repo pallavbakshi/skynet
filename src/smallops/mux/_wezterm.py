@@ -9,6 +9,7 @@ from typing import Any
 
 from smallops._types import SessionInfo
 from smallops._util import is_shell_foreground
+
 _PASTE_CHUNK_SIZE = 4096
 
 

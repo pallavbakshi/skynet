@@ -1,6 +1,8 @@
 """Plugin registry for terminal hosts and agent adapters."""
 from __future__ import annotations
+
 from typing import Any
+
 from agp.config import settings
 
 
@@ -14,8 +16,8 @@ def build_terminal_host(kind: str, **kwargs: Any):
         from agp.plugins.inprocess import InProcessTerminalHost
         return InProcessTerminalHost()
     if kind == "wezterm":
-        from smallops import WezTermMux
         from agp.plugins._smallops_host import SmallopsTerminalHost
+        from smallops import WezTermMux
         mux = WezTermMux(
             workspace=kwargs.get("workspace", settings.wezterm_workspace),
             domain=kwargs.get("domain", settings.wezterm_domain),
@@ -23,8 +25,8 @@ def build_terminal_host(kind: str, **kwargs: Any):
         )
         return SmallopsTerminalHost(mux)
     if kind == "tmux":
-        from smallops import TmuxMux
         from agp.plugins._smallops_host import SmallopsTerminalHost
+        from smallops import TmuxMux
         mux = TmuxMux(
             prefix=kwargs.get("session_prefix", settings.tmux_session_prefix),
             scrollback=kwargs.get("scrollback_lines", settings.tmux_scrollback_lines),

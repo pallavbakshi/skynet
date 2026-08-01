@@ -79,9 +79,9 @@ def smoke() -> None:
     Sends a test job, watches it complete, and verifies the artifact.
     """
     cfg = load_config()
-    from skyops._client import build_client
-
     import time
+
+    from skyops._client import build_client
 
     with build_client(cfg) as client:
         # Wait for health
@@ -127,8 +127,8 @@ def smoke() -> None:
             raise typer.Exit(1)
 
     # Check bucket is not public — must get 403/401 to pass
-    from urllib.request import urlopen
     from urllib.error import HTTPError, URLError
+    from urllib.request import urlopen
 
     bucket_url = f"{cfg.s3.endpoint_url}/{cfg.s3.bucket}/"
     try:
@@ -214,7 +214,7 @@ def k8s_smoke(
             "apiVersion: kustomize.config.k8s.io/v1beta1\n"
             "kind: Kustomization\n"
             "resources:\n"
-            f"  - ./overlay\n"
+            "  - ./overlay\n"
             "patches:\n"
             "  - path: ./patch-secret.yaml\n"
         )
@@ -247,7 +247,7 @@ def k8s_smoke(
 
     # ── Run smoke job ─────────────────────────────────────────────
     typer.echo("[6/6] Running smoke job...")
-    smoke_manifest = """\
+    smoke_manifest = f"""\
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -263,7 +263,7 @@ spec:
       restartPolicy: Never
       containers:
         - name: smoke
-          image: {image}
+          image: {control_plane_image}
           imagePullPolicy: Never
           command: ["python", "/app/scripts/smoke_local_stack.py"]
           envFrom:
@@ -271,7 +271,7 @@ spec:
                 name: agp-config
             - secretRef:
                 name: agp-secrets
-""".format(image=control_plane_image)
+"""
     subprocess.run(kctl + ["delete", "job", "agp-smoke", "--namespace", "agp", "--ignore-not-found", "--wait=true"], capture_output=True)
     subprocess.run(kctl + ["apply", "-f", "-"], input=smoke_manifest, text=True, check=True)
 

@@ -8,7 +8,6 @@ from pathlib import Path
 import typer
 
 from agp.cli import app
-from agp.cli._helpers import _cli_client, _format_http_error
 
 
 def _format_human_nudge(message: str) -> str:
@@ -106,7 +105,10 @@ def cleanup(
     keep_temp_artifacts: bool = typer.Option(False, "--keep-temp-artifacts", help="Skip temp artifact cleanup."),
 ) -> None:
     """Remove AGP temp artifacts and stale result files."""
-    from agp.runtime._attachments import cleanup_temp_artifacts, cleanup_stale_result_files
+    from agp.runtime._attachments import (
+        cleanup_stale_result_files,
+        cleanup_temp_artifacts,
+    )
 
     ws = Path(workspace) if workspace else None
     total = 0

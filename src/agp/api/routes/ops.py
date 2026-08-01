@@ -11,10 +11,9 @@ from fastapi.responses import PlainTextResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agp.db import get_db
-
 # Re-use existing route implementations
 from agp.api.routes.observability import (
+    list_health_records,
     observability_alerts,
     observability_audit,
     observability_control_plane_logs,
@@ -24,9 +23,9 @@ from agp.api.routes.observability import (
     observability_runtime_logs,
     observability_summary,
     observability_triage,
-    list_health_records,
 )
 from agp.api.routes.runtimes import get_runtime_detail, list_runtimes
+from agp.db import get_db
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
@@ -85,12 +84,11 @@ def ops_restart_runtime(runtime_id: str, db: Session = Depends(get_db)) -> dict:
     This endpoint resets the CP-side state so the runtime can re-register cleanly.
     """
     from agp.api.helpers import _ok
-    from agp.enums import HealthStatus, RuntimeStatus
+    from agp.enums import HealthStatus, LeaseStatus, RuntimeStatus
     from agp.models import Lease, utc_now
     from agp.services._helpers import _record_health_transition, _require_runtime
     from agp.services.events import _create_event
     from agp.services.exceptions import ConflictError
-    from agp.enums import LeaseStatus
 
     runtime = _require_runtime(db, runtime_id)
     active_leases = db.scalar(

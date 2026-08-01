@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import time as _time
+from datetime import UTC
 
 import typer
 
 from agp.cli import app
 from agp.cli._helpers import (
-    _cli_client, _format_http_error, _poll_jobs_until_done,
-    _poll_until_done, _print_job_result, _print_peek_tip, _SEPARATOR,
+    _cli_client,
+    _format_http_error,
+    _poll_jobs_until_done,
+    _poll_until_done,
+    _print_job_result,
+    _print_peek_tip,
 )
 
 
@@ -90,14 +95,14 @@ def wait_cmd(
             _print_peek_tip(agent_id)
             job_age: float = 0.0
             try:
-                from datetime import datetime, timezone
+                from datetime import datetime
                 src_job = client.get_job(jid)
                 created_raw = src_job.get("created_at")
                 if created_raw:
                     created = created_raw if isinstance(created_raw, datetime) else datetime.fromisoformat(str(created_raw))
                     if created.tzinfo is None:
-                        created = created.replace(tzinfo=timezone.utc)
-                    job_age = (datetime.now(timezone.utc) - created).total_seconds()
+                        created = created.replace(tzinfo=UTC)
+                    job_age = (datetime.now(UTC) - created).total_seconds()
             except Exception:
                 pass
             try:
@@ -105,9 +110,9 @@ def wait_cmd(
             except KeyboardInterrupt:
                 import time
                 typer.echo("", err=True)
-                typer.echo(f"Detached 1 job (still running in background):", err=True)
+                typer.echo("Detached 1 job (still running in background):", err=True)
                 typer.echo(f"  agp wait {jid}", err=True)
-                typer.echo(f"\nCtrl+C again within 2s to stop it.", err=True)
+                typer.echo("\nCtrl+C again within 2s to stop it.", err=True)
                 try:
                     time.sleep(2)
                 except KeyboardInterrupt:
@@ -156,7 +161,7 @@ def wait_cmd(
             nonlocal had_failure
             pending_set.discard(jid)
             typer.echo(f"error: {jid} — {exc}", err=True)
-            typer.echo(f"  (job may have been deleted or purged)", err=True)
+            typer.echo("  (job may have been deleted or purged)", err=True)
             had_failure = True
 
         try:
@@ -171,7 +176,7 @@ def wait_cmd(
             typer.echo(f"Detached {len(remaining)} job(s) (still running in background):", err=True)
             for jid in remaining:
                 typer.echo(f"  agp wait {jid}", err=True)
-            typer.echo(f"\nCtrl+C again within 2s to stop all jobs.", err=True)
+            typer.echo("\nCtrl+C again within 2s to stop all jobs.", err=True)
             try:
                 time.sleep(2)
             except KeyboardInterrupt:
@@ -339,7 +344,6 @@ def peek(
       - You want to verify an agent is actually working, not stuck
       - You need to debug a remote agent without SSH access
     """
-    import time as _time
     import httpx as _httpx
 
     # Fast path: try local capture first

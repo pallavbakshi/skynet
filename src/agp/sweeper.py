@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from threading import Event
-from time import sleep
 from typing import Any
 
 _logger = logging.getLogger(__name__)

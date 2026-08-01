@@ -551,7 +551,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
             "runtime_id": "rtm_ins", "agent_id": "agt_ins", "lease_ttl_seconds": 30,
         })
         data = claim.json()["data"]
-        run_id = data["run"]["run_id"]
+        data["run"]["run_id"]
 
         # Trace must include timeline and durations
         trace = self.client.get(f"/ops/jobs/{job_id}/trace").json()["data"]
@@ -818,7 +818,7 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
             "target": {"type": "agent", "id": "agt_drn_pres"},
             "message": {"text": "work"},
         })
-        job_id = send_resp.json()["data"]["job_id"]
+        send_resp.json()["data"]["job_id"]
         claim = self.client.post("/runs/claim", json={
             "runtime_id": "rtm_drn", "agent_id": "agt_drn_pres",
         })
@@ -1307,7 +1307,8 @@ class MvpFlowGapRegressionTest(MvpFlowTestBase):
         # Use an adapter that runs long enough for the heartbeat thread to
         # detect the interrupt.  DefaultAgentAdapter only does 60ms of work,
         # which under DB load finishes before the interrupt arrives.
-        from agp.runtime import ArtifactPayload, ExecutionResult as _ER
+        from agp.runtime import ArtifactPayload
+        from agp.runtime import ExecutionResult as _ER
 
         class SlowAdapter(DefaultAgentAdapter):
             def execute_run(self, *, host, session, claimed, supervisor):

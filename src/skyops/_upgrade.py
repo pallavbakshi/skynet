@@ -27,10 +27,11 @@ def upgrade_check(
     release_version: str = typer.Option(..., "--release", help="Target release version to check."),
 ) -> None:
     """Pre-upgrade compatibility check against running runtimes."""
+    from sqlalchemy import select
+
     from agp._ops_helpers import get_upgrade_status
     from agp.db import SessionLocal
     from agp.models import Runtime
-    from sqlalchemy import select
 
     current = get_upgrade_status()
     current_release = current.get("release_version", "0.1.0")
@@ -40,7 +41,7 @@ def upgrade_check(
         return int(parts[0]), int(parts[1]), int(parts[2]) if len(parts) > 2 else 0
 
     target_major, target_minor, _ = _parse(release_version)
-    cur_major, cur_minor, _ = _parse(current_release)
+    cur_major, _cur_minor, _ = _parse(current_release)
 
     issues: list[str] = []
     if target_major != cur_major:

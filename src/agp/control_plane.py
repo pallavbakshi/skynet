@@ -15,26 +15,24 @@ import threading
 from collections.abc import AsyncIterator
 
 import httpx  # noqa: F401 — kept at module level so tests can patch `control_plane_module.httpx`
-
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 
+import agp.services.events as _events_mod
 from agp.config import settings
 from agp.models import SystemMetadata  # noqa: F401 — re-export for test patching
+from agp.services._helpers import _require_job  # noqa: F401
+from agp.services.jobs import _block_job, _unblock_job  # noqa: F401
 
 # ── Re-exports for backward compatibility ────────────────────────────
 # Tests, CLI, skyops, and _ops_helpers import these from agp.control_plane.
-
 from agp.services.sweep import (  # noqa: F401
+    refresh_active_leases,
     sweep_draining_runtimes,
     sweep_expired_leases,
     sweep_stale_agents,
     sweep_stale_runtimes,
-    refresh_active_leases,
 )
-from agp.services.jobs import _block_job, _unblock_job  # noqa: F401
-from agp.services._helpers import _require_job  # noqa: F401
-import agp.services.events as _events_mod  # noqa: F401
 
 
 def __getattr__(name: str):
@@ -45,15 +43,31 @@ def __getattr__(name: str):
 
 
 # Route modules
-from agp.api.routes import admin, agents, artifacts, jobs, ops, runs, runtimes, security  # noqa: F401
+from datetime import UTC
+
+from agp.api.errors import (
+    domain_exception_handler,
+    generic_exception_handler,
+    http_exception_handler,
+    validation_exception_handler,
+)
 
 # Middleware and error handlers
 from agp.api.middleware import auth_middleware
-from agp.api.errors import domain_exception_handler, generic_exception_handler, http_exception_handler, validation_exception_handler
-from agp.services.exceptions import DomainError
+from agp.api.routes import (
+    admin,
+    agents,
+    artifacts,
+    jobs,
+    ops,
+    runs,
+    runtimes,
+    security,
+)
 
 # Auth settings loader
 from agp.services._helpers import _load_persisted_auth_settings
+from agp.services.exceptions import DomainError
 
 
 def _is_fatal_local_sqlite_guard_error(exc: Exception) -> bool:
@@ -71,11 +85,11 @@ CRASH_BREADCRUMB_FILE = ".agp-crash"
 def _write_crash_breadcrumb(reason: str) -> None:
     """Write a crash breadcrumb file that survives the restart."""
     import json
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     try:
         breadcrumb = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "pid": os.getpid(),
             "reason": reason,
         }

@@ -23,7 +23,14 @@ from agp.api.helpers import (
 )
 from agp.config import settings
 from agp.db import get_db
-from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+from agp.enums import (
+    AgentStatus,
+    HealthStatus,
+    JobStatus,
+    LeaseStatus,
+    RunStatus,
+    RuntimeStatus,
+)
 from agp.logs import read_tail_jsonl_family
 from agp.models import (
     Agent,
@@ -37,9 +44,14 @@ from agp.models import (
     SystemMetadata,
     utc_now,
 )
-from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue, queue_oldest_queued_at
+from agp.queue_backend import (
+    agent_queue_targets,
+    queue_backlogs_by_target_queue,
+    queue_oldest_queued_at,
+)
 from agp.services._helpers import _control_plane_log_path, _require_job
 from agp.services.observability import _current_alerts_payload
+
 
 def observability_summary(db: Session = Depends(get_db)) -> dict:
     latest_event_seq = int(db.scalar(select(func.max(Event.event_seq))) or 0)

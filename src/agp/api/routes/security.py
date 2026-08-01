@@ -9,7 +9,10 @@ from agp.api.helpers import _ok
 from agp.config import settings
 from agp.db import get_db
 from agp.schemas import RotateOperatorTokensRequest, RotateRuntimeTokensRequest
-from agp.services.security import rotate_operator_tokens_service, rotate_runtime_tokens_service
+from agp.services.security import (
+    rotate_operator_tokens_service,
+    rotate_runtime_tokens_service,
+)
 
 router = APIRouter()
 

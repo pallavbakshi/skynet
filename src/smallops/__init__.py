@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 from time import monotonic, sleep
-from typing import Any
 from uuid import uuid4
 
 from smallops._poll import (
@@ -38,28 +37,37 @@ from smallops._types import (
     SmallopsError,
     Status,
 )
-from smallops._util import cleanup_via_file, normalize_screen, strip_ansi, write_nudge_file, write_via_file
-from smallops.tui import ClaudeCodeTui, CodexTui
+from smallops._util import (
+    cleanup_via_file,
+    normalize_screen,
+    strip_ansi,
+    write_nudge_file,
+    write_via_file,
+)
 from smallops.mux import TmuxMux, WezTermMux
+from smallops.tui import ClaudeCodeTui, CodexTui
 
 __all__ = [
-    "Session",
-    "Config",
-    "Response",
-    "Meta",
-    "Status",
     "AgentState",
-    "IdleReason",
-    "SessionInfo",
-    "SmallopsError",
+    "Block",
+    "BlockKind",
     "BootstrapTimeout",
-    "SendTimeout",
-    "PaneDied",
-    "FatalGate",
-    "TmuxMux",
-    "WezTermMux",
     "ClaudeCodeTui",
     "CodexTui",
+    "Config",
+    "FatalGate",
+    "IdleReason",
+    "Meta",
+    "PaneDied",
+    "ParsedResponse",
+    "Response",
+    "SendTimeout",
+    "Session",
+    "SessionInfo",
+    "SmallopsError",
+    "Status",
+    "TmuxMux",
+    "WezTermMux",
 ]
 
 
@@ -305,7 +313,7 @@ class Session:
     def __enter__(self) -> Session:
         return self
 
-    def __exit__(self, *_: Any) -> None:
+    def __exit__(self, *_: object) -> None:
         self.down()
 
     # ── Internal ───────���──────────────────────────────���──────────────

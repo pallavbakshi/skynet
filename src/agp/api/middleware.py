@@ -7,7 +7,6 @@ from fastapi import Request
 from agp.api.helpers import _error_response
 from agp.config import settings
 
-
 _OPERATOR_ROLE_RANK = {
     "read_only": 1,
     "operator": 2,
@@ -29,17 +28,7 @@ def _required_operator_role(method: str, path: str) -> str | None:
     if path == "/system/auth-status" or path.startswith("/system/tokens/"):
         return "security_admin"
     if not (
-        path.startswith("/messages/")
-        or path.startswith("/jobs")
-        or path.startswith("/system")
-        or path.startswith("/observability")
-        or path.startswith("/queue")
-        or path.startswith("/agents")
-        or path.startswith("/capabilities")
-        or path.startswith("/artifacts")
-        or path.startswith("/nudges")
-        or path.startswith("/ops")
-        or (path.startswith("/runtimes") and path != "/runtimes/register")
+        path.startswith(("/messages/", "/jobs", "/system", "/observability", "/queue", "/agents", "/capabilities", "/artifacts", "/nudges", "/ops")) or path.startswith("/runtimes") and path != "/runtimes/register"
     ):
         return None
 
@@ -47,7 +36,7 @@ def _required_operator_role(method: str, path: str) -> str | None:
         return "read_only"
     if path.startswith("/messages/"):
         return "operator"
-    if path.endswith("/interrupt") or path.endswith("/handoff"):
+    if path.endswith(("/interrupt", "/handoff")):
         return "operator"
     if path.startswith("/agents"):
         return "lifecycle"
@@ -91,13 +80,12 @@ async def auth_middleware(request: Request, call_next):  # type: ignore[override
     # Runtime-write endpoints are authed by runtime token, not operator token
     is_operator_surface = required_role is not None and not is_runtime_write
 
-    if is_runtime_write and (settings.runtime_bearer_token or settings.runtime_active_tokens_json):
-        if not _runtime_token_allowed(token):
-            # /agents/{id}/down also accepts operator tokens (force-delete
-            # requires lifecycle role, checked in the route handler).
-            is_agent_down = path.startswith("/agents/") and path.endswith("/down")
-            if not (is_agent_down and _operator_role_for_token(token) is not None):
-                return _error_response(401, "unauthenticated", "runtime authentication required", False)
+    if is_runtime_write and (settings.runtime_bearer_token or settings.runtime_active_tokens_json) and not _runtime_token_allowed(token):
+        # /agents/{id}/down also accepts operator tokens (force-delete
+        # requires lifecycle role, checked in the route handler).
+        is_agent_down = path.startswith("/agents/") and path.endswith("/down")
+        if not (is_agent_down and _operator_role_for_token(token) is not None):
+            return _error_response(401, "unauthenticated", "runtime authentication required", False)
     if is_operator_surface and (settings.operator_bearer_token or settings.operator_token_roles_json):
         role = _operator_role_for_token(token)
         if role is None:

@@ -10,8 +10,8 @@ import subprocess
 
 import typer
 
+from skyops._client import build_client, build_profile
 from skyops.config import load_config
-from skyops._client import build_profile, build_client
 
 runtime_debug_app = typer.Typer(help="Runtime debugging commands.")
 
@@ -120,7 +120,7 @@ def runtime_work_once(
 ) -> None:
     """Run a single iteration of the runtime work loop (debug)."""
     from agp.client import RuntimeClient, RuntimeIdentity
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.plugins import build_agent_adapter, build_terminal_host
     from agp.runtime import RuntimeSupervisor
 
     cfg = load_config()

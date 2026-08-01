@@ -8,8 +8,8 @@ from urllib.parse import urlparse, urlunparse
 
 import typer
 
-from skyops.config import load_config
 from skyops._client import resolve_server_url
+from skyops.config import load_config
 
 
 def _join_shell(parts: list[str]) -> str:

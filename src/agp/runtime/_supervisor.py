@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,8 +11,6 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import Any
 from urllib.parse import unquote, urlparse
-
-import logging
 
 import httpx
 
@@ -24,8 +23,8 @@ from agp.runtime._attachments import staged_attachment_relative_path
 _logger = logging.getLogger(__name__)
 
 from agp.runtime._types import (
-    AuthFailure,
     ArtifactPayload,
+    AuthFailure,
     BootstrapFailure,
     InterruptRequested,
     PaneDied,
@@ -68,7 +67,7 @@ def register_runtime(identity: RuntimeIdentity) -> dict:
         client.close()
 
 
-def _failure_snapshot_payloads(*, host: "TerminalHost", session: TerminalSession, error: Exception) -> list[ArtifactPayload]:
+def _failure_snapshot_payloads(*, host: TerminalHost, session: TerminalSession, error: Exception) -> list[ArtifactPayload]:
     snapshot = host.snapshot(session)
     health = host.health(session)
     return [
@@ -101,7 +100,7 @@ def _failure_snapshot_payloads(*, host: "TerminalHost", session: TerminalSession
 
 
 # Import here to allow string annotations above to resolve
-from agp.runtime._abc import AgentAdapter, TerminalHost  # noqa: E402
+from agp.runtime._abc import AgentAdapter, TerminalHost
 
 
 class RuntimeSupervisor:
@@ -174,7 +173,7 @@ class RuntimeSupervisor:
                 session_id=session.session_id,
                 host_kind=self.host.kind,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             _logger.debug("peek request failed for %s", agent_id, exc_info=True)
 
     def check_interrupt(self, claimed: dict[str, Any]) -> None:
@@ -203,7 +202,7 @@ class RuntimeSupervisor:
                     raise InterruptRequested("interrupt requested by control plane")
             except InterruptRequested:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.debug("check_interrupt: CP poll failed", exc_info=True)
 
     def _workspace_dir(self, session: TerminalSession) -> Path | None:
@@ -296,7 +295,7 @@ class RuntimeSupervisor:
                 path = Path(raw_path)
                 if path.exists() and path.is_dir():
                     shutil.rmtree(path)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning("_cleanup_workspace: failed to remove %s", raw_path, exc_info=True)
         try:
             run_id = claimed.get("run", {}).get("run_id", "unknown")
@@ -309,7 +308,7 @@ class RuntimeSupervisor:
                     "session_id": session.session_id,
                 },
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     def run_forever(
@@ -337,14 +336,14 @@ class RuntimeSupervisor:
             n = cleanup_stale_result_files()
             if n:
                 _logger.info("startup cleanup: removed %d stale result files", n)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         try:
             from agp.plugins._via_file import cleanup_stale_task_files
             n = cleanup_stale_task_files()
             if n:
                 _logger.info("startup cleanup: removed %d stale task files", n)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
         # Register runtime
@@ -387,7 +386,7 @@ class RuntimeSupervisor:
                                     request_id=directives["peek_request_id"],
                                     lines=directives.get("peek_lines", 0),
                                 )
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             _logger.warning("agent heartbeat failed (CP may be temporarily unreachable)", exc_info=True)
                         last_agent_heartbeat = monotonic()
 
@@ -399,7 +398,7 @@ class RuntimeSupervisor:
                         heartbeat_interval_seconds=heartbeat_interval_seconds,
                         max_local_recoveries=max_local_recoveries,
                     )
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     restart_attempts += 1
                     backoff_seconds = min(30.0, max(idle_sleep_seconds, 0.25) * (2 ** (restart_attempts - 1)))
                     _append_runtime_log(
@@ -437,7 +436,7 @@ class RuntimeSupervisor:
                                 capabilities=resolved_caps,
                                 metadata=self.client.identity.metadata,
                             )
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             _logger.warning("post-job agent heartbeat failed", exc_info=True)
                 else:
                     stop_event.wait(idle_sleep_seconds)
@@ -446,7 +445,7 @@ class RuntimeSupervisor:
             if agent_id is not None:
                 try:
                     self.client.agent_down(agent_id=agent_id, mode="force")
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass  # Best-effort; sweeper will clean up
 
         return outcomes
@@ -555,11 +554,11 @@ class RuntimeSupervisor:
                                 tui_died.set()
                                 try:
                                     self.host.interrupt(active_session)
-                                except Exception:  # noqa: BLE001
+                                except Exception:
                                     pass
                                 stop.set()
                                 break
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             _logger.warning("foreground TUI check failed", exc_info=True)
                     try:
                         resp = _hb_client.post(
@@ -585,11 +584,11 @@ class RuntimeSupervisor:
                                 with self._session_lock:
                                     s = getattr(self, "_active_session", session)
                                 self.host.interrupt(s)
-                            except Exception:  # noqa: BLE001
+                            except Exception:
                                 pass
                             stop.set()
                             break
-                    except Exception as hb_exc:  # noqa: BLE001
+                    except Exception as hb_exc:
                         # If stop is already set, the main thread is shutting
                         # down and may have closed _hb_client underneath us.
                         # Don't count this as a real missed heartbeat.
@@ -614,7 +613,7 @@ class RuntimeSupervisor:
                                 with self._session_lock:
                                     s = getattr(self, "_active_session", session)
                                 self.host.interrupt(s)
-                            except Exception:  # noqa: BLE001
+                            except Exception:
                                 pass
                             stop.set()
                             break
@@ -644,7 +643,7 @@ class RuntimeSupervisor:
                                 with self._session_lock:
                                     s = getattr(self, "_active_session", session)
                                 self.host.interrupt(s)
-                            except Exception:  # noqa: BLE001
+                            except Exception:
                                 pass
                             stop.set()
                             break
@@ -877,7 +876,7 @@ class RuntimeSupervisor:
                     artifacts=stored_artifacts,
                     summary=result.summary,
                 )
-            except Exception as comp_exc:  # noqa: BLE001
+            except Exception as comp_exc:
                 # Lease expired or CP rejected — job is lost; log and move on
                 # instead of crashing into the death loop.
                 error_detail = str(comp_exc)
@@ -920,7 +919,7 @@ class RuntimeSupervisor:
         except InterruptRequested as exc:
             try:
                 self.host.interrupt(session)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
             _append_runtime_log(
                 self.client.identity.runtime_id,
@@ -933,7 +932,7 @@ class RuntimeSupervisor:
                     fencing_token=lease["fencing_token"],
                     reason=str(exc),
                 )
-            except Exception as cancel_exc:  # noqa: BLE001
+            except Exception as cancel_exc:
                 _logger.warning("cancel() rejected for run %s: %s", run["run_id"], cancel_exc)
                 return {"claimed": True, "claim": claimed, "cancelled": True, "error": str(cancel_exc)}
             return {"claimed": True, "claim": claimed, "cancelled": True, "result": cancelled}
@@ -959,14 +958,14 @@ class RuntimeSupervisor:
             )
             try:
                 failure_result.artifacts.extend(self._failure_snapshot_payloads(session=session, error=exc))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning("Failed to collect failure snapshots for run %s", run["run_id"], exc_info=True)
             try:
                 artifacts = [
                     self._write_artifact(job_id=claimed["job"]["job_id"], payload=payload)
                     for payload in failure_result.artifacts
                 ]
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning("Failed to write failure artifacts for run %s", run["run_id"], exc_info=True)
                 artifacts = []
             if lease_lost.is_set():
@@ -997,7 +996,7 @@ class RuntimeSupervisor:
                     artifacts=artifacts,
                     summary=failure_result.summary,
                 )
-            except Exception as fail_exc:  # noqa: BLE001
+            except Exception as fail_exc:
                 _append_runtime_log(
                     self.client.identity.runtime_id,
                     {

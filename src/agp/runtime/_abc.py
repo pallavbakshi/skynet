@@ -9,13 +9,12 @@ import shlex
 import shutil
 import subprocess
 import tempfile
-from pathlib import Path
 from abc import ABC, abstractmethod
 from os.path import basename
-from time import time
-from time import sleep
+from pathlib import Path
+from time import sleep, time
 from typing import Any
-from urllib.parse import urlparse, unquote
+from urllib.parse import unquote, urlparse
 
 from agp.plugins._output_contracts import prompt_for_claim
 from agp.plugins._provider_env import PROVIDER_ENV_VARS
@@ -74,7 +73,7 @@ class TerminalHost(ABC):
     def session_exists(self, session: TerminalSession) -> bool:
         raise NotImplementedError
 
-    def load_cursor(self, session: TerminalSession) -> "OutputCursor | None":  # noqa: ARG002
+    def load_cursor(self, session: TerminalSession) -> OutputCursor | None:
         """Load a persisted cursor from a previous runtime process.
 
         Returns None if no checkpoint exists.  Hosts that support
@@ -82,7 +81,7 @@ class TerminalHost(ABC):
         """
         return None
 
-    def read_visible(self, session: TerminalSession) -> str:  # noqa: ARG002
+    def read_visible(self, session: TerminalSession) -> str:
         """Read the currently visible screen content (including alternate buffer).
 
         Default returns empty string.  Hosts that can capture the alternate
@@ -113,7 +112,7 @@ class TerminalHost(ABC):
         "tcsh", "zsh", "nu",
     })
 
-    def _get_pane_tty(self, session: TerminalSession) -> str | None:  # noqa: ARG002
+    def _get_pane_tty(self, session: TerminalSession) -> str | None:
         """Return the TTY path for the session's pane.
 
         Subclasses should override this — the default returns None
@@ -357,7 +356,7 @@ class AgentAdapter(ABC):
         host: TerminalHost,
         session: TerminalSession,
         claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         raise NotImplementedError
 
@@ -369,7 +368,7 @@ class AgentAdapter(ABC):
         claimed: dict[str, Any],
         attempt: int,
         error: Exception,
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> None:
         sleep(0.01)
 
@@ -380,7 +379,7 @@ class AgentAdapter(ABC):
         session: TerminalSession,
         claimed: dict[str, Any],
         error: Exception,
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         return ExecutionResult(
             artifacts=[
@@ -402,4 +401,6 @@ class AgentAdapter(ABC):
 
 
 # Avoid circular import — use string annotation above and resolve here
-from agp.runtime._supervisor import RuntimeSupervisor as RuntimeSupervisor  # noqa: E402, F401
+from agp.runtime._supervisor import (
+    RuntimeSupervisor,
+)

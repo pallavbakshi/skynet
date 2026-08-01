@@ -68,7 +68,7 @@ class _StandaloneSupervisorContext:
         identity = type("Identity", (), {"runtime_id": "standalone-runtime"})()
         self.client = type("Client", (), {"identity": identity})()
 
-    def check_interrupt(self, claimed: dict[str, Any]) -> None:  # noqa: ARG002
+    def check_interrupt(self, claimed: dict[str, Any]) -> None:
         return None
 
     def emit_progress(self, claimed: dict[str, Any], *, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -188,5 +188,5 @@ class StandalonePluginRunner:
             if not keep_session:
                 try:
                     self.host.terminate_session(session)
-                except Exception:  # noqa: BLE001
+                except Exception:
                     pass

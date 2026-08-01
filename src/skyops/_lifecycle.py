@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 import time
@@ -10,10 +9,10 @@ from pathlib import Path
 
 import typer
 
+from skyops._client import _connectable_host, resolve_server_url
+from skyops._pidfile import list_pidfiles, pid_dir, signal_and_wait, write_pidfile
+from skyops._status import _probe_http_health, _probe_tcp
 from skyops.config import SkyopsConfig, build_agp_env, load_config
-from skyops._client import resolve_server_url, _connectable_host
-from skyops._status import _probe_tcp, _probe_http_health
-from skyops._pidfile import pid_dir, write_pidfile, list_pidfiles, signal_and_wait
 
 lifecycle_app = typer.Typer(help="Manage AGP stack services.")
 

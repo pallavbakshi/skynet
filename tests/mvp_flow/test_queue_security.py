@@ -1,4 +1,5 @@
 from agp.queue_backend import _redis as _qb_redis_mod
+
 """Queueing, handoff, auth, security, and compatibility flows."""
 
 from tests.mvp_flow.base import *
@@ -653,7 +654,8 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
         # Use an adapter that runs long enough for the heartbeat thread to
         # detect the interrupt.  DefaultAgentAdapter only does 60ms of work,
         # which under DB load finishes before the interrupt arrives.
-        from agp.runtime import ArtifactPayload, ExecutionResult as _ER
+        from agp.runtime import ArtifactPayload
+        from agp.runtime import ExecutionResult as _ER
 
         class SlowAdapter(DefaultAgentAdapter):
             def execute_run(self, *, host, session, claimed, supervisor):
@@ -744,7 +746,7 @@ class MvpFlowQueueSecurityTest(MvpFlowTestBase):
             "/runtimes/register",
             json={"runtime_id": "rtm_expire", "hostname": "localhost"},
         )
-        claim = self.client.post(
+        self.client.post(
             "/runs/claim",
             json={"runtime_id": "rtm_expire", "agent_id": "agt_expire", "lease_ttl_seconds": 1},
         ).json()["data"]

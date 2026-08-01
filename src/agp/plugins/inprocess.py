@@ -1,12 +1,22 @@
 """In-process terminal host and default agent adapter for testing."""
 from __future__ import annotations
+
 from time import monotonic, sleep
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agp.runtime import (
-    AgentAdapter, ArtifactPayload, ExecutionResult, OutputCursor, OutputReadResult,
-    SessionHealth, TerminalHost, TerminalSession,
+    AgentAdapter,
+    ArtifactPayload,
+    ExecutionResult,
+    OutputCursor,
+    OutputReadResult,
+    SessionHealth,
+    TerminalHost,
+    TerminalSession,
 )
+
+if TYPE_CHECKING:
+    from agp.runtime._supervisor import RuntimeSupervisor
 
 
 class InProcessTerminalHost(TerminalHost):
@@ -119,7 +129,7 @@ class DefaultAgentAdapter(AgentAdapter):
         host: TerminalHost,
         session: TerminalSession,
         claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         if self._execute is not None:
             custom = self._execute(claimed)
@@ -160,7 +170,7 @@ class DefaultAgentAdapter(AgentAdapter):
         claimed: dict[str, Any],
         attempt: int,
         error: Exception,
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> None:
         if self._recover is not None:
             self._recover(claimed, attempt=attempt, error=error)

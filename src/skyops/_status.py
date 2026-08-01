@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import socket
 import subprocess
-import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 from urllib.parse import urlparse
 
 import typer
 
-from agp.enums import AgentStatus
-from skyops.config import SkyopsConfig, find_config, load_config
+from skyops.config import SkyopsConfig, load_config
 
 status_app = typer.Typer(help="Show AGP stack service status.")
 

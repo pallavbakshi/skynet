@@ -15,7 +15,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from agp.db import SessionLocal, engine, current_release_version
+from agp.db import SessionLocal, current_release_version, engine
 
 
 def _resolve_migrations_dir(anchor: Path | None = None) -> Path:
@@ -177,7 +177,7 @@ def apply_migrations(*, force_create_all: bool = False) -> dict:
 
     Returns a summary dict with keys: applied, current_version, engine.
     """
-    from agp import models  # noqa: F401  — ensure all models are imported
+    from agp import models
 
     session = SessionLocal()
     try:

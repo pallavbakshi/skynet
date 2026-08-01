@@ -8,7 +8,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class ExecutionResult:
-    artifacts: list["ArtifactPayload"]
+    artifacts: list[ArtifactPayload]
     summary: dict[str, Any] = field(default_factory=dict)
     diagnostics: dict[str, Any] | None = None
 

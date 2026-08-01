@@ -8,8 +8,8 @@ from typing import Any
 
 import typer
 
-from skyops.config import load_config
 from skyops._client import build_client
+from skyops.config import load_config
 
 monitor_app = typer.Typer(help="Monitoring and observability commands.")
 logs_app = typer.Typer(help="Log viewing commands.")

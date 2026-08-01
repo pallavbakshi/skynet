@@ -3,14 +3,19 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC
 
 import typer
 
 from agp.cli import app
 from agp.cli._helpers import (
-    _cli_client, _format_duration, _format_http_error,
-    _heartbeat_age_seconds, _make_client, _print_job_result,
-    _print_peek_tip, _status_show_heartbeat, _SEPARATOR,
+    _cli_client,
+    _format_duration,
+    _format_http_error,
+    _heartbeat_age_seconds,
+    _make_client,
+    _print_peek_tip,
+    _status_show_heartbeat,
 )
 
 
@@ -87,11 +92,11 @@ def _status_agent(agent: dict, client) -> None:
 
 def _status_dashboard(server_url: str | None, *, output_json: bool = False, quiet: bool = False) -> None:
     """Combined system dashboard — health, runtimes, agents, queue."""
-    import httpx as _httpx
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    from agp.cli._helpers import _make_client as _mk
-    with _mk(server_url) as client:
+    import httpx as _httpx
+
+    with _make_client(server_url) as client:
         try:
             cp_health = client.health()
         except (_httpx.RequestError, _httpx.HTTPStatusError) as exc:
@@ -146,7 +151,7 @@ def _status_dashboard(server_url: str | None, *, output_json: bool = False, quie
             if not agents:
                 typer.echo("(none)")
                 return
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             for agent in agents:
                 aid = agent.get("agent_id", "?")
                 agent_status = agent.get("status", "?").upper()
@@ -194,7 +199,7 @@ def _status_dashboard(server_url: str | None, *, output_json: bool = False, quie
             typer.echo(f"  {rid}  heartbeat={hb_str}  agents=[{agents_bound}]")
 
         # ── Agents
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         typer.echo(f"\nAgents: {len(agents)}")
         for agent in agents:
             aid = agent.get("agent_id", "?")
@@ -321,7 +326,8 @@ def jobs(
     filter_status: str = typer.Option(None, "--status", help="Filter by status (queued, running, completed, failed)."),
 ) -> None:
     """List recent jobs."""
-    from datetime import datetime, timezone
+    from datetime import datetime
+
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
@@ -354,9 +360,9 @@ def jobs(
                         if exc_type:
                             failure_reasons[j["job_id"]] = exc_type
                         break
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for j in items:
             retry = f" retry={j['retry_count']}/{j['max_retries']}" if j.get("retry_count", 0) > 0 else ""
             status_str = j["status"]
@@ -371,7 +377,7 @@ def jobs(
                     else datetime.fromisoformat(str(created_raw))
                 )
                 if created.tzinfo is None:
-                    created = created.replace(tzinfo=timezone.utc)
+                    created = created.replace(tzinfo=UTC)
                 age_str = _format_duration((now - created).total_seconds()) + " ago"
                 elapsed_str = ""
                 updated_raw = j.get("updated_at")
@@ -381,7 +387,7 @@ def jobs(
                         else datetime.fromisoformat(str(updated_raw))
                     )
                     if updated.tzinfo is None:
-                        updated = updated.replace(tzinfo=timezone.utc)
+                        updated = updated.replace(tzinfo=UTC)
                     elapsed_str = _format_duration((updated - created).total_seconds())
                 time_info = age_str
                 if elapsed_str:
@@ -482,5 +488,4 @@ def result(
         except _httpx.HTTPStatusError as exc:
             typer.echo(_format_http_error(exc), err=True)
             raise typer.Exit(1)
-
 

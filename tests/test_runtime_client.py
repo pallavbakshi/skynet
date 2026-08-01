@@ -182,14 +182,12 @@ class HeartbeatTransportIntegrationTest(unittest.TestCase):
     def test_heartbeat_thread_uses_client_transport(self) -> None:
         """Heartbeat requests must go through the RuntimeClient's transport,
         not a raw httpx.Client hitting the network."""
-        from threading import Event
+        from agp.plugins.inprocess import DefaultAgentAdapter, InProcessTerminalHost
         from agp.runtime._supervisor import RuntimeSupervisor
         from agp.runtime._types import (
             ArtifactPayload,
             ExecutionResult,
-            TerminalSession,
         )
-        from agp.plugins.inprocess import InProcessTerminalHost, DefaultAgentAdapter
 
         heartbeat_urls: list[str] = []
 

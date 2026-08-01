@@ -71,7 +71,7 @@ def has_completed_turn(screen: str) -> bool:
     for line in screen.splitlines():
         s = line.strip()
         # ✓ or ✗ = completed execution
-        if s.startswith("\u2713") or s.startswith("\u2717"):
+        if s.startswith(("✓", "✗")):
             return True
         # └ = tree connector (execution details)
         if s.startswith("\u2514"):
@@ -134,6 +134,4 @@ def is_shell_returned(text: str) -> bool:
         if any(ch in TUI_BOX_CHARS for ch in ln):
             return False
     lower_tail = "\n".join(tail).lower()
-    if any(hint in lower_tail for hint in TUI_CONTENT_HINTS):
-        return False
-    return True
+    return not any(hint in lower_tail for hint in TUI_CONTENT_HINTS)

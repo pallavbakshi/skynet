@@ -128,7 +128,7 @@ def is_shell_returned(text: str) -> bool:
             return False
 
     last = tail[-1]
-    if last.endswith("$") or last.endswith("%") or last.endswith("#"):
+    if last.endswith(("$", "%", "#")):
         return True
     if last == PROMPT_PREFIX or last == PROMPT_PREFIX + " ":
         has_tui = any(SEPARATOR_RE.match(ln) or STATUS_BAR_RE.match(ln) for ln in tail)

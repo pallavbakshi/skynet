@@ -8,14 +8,13 @@ from pathlib import Path
 
 from sqlalchemy import text
 
-from agp.config import settings
-from agp.db import Base, SessionLocal, engine, init_db
-from agp.models import Capability, utc_now
-from agp.queue_backend import reset_queue_backend_state
 from agp.artifact_store import reset_artifact_store_state
-from agp.services.events import reset_event_seq
-import agp.queue_backend as queue_backend_module
+from agp.config import settings
+from agp.db import SessionLocal, engine, init_db
+from agp.models import Capability, utc_now
 from agp.queue_backend import _redis as _qb_redis_mod
+from agp.queue_backend import reset_queue_backend_state
+from agp.services.events import reset_event_seq
 
 
 def _reset_sqlite_database() -> None:
@@ -174,7 +173,8 @@ class AgpTestCase(unittest.TestCase):
             session.close()
 
     def _client(self):
-        from agp.control_plane import build_app
         from fastapi.testclient import TestClient
+
+        from agp.control_plane import build_app
 
         return TestClient(build_app())

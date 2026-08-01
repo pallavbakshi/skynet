@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Deque
 
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
 from agp.models import Job, utc_now
-from agp.queue_backend import QueueDelivery, InMemoryInflightDelivery, _new_delivery_id, _peek_queued_jobs
+from agp.queue_backend import (
+    InMemoryInflightDelivery,
+    QueueDelivery,
+    _new_delivery_id,
+    _peek_queued_jobs,
+)
 
 
 class InMemoryBrokerQueueBackend:
@@ -18,7 +22,7 @@ class InMemoryBrokerQueueBackend:
     name = "inmemory_broker"
 
     def __init__(self) -> None:
-        self._queues: dict[str, Deque[str]] = {}
+        self._queues: dict[str, deque[str]] = {}
         self._inflight: dict[str, InMemoryInflightDelivery] = {}
         self._job_attempts: dict[str, int] = {}
         self._dead_lettered_jobs: set[str] = set()
@@ -29,10 +33,10 @@ class InMemoryBrokerQueueBackend:
         self._job_attempts.clear()
         self._dead_lettered_jobs.clear()
 
-    def _queued(self, target_queue: str) -> Deque[str]:
+    def _queued(self, target_queue: str) -> deque[str]:
         return self._queues.setdefault(target_queue, deque())
 
-    def enqueue_job(self, db: Session, *, job: Job) -> None:  # noqa: ARG002
+    def enqueue_job(self, db: Session, *, job: Job) -> None:
         if job.job_id in self._dead_lettered_jobs:
             self._dead_lettered_jobs.remove(job.job_id)
         if any(item.job_id == job.job_id for item in self._inflight.values()):
@@ -41,7 +45,7 @@ class InMemoryBrokerQueueBackend:
         if job.job_id not in queue:
             queue.append(job.job_id)
 
-    def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:  # noqa: ARG002
+    def dequeue_candidate(self, db: Session, *, target_queues: list[str]) -> QueueDelivery | None:
         now_ts = utc_now().timestamp()
         for target_queue in target_queues:
             queue = self._queued(target_queue)
@@ -73,10 +77,10 @@ class InMemoryBrokerQueueBackend:
     def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
         return _peek_queued_jobs(db, target_queues=target_queues)
 
-    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
+    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:
         self._inflight.pop(delivery.delivery_id, None)
 
-    def release_unclaimed(self, db: Session, *, delivery: QueueDelivery | None) -> None:  # noqa: ARG002
+    def release_unclaimed(self, db: Session, *, delivery: QueueDelivery | None) -> None:
         if delivery is None:
             return
         inflight = self._inflight.pop(delivery.delivery_id, None)
@@ -91,7 +95,7 @@ class InMemoryBrokerQueueBackend:
 
     def redrive_stale_deliveries(
         self,
-        db: Session,  # noqa: ARG002
+        db: Session,
         *,
         visibility_timeout_seconds: int,
         max_delivery_attempts: int,
@@ -124,7 +128,7 @@ class InMemoryBrokerQueueBackend:
             "dead_lettered_deliveries": dead_lettered,
         }
 
-    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:
         if not job_ids:
             return
         job_id_set = set(job_ids)

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re as _re
-import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from difflib import get_close_matches
 from pathlib import Path
 
@@ -92,12 +90,12 @@ def _heartbeat_age_seconds(iso_timestamp: str | None) -> float | None:
     """Compute seconds since an ISO-8601 heartbeat timestamp, or None."""
     if not iso_timestamp:
         return None
-    from datetime import datetime, timezone
+    from datetime import datetime
     try:
         hb_dt = datetime.fromisoformat(str(iso_timestamp).replace("Z", "+00:00"))
         if hb_dt.tzinfo is None:
-            hb_dt = hb_dt.replace(tzinfo=timezone.utc)
-        return (datetime.now(timezone.utc) - hb_dt).total_seconds()
+            hb_dt = hb_dt.replace(tzinfo=UTC)
+        return (datetime.now(UTC) - hb_dt).total_seconds()
     except (ValueError, TypeError):
         return None
 
@@ -457,7 +455,7 @@ def _print_detached(job_id: str, agent_id: str) -> None:
     _print_banner("ACCEPTED", "Task Detached — Still Running")
     typer.echo(f"JOB_ID:       {job_id}")
     typer.echo(f"AGENT:        {agent_id}")
-    typer.echo(f"STATUS:       IN_PROGRESS")
+    typer.echo("STATUS:       IN_PROGRESS")
     typer.echo("")
     typer.echo("The CLI stopped waiting — the job IS STILL RUNNING on the server.")
     typer.echo("The control plane will let it run up to 60 minutes before failing it.")
@@ -480,7 +478,7 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
     creation rather than time since this call.
     """
     import time
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     start = time.monotonic()
     elapsed_offset = job_created_at or 0.0
@@ -527,7 +525,7 @@ def _poll_until_done(client, job_id: str, timeout: float, heartbeat_interval: fl
                     created_at = progress_ev.get("created_at", "")
                     if created_at:
                         ev_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                        if (datetime.now(timezone.utc) - ev_time).total_seconds() > 30:
+                        if (datetime.now(UTC) - ev_time).total_seconds() > 30:
                             hint += " (stalled)"
             except Exception:
                 pass
@@ -568,6 +566,7 @@ def _poll_jobs_until_done(
     jobs that completed during the final snapshot are NOT in this set.
     """
     import time
+
     import httpx as _httpx
 
     _TERMINAL = ("completed", "failed", "cancelled")
@@ -678,7 +677,7 @@ def _status_show_heartbeat(job_id: str, client) -> None:
             created_at = ev.get("created_at", "")
             if created_at:
                 ev_time = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                age = (datetime.now(timezone.utc) - ev_time).total_seconds()
+                age = (datetime.now(UTC) - ev_time).total_seconds()
                 if age > 30:
                     typer.echo(f"LAST_SEEN:    {int(age)}s ago (possibly stalled)")
                 else:
@@ -697,5 +696,4 @@ def _format_duration(seconds: float) -> str:
     if hours > 0:
         return f"{hours}h:{minutes:02d}m"
     return f"{minutes:02d}m:{secs:02d}s"
-
 

@@ -6,9 +6,10 @@ import typer
 
 from agp.cli import app
 from agp.cli._helpers import (
-    _cli_client, _cli_idempotency_key, _format_http_error,
-    _make_client, _peek_tip, _print_banner,
-    _print_peek_tip, _SEPARATOR,
+    _cli_client,
+    _format_http_error,
+    _make_client,
+    _print_banner,
 )
 from agp.cli._infra import _runtime_binding_warning
 
@@ -258,7 +259,7 @@ def interrupt(
         # Detect target type: try agent first, fall back to job
         is_agent = True
         try:
-            agent = client.get_agent(target)
+            client.get_agent(target)
         except _httpx.HTTPStatusError as exc:
             if exc.response.status_code == 404:
                 is_agent = False
@@ -365,7 +366,7 @@ def _interrupt_job(client, job_id: str) -> None:
     if job_status == "cancelled":
         _print_banner("SUCCESS", "Job Removed from Queue")
         typer.echo(f"JOB_ID:       {job_id}")
-        typer.echo(f"STATUS:       CANCELLED")
+        typer.echo("STATUS:       CANCELLED")
         typer.echo("")
         typer.echo(
             "Notice: This job was in the queue and had not yet started execution."

@@ -29,13 +29,13 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-def _check_alive(session: "Session") -> None:
+def _check_alive(session: Session) -> None:
     """Raise PaneDied if the pane no longer exists."""
     if not session.mux.session_exists(session._session):
         raise PaneDied(f"pane {session._session.id} disappeared")
 
 
-def _handle_gate(mux: "Mux", tui: "Tui", pane: "SessionInfo", screen: str) -> bool:
+def _handle_gate(mux: Mux, tui: Tui, pane: SessionInfo, screen: str) -> bool:
     """Check for gate prompt and auto-dismiss if possible.
 
     Returns True if a gate was dismissed (caller should re-poll).
@@ -51,7 +51,7 @@ def _handle_gate(mux: "Mux", tui: "Tui", pane: "SessionInfo", screen: str) -> bo
     return True
 
 
-def wait_for_ready(session: "Session", config: Config) -> None:
+def wait_for_ready(session: Session, config: Config) -> None:
     """Block until the agent TUI shows a ready prompt.
 
     Handles gates during bootstrap. Raises BootstrapTimeout or FatalGate.
@@ -95,7 +95,7 @@ def wait_for_ready(session: "Session", config: Config) -> None:
 
 
 def poll_until_done(
-    session: "Session",
+    session: Session,
     marker: str,
     config: Config,
     *,
@@ -171,7 +171,7 @@ def poll_until_done(
 
 
 def wait_for_idle(
-    session: "Session",
+    session: Session,
     config: Config,
     *,
     timeout: float | None = None,

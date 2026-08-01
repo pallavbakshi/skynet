@@ -28,9 +28,7 @@ from smallops.tui.codex._markers import (
     PROMPT_MARKER,
     SPINNER_CHAR,
     SPINNER_CHAR_DIM,
-    USER_GUTTER,
 )
-
 
 # ── Tool-use detection ──────────────────────────────────────────────
 # Codex renders tool calls as: • Ran command  /  • Explored  /  • Edited file
@@ -144,10 +142,9 @@ def parse(captured: str) -> ParsedResponse:
             continue
 
         # Tree connector (└) and indented continuation — part of current tool block
-        if s.startswith("\u2514") or (current_kind == BlockKind.TOOL_USE and s):
-            if current_kind == BlockKind.TOOL_USE:
-                current_lines.append(line.rstrip())
-                continue
+        if (s.startswith("\u2514") or s) and current_kind == BlockKind.TOOL_USE:
+            current_lines.append(line.rstrip())
+            continue
 
         # Empty lines — preserve within text blocks
         if not s:
@@ -184,7 +181,7 @@ def parse_response(text: str, marker: str) -> str:
 
 def _is_bullet_line(s: str) -> bool:
     """True if line starts with • or ◦ (Codex content marker)."""
-    return s.startswith(SPINNER_CHAR) or s.startswith(SPINNER_CHAR_DIM)
+    return s.startswith((SPINNER_CHAR, SPINNER_CHAR_DIM))
 
 
 def _strip_bullet(s: str) -> str:
@@ -192,8 +189,7 @@ def _strip_bullet(s: str) -> str:
     for char in (SPINNER_CHAR, SPINNER_CHAR_DIM):
         if s.startswith(char):
             after = s[len(char):]
-            if after.startswith(" "):
-                after = after[1:]
+            after = after.removeprefix(" ")
             return after
     return s
 
@@ -284,9 +280,7 @@ def _looks_like_status_part(part: str) -> bool:
     words = part.split()
     if len(words) >= 2 and words[-1].lower() in _EFFORT_WORDS:
         return True
-    if len(words) >= 2 and words[-1].lower() == "fast" and len(words) >= 3 and words[-2].lower() in _EFFORT_WORDS:
-        return True
-    return False
+    return bool(len(words) >= 2 and words[-1].lower() == "fast" and len(words) >= 3 and words[-2].lower() in _EFFORT_WORDS)
 
 
 def _parse_parts(parts: list[str]) -> Status:

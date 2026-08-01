@@ -1,7 +1,7 @@
 """Observability, backup, restore, drills, and upgrade flows."""
 
-from tests.mvp_flow.base import *
 from agp.migrations import _discover_migrations
+from tests.mvp_flow.base import *
 
 
 def _current_schema_tag() -> str:

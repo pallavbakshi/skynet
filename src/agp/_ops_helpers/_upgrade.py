@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 from sqlalchemy import select
 
-from agp.config import settings
 from agp.db import SessionLocal, current_release_version
 from agp.models import SystemMetadata, utc_now
 

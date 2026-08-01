@@ -8,8 +8,12 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
-from agp.models import Job, QueueDeliveryRecord, utc_now
-from agp.queue_backend import QueueDelivery, _new_delivery_id, _peek_queued_jobs, db_dialect_name
+from agp.models import Job, utc_now
+from agp.queue_backend import (
+    QueueDelivery,
+    _peek_queued_jobs,
+    db_dialect_name,
+)
 
 
 class DbQueueBackend:
@@ -17,7 +21,7 @@ class DbQueueBackend:
 
     name = "db"
 
-    def enqueue_job(self, db: Session, *, job: Job) -> None:  # noqa: ARG002
+    def enqueue_job(self, db: Session, *, job: Job) -> None:
         return None
 
     def _candidate_query(self, db: Session, *, target_queues: list[str]):
@@ -59,7 +63,7 @@ class DbQueueBackend:
     def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
         return _peek_queued_jobs(db, target_queues=target_queues)
 
-    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
+    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:
         return None
 
     def release_unclaimed(self, db: Session, *, delivery: QueueDelivery | None) -> None:
@@ -79,7 +83,7 @@ class DbQueueBackend:
         db: Session,
         *,
         visibility_timeout_seconds: int,
-        max_delivery_attempts: int,  # noqa: ARG002
+        max_delivery_attempts: int,
     ) -> dict[str, int]:
         now = utc_now()
         cutoff = now - timedelta(seconds=visibility_timeout_seconds)
@@ -94,5 +98,5 @@ class DbQueueBackend:
         redriven = result.rowcount
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": 0}
 
-    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:
         return None

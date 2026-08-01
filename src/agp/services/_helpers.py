@@ -160,8 +160,7 @@ def _get_upgrade_status(db: Session) -> dict:
 
 def _parse_release_version(value: str) -> tuple[int, int, int]:
     normalized = value.strip()
-    if normalized.startswith("v"):
-        normalized = normalized[1:]
+    normalized = normalized.removeprefix("v")
     parts = normalized.split(".")
     if len(parts) < 2 or len(parts) > 3:
         raise BadRequestError(f"invalid release version: {value}")

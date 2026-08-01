@@ -4,7 +4,6 @@ from tempfile import TemporaryDirectory
 
 from agp.artifact_store import get_artifact_store
 from agp.runtime import TerminalSession
-
 from tests.mvp_flow.base import *
 
 
@@ -451,7 +450,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 super().__init__()
                 self._foreground_checks = 0
 
-            def is_foreground_tui(self, session) -> bool:  # noqa: ARG002
+            def is_foreground_tui(self, session) -> bool:
                 self._foreground_checks += 1
                 return False
 
@@ -460,7 +459,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             def kind(self) -> str:
                 return "waiting"
 
-            def execute_run(self, *, host, session, claimed, supervisor):  # noqa: ARG002
+            def execute_run(self, *, host, session, claimed, supervisor):
                 startup_settled = session.metadata.get("startup_settled_event")
                 assert startup_settled is not None
                 startup_settled.set()
@@ -480,7 +479,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 self.progress_calls: list[dict[str, object]] = []
                 self.fail_calls: list[dict[str, object]] = []
 
-            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):
                 return {
                     "claimed": True,
                     "agent_id": agent_id,
@@ -501,7 +500,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 self.progress_calls.append(kwargs)
                 return {"status": "ok"}
 
-            def get_job(self, job_id):  # noqa: ARG002
+            def get_job(self, job_id):
                 return {"status": "running"}
 
             def fail(self, **kwargs):
@@ -518,7 +517,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         heartbeat_posts: list[dict[str, object]] = []
 
         class FakeHeartbeatHttpClient:
-            def __init__(self, *args, **kwargs):  # noqa: ARG002
+            def __init__(self, *args, **kwargs):
                 return None
 
             def post(self, url: str, json: dict[str, object]):
@@ -582,11 +581,11 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             def kind(self) -> str:
                 return "recovery"
 
-            def ensure_bootstrapped(self, *, host, session, claimed):  # noqa: ARG002
+            def ensure_bootstrapped(self, *, host, session, claimed):
                 event = session.metadata.get("startup_settled_event")
                 self.ensure_bootstrapped_calls.append((session.session_id, bool(event and event.is_set())))
 
-            def execute_run(self, *, host, session, claimed, supervisor):  # noqa: ARG002
+            def execute_run(self, *, host, session, claimed, supervisor):
                 self.execute_calls += 1
                 event = session.metadata.get("startup_settled_event")
                 assert event is not None
@@ -614,7 +613,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 self.resumed_calls: list[dict[str, object]] = []
                 self.complete_calls: list[dict[str, object]] = []
 
-            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):
                 return {
                     "claimed": True,
                     "agent_id": agent_id,
@@ -631,7 +630,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 self.heartbeat_calls.append(kwargs)
                 return {"interrupt_requested": False}
 
-            def progress(self, **kwargs):  # noqa: ARG002
+            def progress(self, **kwargs):
                 return {"status": "ok"}
 
             def recovering(self, **kwargs):
@@ -654,10 +653,10 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                 return {"data": {"interrupt_requested": False}}
 
         class FakeHeartbeatHttpClient:
-            def __init__(self, *args, **kwargs):  # noqa: ARG002
+            def __init__(self, *args, **kwargs):
                 return None
 
-            def post(self, url: str, json: dict[str, object]):  # noqa: ARG002
+            def post(self, url: str, json: dict[str, object]):
                 return FakeHeartbeatResponse()
 
             def close(self) -> None:
@@ -1742,7 +1741,7 @@ class MvpFlowCoreTest(MvpFlowTestBase):
             def register(self):
                 return {"status": "ok"}
 
-            def claim(self, *, agent_id, capability, lease_ttl_seconds):  # noqa: ARG002
+            def claim(self, *, agent_id, capability, lease_ttl_seconds):
                 return {
                     "claimed": True,
                     "agent_id": agent_id,
@@ -1759,10 +1758,10 @@ class MvpFlowCoreTest(MvpFlowTestBase):
                     ],
                 }
 
-            def heartbeat(self, **kwargs):  # noqa: ARG002
+            def heartbeat(self, **kwargs):
                 return {"interrupt_requested": False}
 
-            def progress(self, **kwargs):  # noqa: ARG002
+            def progress(self, **kwargs):
                 return {"status": "ok"}
 
             def fail(self, **kwargs):
@@ -2256,8 +2255,9 @@ class MvpFlowCoreTest(MvpFlowTestBase):
         self.assertIn("agp_events_latest_seq ", metrics)
 
     def test_agp_status_falls_back_to_public_health_when_ops_health_is_unavailable(self) -> None:
-        import httpx
         from unittest.mock import patch
+
+        import httpx
 
         request = httpx.Request("GET", "http://testserver/ops/health")
         response = httpx.Response(403, request=request)
