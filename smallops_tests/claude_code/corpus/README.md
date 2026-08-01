@@ -1,31 +1,34 @@
 # Claude Code TUI Corpus
 
 Real tmux pane captures of Claude Code at various TUI states.
-Used as ground truth for the parser test suite.
+Used as offline inputs for smallops parser property tests. These are not blessed
+snapshots; tests assert invariants and category-level properties only.
 
 ## How to capture
 
 ```bash
-# One command — captures raw, plain, scrollback, and metadata:
+# One command — captures raw and plain screen text:
 ./scripts/capture-pane.sh <category> <name> [session]
 
 # Or via make:
 make capture CAT=ready NAME=fresh_launch
 make capture CAT=working NAME=thinking SESSION=agp-claude-reviewer
+make capture CAT=ready NAME=fresh_launch FORCE=1  # overwrite intentionally
 ```
 
 ## What gets saved
 
-Each capture produces 4 files:
+Each tmux capture produces 2 files:
 
 | File | Content |
 |------|---------|
 | `{name}.raw` | Raw tmux output with ANSI escapes (source of truth) |
 | `{name}.txt` | Plain text (ANSI stripped by tmux) |
-| `{name}.scrollback.txt` | Full scrollback history (plain) |
-| `{name}.capture.json` | Metadata: timestamp, pane size, cursor position, version |
 
-Optional: `{name}.expected.json` — ground-truth assertions for tests.
+WezTerm captures currently produce `{name}.txt` only.
+
+Do not add `{name}.expected.json` files. The offline layer intentionally avoids
+snapshot equality.
 
 ## Directory layout
 

@@ -34,3 +34,12 @@ dev = [
     "jsonschema>=4.26.0",
     "pytest>=9.0,<10.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+  "offline: deterministic parser property tests, no live agent (default on)",
+  "live: real Claude Code install required (SMALLOPS_LIVE=1)",
+  "docker: pristine Docker fresh-first-run (SMALLOPS_DOCKER=1 + ANTHROPIC_API_KEY)",
+  "judge: uses the LLM-judge oracle, soft signal (SMALLOPS_JUDGE=1 + ANTHROPIC_API_KEY)",
+]
+addopts = "-ra --strict-markers"
