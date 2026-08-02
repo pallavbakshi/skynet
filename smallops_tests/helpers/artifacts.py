@@ -83,6 +83,7 @@ def dump_docker_diagnostics(item: pytest.Item, *, out_dir: Path | None = None) -
 
     _write_text(diag_dir / "env.txt", _docker_env_report())
     _write_command(diag_dir / "claude-version.txt", ["claude", "--version"])
+    _write_command(diag_dir / "codex-version.txt", ["codex", "--version"])
     _write_command(diag_dir / "tmux-version.txt", ["tmux", "-V"])
     _write_command(diag_dir / "wezterm-version.txt", ["wezterm", "--version"])
     _write_command(diag_dir / "tmux-sessions.txt", ["tmux", "list-sessions", "-F", "#{session_name}:#{session_attached}:#{session_windows}"])
@@ -90,6 +91,18 @@ def dump_docker_diagnostics(item: pytest.Item, *, out_dir: Path | None = None) -
     _write_command(diag_dir / "wezterm-panes.json", ["wezterm", "cli", "list", "--format", "json"])
     _write_command(diag_dir / "processes.txt", ["ps", "-eo", "pid,ppid,stat,comm,args"])
     _write_command(diag_dir / "wezterm-mux-server.log", ["cat", "/tmp/wezterm-mux-server.log"])
+    _write_command(diag_dir / "codex-config.toml", ["cat", str(Path.home() / ".codex" / "config.toml")])
+    _write_command(
+        diag_dir / "codex-openrouter-config.toml",
+        ["cat", str(Path.home() / ".codex" / "openrouter.config.toml")],
+    )
+    _write_command(
+        diag_dir / "codex-model-catalog.json",
+        ["cat", str(Path.home() / ".codex" / "smallops-model-catalog.json")],
+    )
+    _write_command(diag_dir / "codex-debug-models.txt", ["codex", "debug", "models"])
+    _write_command(diag_dir / "codex-script-typescript.txt", ["cat", "/tmp/smallops-codex.typescript"])
+    _write_command(diag_dir / "codex-home-files.txt", ["find", str(Path.home() / ".codex"), "-maxdepth", "4", "-type", "f"])
     _write_tree(diag_dir / "home-tree.txt", Path(os.environ.get("HOME", "")))
 
     ctx = item.stash.get(ARTIFACT_CONTEXT, ArtifactContext())
@@ -130,12 +143,24 @@ def _docker_env_report() -> str:
         "API_TIMEOUT_MS",
         "CLAUDE_CODE_SUBAGENT_MODEL",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "OPENROUTER_API_KEY",
+        "SMALLOPS_CODEX_OPENROUTER_API_KEY",
+        "SMALLOPS_CODEX_MODEL",
+        "AGP_CODEX_MODEL",
     ]
     lines = []
     for key in keys:
         if key not in os.environ:
             lines.append(f"{key}=<unset>")
-        elif key in {"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}:
+        elif key in {
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "OPENAI_API_KEY",
+            "OPENROUTER_API_KEY",
+            "SMALLOPS_CODEX_OPENROUTER_API_KEY",
+        }:
             value = os.environ[key]
             lines.append(f"{key}=<set len={len(value)}>")
         else:

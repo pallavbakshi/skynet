@@ -28,13 +28,25 @@ if ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 
-if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" ]]; then
-  echo "ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is required for smallops Docker Claude Code tests" >&2
+if [[ -z "${ANTHROPIC_API_KEY:-}" && -z "${ANTHROPIC_AUTH_TOKEN:-}" && -z "${OPENROUTER_API_KEY:-}" && -z "${OPENAI_API_KEY:-}" ]]; then
+  echo "ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENROUTER_API_KEY, or OPENAI_API_KEY is required for smallops Docker tests" >&2
   exit 1
 fi
 
 if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" && "${ANTHROPIC_BASE_URL:-}" == *"openrouter.ai"* ]]; then
   ANTHROPIC_API_KEY=""
+fi
+
+if [[ -z "${SMALLOPS_CODEX_OPENROUTER_API_KEY:-}" ]]; then
+  if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" && "${ANTHROPIC_BASE_URL:-}" == *"openrouter.ai"* ]]; then
+    SMALLOPS_CODEX_OPENROUTER_API_KEY="${ANTHROPIC_AUTH_TOKEN}"
+  else
+    SMALLOPS_CODEX_OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  fi
+fi
+
+if [[ -n "${SMALLOPS_CODEX_OPENROUTER_API_KEY:-}" ]]; then
+  OPENAI_API_KEY=""
 fi
 
 ARTIFACT_DIR="${ROOT}/test-artifacts/docker/$(date -u +%Y%m%d-%H%M%S)"
@@ -49,6 +61,10 @@ mkdir -p "${ARTIFACT_DIR}"
   echo "ANTHROPIC_DEFAULT_OPUS_MODEL=${ANTHROPIC_DEFAULT_OPUS_MODEL:-}"
   echo "ANTHROPIC_DEFAULT_SONNET_MODEL=${ANTHROPIC_DEFAULT_SONNET_MODEL:-}"
   echo "ANTHROPIC_DEFAULT_HAIKU_MODEL=${ANTHROPIC_DEFAULT_HAIKU_MODEL:-}"
+  echo "OPENROUTER_API_KEY=$([[ -n "${OPENROUTER_API_KEY:-}" ]] && echo '<set>' || echo '<unset>')"
+  echo "SMALLOPS_CODEX_OPENROUTER_API_KEY=$([[ -n "${SMALLOPS_CODEX_OPENROUTER_API_KEY:-}" ]] && echo '<set>' || echo '<unset>')"
+  echo "SMALLOPS_CODEX_MODEL=${SMALLOPS_CODEX_MODEL:-${AGP_CODEX_MODEL:-openai/gpt-5.3-codex}}"
+  echo "SMALLOPS_CODEX_CORPUS_OUT=${SMALLOPS_CODEX_CORPUS_OUT:-}"
   echo "API_TIMEOUT_MS=${API_TIMEOUT_MS:-}"
   docker --version
   docker info --format 'server={{.ServerVersion}} os={{.OperatingSystem}} arch={{.Architecture}}'
@@ -70,7 +86,14 @@ for var in \
   ANTHROPIC_DEFAULT_HAIKU_MODEL \
   API_TIMEOUT_MS \
   CLAUDE_CODE_SUBAGENT_MODEL \
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS; do
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS \
+  OPENAI_API_KEY \
+  OPENAI_BASE_URL \
+  OPENROUTER_API_KEY \
+  SMALLOPS_CODEX_OPENROUTER_API_KEY \
+  SMALLOPS_CODEX_MODEL \
+  SMALLOPS_CODEX_CORPUS_OUT \
+  AGP_CODEX_MODEL; do
   if [[ -v "${var}" ]]; then
     docker_env+=(-e "${var}")
   fi

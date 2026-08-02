@@ -13,14 +13,20 @@ from smallops.tui.codex._markers import (
     TUI_BOX_CHARS,
     TUI_CONTENT_HINTS,
 )
-from smallops.tui.codex._parse import is_noise, is_placeholder
+from smallops.tui.codex._parse import (
+    _is_working_line,
+    is_noise,
+    is_placeholder,
+    is_status_line,
+)
 
 
 def classify_idle(screen: str) -> IdleReason:
     """Given a static screen, classify why it's idle."""
     from smallops.tui.codex._gates import (
         FATAL_GATE_PATTERNS,
-        GATE_PATTERNS,
+        active_gate_text,
+        has_active_gate,
         is_onboarding,
     )
 
@@ -36,11 +42,11 @@ def classify_idle(screen: str) -> IdleReason:
         return IdleReason.ERROR
 
     # Onboarding (needs auth — treated as gate, auto-dismissed)
-    if is_onboarding(lower):
+    if is_onboarding(active_gate_text(screen).lower()):
         return IdleReason.GATE
 
     # Auto-dismissable gates
-    if any(pat in lower for pat in GATE_PATTERNS):
+    if has_active_gate(screen):
         return IdleReason.GATE
 
     # Ready prompt (› in bottom 10 lines)
@@ -73,6 +79,10 @@ def has_completed_turn(screen: str) -> bool:
         # ✓ or ✗ = completed execution
         if s.startswith(("✓", "✗")):
             return True
+        # Simple text replies render as a plain bullet followed by the
+        # returned composer prompt.
+        if s.startswith(("•", "◦")) and not _is_working_line(s):
+            return True
         # └ = tree connector (execution details)
         if s.startswith("\u2514"):
             return True
@@ -91,6 +101,10 @@ def ends_with_prompt(text: str) -> bool:
         if is_noise(s):
             continue
         if is_placeholder(s):
+            return True
+        if is_status_line(s):
+            continue
+        if _is_separator(s):
             continue
         return s.startswith(PROMPT_MARKER)
     return False
@@ -135,3 +149,7 @@ def is_shell_returned(text: str) -> bool:
             return False
     lower_tail = "\n".join(tail).lower()
     return not any(hint in lower_tail for hint in TUI_CONTENT_HINTS)
+
+
+def _is_separator(s: str) -> bool:
+    return bool(s) and all(ch in "\u2500\u2501 \t" for ch in s) and any(ch in "\u2500\u2501" for ch in s)

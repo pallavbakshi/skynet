@@ -33,9 +33,20 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             if mark in item.keywords and not os.environ.get(env):
                 item.add_marker(pytest.mark.skip(reason=why))
         if "docker" in item.keywords and not (
-            os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_AUTH_TOKEN")
+            or os.environ.get("OPENROUTER_API_KEY")
+            or os.environ.get("SMALLOPS_CODEX_OPENROUTER_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
         ):
-            item.add_marker(pytest.mark.skip(reason="set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN"))
+            item.add_marker(
+                pytest.mark.skip(
+                    reason=(
+                        "set ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, OPENROUTER_API_KEY, "
+                        "SMALLOPS_CODEX_OPENROUTER_API_KEY, or OPENAI_API_KEY"
+                    )
+                )
+            )
 
 
 @pytest.hookimpl(hookwrapper=True)

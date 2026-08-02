@@ -22,6 +22,71 @@ if [[ -d /tmp ]]; then
   chmod 1777 /tmp
 fi
 
+if [[ -z "${SMALLOPS_CODEX_OPENROUTER_API_KEY:-}" ]]; then
+  if [[ -n "${ANTHROPIC_AUTH_TOKEN:-}" && "${ANTHROPIC_BASE_URL:-}" == *"openrouter.ai"* ]]; then
+    export SMALLOPS_CODEX_OPENROUTER_API_KEY="${ANTHROPIC_AUTH_TOKEN}"
+  else
+    export SMALLOPS_CODEX_OPENROUTER_API_KEY="${OPENROUTER_API_KEY:-${ANTHROPIC_AUTH_TOKEN:-}}"
+  fi
+fi
+if [[ -n "${SMALLOPS_CODEX_OPENROUTER_API_KEY:-}" ]]; then
+  export OPENAI_API_KEY=""
+fi
+
+CODEX_MODEL="${SMALLOPS_CODEX_MODEL:-${AGP_CODEX_MODEL:-openai/gpt-5.3-codex}}"
+CODEX_CONFIG_HOME="${SMALLOPS_HOME}/.codex"
+mkdir -p "${CODEX_CONFIG_HOME}" "${SMALLOPS_HOME}/.config/codex"
+CODEX_MODEL_TEMPLATE="${SMALLOPS_CODEX_MODEL_TEMPLATE:-gpt-5.4}"
+HOME="${SMALLOPS_HOME}" codex debug models --bundled 2>/tmp/smallops-codex-model-catalog.err \
+  | jq --arg model "${CODEX_MODEL}" --arg template "${CODEX_MODEL_TEMPLATE}" '{
+      models: [
+        .models[]
+        | select(.slug == $template)
+        | .slug = $model
+        | .display_name = $model
+        | .description = "smallops Docker model catalog override for OpenRouter Codex tests."
+        | .default_reasoning_level = "low"
+        | .additional_speed_tiers = []
+        | .service_tiers = []
+      ]
+    }' > "${CODEX_CONFIG_HOME}/smallops-model-catalog.json"
+if [[ ! -s "${CODEX_CONFIG_HOME}/smallops-model-catalog.json" ]]; then
+  cat /tmp/smallops-codex-model-catalog.err >&2
+  echo "failed to generate Codex model catalog for ${CODEX_MODEL} from ${CODEX_MODEL_TEMPLATE}" >&2
+  exit 1
+fi
+cat > "${CODEX_CONFIG_HOME}/config.toml" <<EOF
+model = "${CODEX_MODEL}"
+model_provider = "openrouter"
+model_reasoning_effort = "low"
+model_catalog_json = "${CODEX_CONFIG_HOME}/smallops-model-catalog.json"
+
+[model_providers.openrouter]
+name = "OpenRouter"
+base_url = "https://openrouter.ai/api/v1"
+wire_api = "responses"
+
+[model_providers.openrouter.auth]
+command = "sh"
+args = ["-c", "echo \$SMALLOPS_CODEX_OPENROUTER_API_KEY"]
+
+[projects."/app"]
+trust_level = "trusted"
+
+[projects."/tmp"]
+trust_level = "trusted"
+EOF
+cat > "${CODEX_CONFIG_HOME}/openrouter.config.toml" <<EOF
+model = "${CODEX_MODEL}"
+model_provider = "openrouter"
+model_reasoning_effort = "low"
+model_catalog_json = "${CODEX_CONFIG_HOME}/smallops-model-catalog.json"
+EOF
+cp "${CODEX_CONFIG_HOME}/config.toml" "${SMALLOPS_HOME}/.config/codex/config.toml"
+cp "${CODEX_CONFIG_HOME}/openrouter.config.toml" "${SMALLOPS_HOME}/.config/codex/openrouter.config.toml"
+cp "${CODEX_CONFIG_HOME}/smallops-model-catalog.json" "${SMALLOPS_HOME}/.config/codex/smallops-model-catalog.json"
+chown -R "${SMALLOPS_USER}:${SMALLOPS_USER}" "${CODEX_CONFIG_HOME}" "${SMALLOPS_HOME}/.config"
+
 USER_ENV=(
   HOME="${SMALLOPS_HOME}"
   PATH="/usr/local/bin:/usr/bin:/bin"
@@ -48,7 +113,11 @@ for _var in \
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS \
   OPENAI_API_KEY \
   OPENAI_BASE_URL \
-  OPENROUTER_API_KEY; do
+  OPENROUTER_API_KEY \
+  SMALLOPS_CODEX_OPENROUTER_API_KEY \
+  SMALLOPS_CODEX_MODEL \
+  SMALLOPS_CODEX_CORPUS_OUT \
+  AGP_CODEX_MODEL; do
   if [[ -v "${_var}" ]]; then
     USER_ENV+=("${_var}=${!_var}")
   fi

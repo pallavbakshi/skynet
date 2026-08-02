@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from shlex import quote
+from uuid import uuid4
+
 from smallops._types import IdleReason, ParsedResponse, Status
 from smallops.tui.codex._classify import (
     classify_idle,
@@ -17,12 +21,53 @@ class CodexTui:
 
     kind = "codex"
 
-    def __init__(self, *, cli: str = "codex", flags: str = "") -> None:
+    def __init__(
+        self,
+        *,
+        cli: str = "codex",
+        flags: str = "",
+        send_via_launch: bool = False,
+        defer_launch_until_send: bool = False,
+        script_pty: bool = False,
+    ) -> None:
         self._cli = cli
         self._flags = flags
+        self.send_via_launch = send_via_launch
+        self.defer_launch_until_send = defer_launch_until_send
+        self.script_pty = script_pty
 
     def launch_command(self, *, cwd: str | None = None) -> str:
-        return f"{self._cli} {self._flags}".strip()
+        parts = [self._cli]
+        if self._flags:
+            parts.append(self._flags)
+        if cwd:
+            escaped_cwd = cwd.replace("\\", "\\\\").replace('"', '\\"')
+            parts.append(f"-C {quote(cwd)}")
+            parts.append(f"-c {quote(f'projects.\"{escaped_cwd}\".trust_level=\"trusted\"')}")
+        return " ".join(parts).strip()
+
+    def launch_prompt_command(self, prompt: str, *, cwd: str | None = None) -> str:
+        command = f"{self.launch_command(cwd=cwd)} {quote(prompt)}"
+        if self.script_pty:
+            return f"script -qfec {quote(command)} /tmp/smallops-codex.typescript"
+        return command
+
+    def format_send(
+        self,
+        prompt: str,
+        *,
+        file: str | None = None,
+        sections: str | None = None,
+        directory: str = "/tmp/smallops",
+    ) -> tuple[str, str, str | None]:
+        if file is not None:
+            prompt = Path(file).read_text(encoding="utf-8")
+
+        marker = f"SMALLOPS-CODEX-TASK-{uuid4().hex[:12]}"
+        send_text = f"{marker} {prompt}"
+        if sections:
+            send_text += f"\n\n{sections}"
+        return marker, send_text, None
 
     def classify_idle(self, screen: str) -> IdleReason:
         return classify_idle(screen)

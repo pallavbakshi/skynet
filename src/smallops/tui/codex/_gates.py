@@ -103,20 +103,41 @@ def gate_response(screen: str) -> str | None:
         return None
 
     lower = screen.lower()
+    active = active_gate_text(screen).lower()
 
     # Fatal — don't auto-dismiss
     if any(pat in lower for pat in FATAL_GATE_PATTERNS):
         return None
 
     # Onboarding menu
-    if is_onboarding(lower):
+    if is_onboarding(active):
         return preferred_auth_choice()
 
     for phrase, choice in GATE_CHOICES.items():
-        if phrase in lower:
+        if phrase in active:
             return choice
 
-    if any(pat in lower for pat in GATE_PATTERNS):
+    if any(pat in active for pat in GATE_PATTERNS):
         return ""  # Enter
 
     return None
+
+
+def has_active_gate(screen: str) -> bool:
+    """Return True when gate text appears in the active bottom region."""
+    active = active_gate_text(screen).lower()
+    return is_onboarding(active) or any(pat in active for pat in GATE_PATTERNS)
+
+
+def active_gate_text(screen: str) -> str:
+    """Gate scanning window.
+
+    Codex inline mode preserves old prompt text in tall panes. Once input has
+    been queued, old trust/onboarding prompts can stay visible above the active
+    composer and must not be dismissed again.
+    """
+    lower = screen.lower()
+    if "queued follow-up inputs" in lower:
+        return ""
+    lines = [line.strip() for line in screen.splitlines() if line.strip()]
+    return "\n".join(lines[-35:])

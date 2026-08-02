@@ -95,6 +95,7 @@ class Session:
         self._task_files: list[str] = []
         self._started_at: float | None = None
         self._last_activity: float = 0.0
+        self._env: dict[str, str] | None = None
 
     # ── Screen reading ─────────���─────────────────────────────────────
 
@@ -120,8 +121,12 @@ class Session:
             env: Environment variables to inject (e.g. API keys).
         """
         self._session = self.mux.create_session(name=self._name, cwd=cwd)
+        self._env = env
         self._started_at = monotonic()
         self._last_activity = self._started_at
+
+        if getattr(self.tui, "defer_launch_until_send", False):
+            return self._session
 
         # Launch agent CLI via respawn — replaces the pane's shell process
         # directly without going through the TTY input path, so the command
@@ -183,14 +188,30 @@ class Session:
             raise SmallopsError("send() requires either prompt or file")
         session = self._require_session()
 
-        # Write via-file and send reference string
-        ref, path = write_via_file(
-            prompt, file=file, sections=sections, directory=self.config.via_file_dir,
-        )
-        self._task_files.append(path)
+        formatter = getattr(self.tui, "format_send", None)
+        if formatter is not None:
+            ref, send_text, path = formatter(
+                prompt, file=file, sections=sections, directory=self.config.via_file_dir,
+            )
+        else:
+            # Write via-file and send reference string
+            ref, path = write_via_file(
+                prompt, file=file, sections=sections, directory=self.config.via_file_dir,
+            )
+            send_text = ref
+        if path is not None:
+            self._task_files.append(path)
         self._markers.append(ref)
 
-        self.mux.send_text(session, ref, enter=True)
+        launch_prompt = getattr(self.tui, "launch_prompt_command", None)
+        if getattr(self.tui, "send_via_launch", False) and launch_prompt is not None:
+            self._session = self.mux.respawn(
+                session,
+                launch_prompt(send_text, cwd=session.cwd),
+                env=self._env,
+            )
+        else:
+            self.mux.send_text(session, send_text, enter=True)
         self._last_activity = monotonic()
 
         # Poll until done

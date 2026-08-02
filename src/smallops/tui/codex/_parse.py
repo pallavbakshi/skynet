@@ -70,6 +70,7 @@ def parse(captured: str) -> ParsedResponse:
     current_lines: list[str] = []
     current_tool = ""
     started = False
+    skip_queued_inputs = False
 
     def _flush() -> None:
         nonlocal current_kind, current_lines, current_tool
@@ -83,6 +84,11 @@ def parse(captured: str) -> ParsedResponse:
 
     for line in lines:
         s = line.strip()
+
+        if skip_queued_inputs:
+            if s.startswith("\u21b3") or s.startswith("shift +"):
+                continue
+            skip_queued_inputs = False
 
         # Skip preamble — marker is mid-line in the › prompt
         if not started:
@@ -125,6 +131,10 @@ def parse(captured: str) -> ParsedResponse:
         # Bullet lines (• content) — the main Codex content marker
         if _is_bullet_line(s):
             content = _strip_bullet(s)
+            if content == "Queued follow-up inputs":
+                _flush()
+                skip_queued_inputs = True
+                continue
 
             # Check if it's a tool activity header
             verb = _is_tool_header(content)

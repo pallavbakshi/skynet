@@ -60,6 +60,8 @@ def wait_for_ready(session: Session, config: Config) -> None:
     prev = ""
     unchanged = 0
     gate_count = 0
+    last_gate_response: str | None = None
+    repeated_gate_polls = 0
 
     while monotonic() < deadline:
         sleep(config.poll_interval)
@@ -67,12 +69,28 @@ def wait_for_ready(session: Session, config: Config) -> None:
 
         screen = session._read_screen(handle_gates=False)
 
-        if _handle_gate(session.mux, session.tui, session._session, screen):
+        gate_response = session.tui.gate_response(screen)
+        if gate_response is not None:
+            if gate_response == last_gate_response:
+                repeated_gate_polls += 1
+                if repeated_gate_polls < config.idle_threshold:
+                    unchanged = 0
+                    continue
+            else:
+                repeated_gate_polls = 0
+            last_gate_response = gate_response
+            if session.tui.is_fatal_gate(screen):
+                raise FatalGate("fatal gate detected — requires human intervention")
+            _log.debug("gate detected, sending response: %r", gate_response)
+            session.mux.send_text(session._session, gate_response, enter=True)
             gate_count += 1
+            repeated_gate_polls = 0
             if gate_count > config.max_gate_dismissals:
                 raise FatalGate("too many gate dismissals during bootstrap")
             unchanged = 0
             continue
+        repeated_gate_polls = 0
+        last_gate_response = None
 
         if screen == prev:
             unchanged += 1
