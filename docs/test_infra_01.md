@@ -211,7 +211,7 @@ After a `send` returns:
 These are the minimum drift-sensitive checks; they run before the spec's oracle.
 
 ### 6.2 Layer A — Offline property (thin, fast)
-**Location:** `smallops_tests/claude_code/test_parser_properties.py`, mark `offline`.
+**Location:** `smallops_tests/claude_code/test_offline_parser.py`, mark `offline`.
 Parametrize over the existing corpus `*.txt` as **inputs** (run through
 `strip_ansi` + `normalize_screen`). Assert **invariants only** — never equality
 to `*.expected.json`:
@@ -225,13 +225,13 @@ Purpose: a 2-second, no-agent smoke test for gross parser breakage on every
 commit. It is **not** the golden anti-pattern — no equality, no re-blessing.
 
 ### 6.3 Layer B — Live dynamic (real agent)
-**Location:** `smallops_tests/test_live.py` (+ spec catalog in
+**Location:** `smallops_tests/claude_code/test_live.py` (+ spec catalog in
 `smallops_tests/specs/`), mark `live`. A session fixture `up()`s on a temp cwd,
 `down()`s in teardown; parametrize mux (tmux first). Specs are the canaries +
 verifiable tasks in §10. Invariants (§6.1) always run, then the oracle.
 
 ### 6.4 Layer C — Fresh-first-run (Docker)
-**Location:** `smallops_tests/test_firstrun.py`, mark `docker`. Generalize the
+**Location:** `smallops_tests/claude_code/test_docker.py`, mark `docker`. Generalize the
 existing Docker scripts into asserted canaries (don't reinvent the container
 infra). **Setup per test:** throwaway container, empty Claude config dir,
 `ANTHROPIC_API_KEY` set, **no** `claude -p` pre-completion. Coverage: drive

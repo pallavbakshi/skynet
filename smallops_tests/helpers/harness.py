@@ -39,6 +39,8 @@ PROVIDER_ENV_KEYS = (
     "OPENROUTER_API_KEY",
 )
 
+SMALLOPS_MUXES = ("tmux", "wezterm")
+
 
 class Oracle(Protocol):
     def verify(self, ctx: RunContext) -> None: ...

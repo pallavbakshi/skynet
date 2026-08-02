@@ -14,6 +14,12 @@ from smallops_tests.helpers.artifacts import (
     dump_docker_diagnostics,
     dump_failure_artifacts,
 )
+from smallops_tests.helpers.harness import SMALLOPS_MUXES
+
+
+def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
+    if "smallops_mux" in metafunc.fixturenames:
+        metafunc.parametrize("smallops_mux", SMALLOPS_MUXES)
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:

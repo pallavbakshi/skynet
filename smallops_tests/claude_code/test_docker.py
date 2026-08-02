@@ -189,7 +189,6 @@ def test_docker_bootstrap_stops_on_fatal_gate(screen: str) -> None:
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_claude_code_exact_reply(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -211,7 +210,6 @@ def test_docker_claude_code_exact_reply(
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_claude_code_read_tool_use(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -233,7 +231,6 @@ def test_docker_claude_code_read_tool_use(
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_claude_code_file_write(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -258,7 +255,6 @@ def test_docker_claude_code_file_write(
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_claude_code_test_fix(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -295,7 +291,6 @@ def test_docker_claude_code_test_fix(
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_session_api_surface(
     request: pytest.FixtureRequest,
     tmp_path: Path,
@@ -383,7 +378,6 @@ def test_docker_session_api_surface(
 
 
 @pytest.mark.docker
-@pytest.mark.parametrize("smallops_mux", ["tmux", "wezterm"])
 def test_docker_interrupts_active_turn(
     request: pytest.FixtureRequest,
     tmp_path: Path,

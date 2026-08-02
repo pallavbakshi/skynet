@@ -20,11 +20,6 @@ from smallops_tests.helpers.harness import (
 )
 
 
-@pytest.fixture(params=["tmux", "wezterm"])
-def smallops_mux(request: pytest.FixtureRequest) -> str:
-    return request.param
-
-
 @pytest.mark.live
 def test_live_exact_reply(request: pytest.FixtureRequest, tmp_path: Path, smallops_mux: str) -> None:
     spec = Spec(
