@@ -26,6 +26,12 @@ def classify_idle(screen: str) -> IdleReason:
         FATAL_GATE_PATTERNS,
     )
 
+    # Claude Code can briefly render a prompt while a previous turn is still
+    # active, e.g. "* Calculating..." plus "esc to interrupt". Do not let the
+    # visible prompt or older completed scrollback terminate send polling.
+    if has_working_indicator(screen):
+        return IdleReason.GATE
+
     # If the screen shows a completed turn (prompt → response → prompt),
     # gate-like text in the response body is NOT a real gate.
     if has_completed_turn(screen):
@@ -39,12 +45,6 @@ def classify_idle(screen: str) -> IdleReason:
 
     # Auto-dismissable gates
     if any(pat in lower for pat in AUTO_GATE_PATTERNS):
-        return IdleReason.GATE
-
-    # Claude Code can briefly render a prompt while a previous turn is still
-    # active, e.g. "* Calculating..." plus "esc to interrupt". Do not let the
-    # visible prompt alone terminate send polling.
-    if has_working_indicator(screen):
         return IdleReason.GATE
 
     # Ready prompt (❯ + TUI indicator)
@@ -123,6 +123,9 @@ def has_working_indicator(text: str) -> bool:
             if not s.startswith(char):
                 continue
             after = s[len(char):].strip()
+            lower = after.lower()
+            if "(" in after and ("· thinking" in lower or "esc to interrupt" in lower):
+                return True
             if any(after.startswith(verb) for verb in _WORKING_VERBS):
                 return True
     return False

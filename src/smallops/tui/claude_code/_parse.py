@@ -30,6 +30,20 @@ from smallops.tui.claude_code._markers import (
 
 _TOOL_USE_RE = re.compile(r"^[A-Z]\w*\(")
 _TOOL_RESULT_PREFIX = "\u23bf"  # ⎿
+_COLLAPSED_TOOL_SUMMARY_RE = re.compile(
+    r"^Thought for \S+(?:,\s+[^()]*)?\s+\(ctrl\+o to expand\)$",
+    re.IGNORECASE,
+)
+_COLLAPSED_TOOL_VERBS = (
+    ("read ", "Read"),
+    ("searched ", "Search"),
+    ("search ", "Search"),
+    ("ran ", "Bash"),
+    ("edited ", "Edit"),
+    ("updated ", "Edit"),
+    ("wrote ", "Write"),
+    ("created ", "Write"),
+)
 
 
 def _is_tool_use_header(content: str) -> bool:
@@ -41,6 +55,17 @@ def _tool_name(content: str) -> str:
     """Extract tool name from 'ToolName(args...)'."""
     paren = content.find("(")
     return content[:paren] if paren > 0 else content.split()[0] if content else ""
+
+
+def _collapsed_tool_name(content: str) -> str:
+    """Extract an approximate tool name from Claude's collapsed summary line."""
+    if not _COLLAPSED_TOOL_SUMMARY_RE.match(content):
+        return ""
+    lower = content.lower()
+    for needle, name in _COLLAPSED_TOOL_VERBS:
+        if needle in lower:
+            return name
+    return "ToolSummary"
 
 
 # ── Capture + Parse ─────────────────────────────────────────────────
@@ -83,7 +108,7 @@ def parse(captured: str) -> ParsedResponse:
         if not started:
             if any(s.startswith(p) for p in RESPONSE_PREFIXES):
                 started = True  # fall through to handle this line
-            elif s.startswith(PROMPT_PREFIX):
+            elif _collapsed_tool_name(s) or s.startswith(PROMPT_PREFIX):
                 started = True  # fall through
             else:
                 continue
@@ -107,6 +132,14 @@ def parse(captured: str) -> ParsedResponse:
             else:
                 current_kind = BlockKind.TEXT
                 current_lines = [content] if content else []
+            continue
+
+        collapsed_tool = _collapsed_tool_name(s)
+        if collapsed_tool:
+            _flush()
+            current_kind = BlockKind.TOOL_USE
+            current_tool = collapsed_tool
+            current_lines = [s]
             continue
 
         # Status lines (sTAT, status bar, token count) → STATUS block
@@ -267,6 +300,8 @@ def is_noise(line: str) -> bool:
         return True
     if s.startswith("1:") and "dismiss" in s.lower():
         return True
+    if _is_completed_timing_line(s):
+        return True
     # Working indicator lines — require spinner char + known verb
     return bool(_is_working_line(s))
 
@@ -277,7 +312,26 @@ def _is_working_line(s: str) -> bool:
         if not s.startswith(char):
             continue
         after = s[len(char):].strip()
+        lower = after.lower()
+        if "(" in after and ("· thinking" in lower or "esc to interrupt" in lower):
+            return True
         for verb in _WORKING_VERBS:
             if after.startswith(verb):
                 return True
+    return False
+
+
+def _is_completed_timing_line(s: str) -> bool:
+    """Match post-response spinner summaries like '✻ <verb> for 7s'.
+
+    Claude rotates this verb text frequently. The stable contract is the
+    spinner prefix plus a completed duration, while active spinner lines carry
+    parenthesized telemetry such as "(1s · ... · thinking)".
+    """
+    for char in SPINNER_CHARS:
+        if not s.startswith(char):
+            continue
+        after = s[len(char):].strip()
+        if "(" not in after and re.search(r"\bfor\s+\d+(?:\.\d+)?[smh]\b", after):
+            return True
     return False

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from smallops import ClaudeCodeTui, IdleReason
+from smallops import BlockKind, ClaudeCodeTui, IdleReason
 from smallops._types import Status
 from smallops._util import normalize_screen, strip_ansi
 
@@ -122,6 +122,109 @@ def test_classify_does_not_treat_visible_calculating_as_ready() -> None:
 ❯ Read the file /tmp/smallops/task-example.md
 
 * Calculating…
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on · esc to interrupt
+"""
+
+    assert tui.classify_idle(screen) == IdleReason.GATE
+
+
+@pytest.mark.offline
+def test_parse_filters_completed_timing_spinner_from_response_text() -> None:
+    tui = ClaudeCodeTui()
+    marker = "Read the file /tmp/smallops/task-example.md"
+    screen = f"""
+❯ {marker}. Execute only the task text.
+
+  Thought for 7s, read 1 file (ctrl+o to expand)
+
+● MANUAL-PONG
+
+✻ Cogitated for 7s
+
+✻ Zorblenarfed for 4s
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on
+"""
+
+    parsed = tui.parse_blocks(screen, marker)
+
+    assert parsed.text == "MANUAL-PONG"
+    assert "Cogitated" not in parsed.text
+    assert "Zorblenarfed" not in parsed.text
+
+
+@pytest.mark.offline
+def test_parse_collapsed_tool_summary_as_tool_use() -> None:
+    tui = ClaudeCodeTui()
+    marker = "Read the file /tmp/smallops/task-example.md"
+    screen = f"""
+❯ {marker}. Execute only the task text.
+
+  Thought for 7s, read 2 files (ctrl+o to expand)
+
+● MANUAL-CLAUDE-TMUX-CANARY
+
+✻ Cooked for 7s
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on
+"""
+
+    parsed = tui.parse_blocks(screen, marker)
+
+    assert parsed.text == "MANUAL-CLAUDE-TMUX-CANARY"
+    assert parsed.tool_uses
+    assert parsed.tool_uses[0].kind == BlockKind.TOOL_USE
+    assert parsed.tool_uses[0].tool == "Read"
+
+
+@pytest.mark.offline
+def test_classify_active_spinner_overrides_completed_scrollback() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+❯ Read the file /tmp/smallops/task-old.md
+
+● MANUAL-PONG
+
+✻ Cogitated for 7s
+
+❯ Read the file /tmp/smallops/nudge-active.md
+
+* Whirlpooling… (1s · ↓ 2 tokens · thinking)
+  ⎿  Tip: Use /theme to change the color theme
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on · esc to interrupt
+"""
+
+    assert tui.classify_idle(screen) == IdleReason.GATE
+
+
+@pytest.mark.offline
+def test_classify_generated_active_spinner_verb_as_working() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+❯ Read the file /tmp/smallops/task-old.md
+
+● FIXED-MANUAL-PONG
+
+✻ Cooked for 8s
+
+❯ Read the file /tmp/smallops/nudge-active.md
+
+✢ Whatchamacalliting… (1s · ↓ 1 tokens · thinking)
+  ⎿  Tip: Use Plan Mode to prepare for a complex request before making changes.
 
 ────────────────────────────────
 ❯

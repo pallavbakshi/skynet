@@ -100,4 +100,5 @@ _WORKING_VERBS = (
     "Reconnecting",
     "Exploring",
     "Calculating",
+    "Whirlpooling",
 )
