@@ -112,6 +112,24 @@ def test_parse_status_accepts_claude_code_openrouter_card() -> None:
 
 
 @pytest.mark.offline
+def test_parse_status_accepts_multiline_claude_code_card() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+╭─ Claude Code ─────────────────────────────────────╮
+│                                                   │
+│                     Sonnet 4                      │
+│                 API Usage Billing                 │
+│    /…/pytest-0/test_docker_claude_code_exact_0    │
+│                                                   │
+╰───────────────────────────────────────────────────╯
+"""
+
+    status = tui.parse_status(screen)
+
+    assert status.model == "Sonnet 4"
+
+
+@pytest.mark.offline
 def test_classify_does_not_treat_visible_calculating_as_ready() -> None:
     tui = ClaudeCodeTui()
     screen = """
@@ -158,6 +176,37 @@ def test_parse_filters_completed_timing_spinner_from_response_text() -> None:
     assert parsed.text == "MANUAL-PONG"
     assert "Cogitated" not in parsed.text
     assert "Zorblenarfed" not in parsed.text
+
+
+@pytest.mark.offline
+def test_parse_handles_wrapped_via_file_marker_from_herdr() -> None:
+    tui = ClaudeCodeTui()
+    marker = (
+        "Read the file /tmp/smallops/task-d7411bcd0907.md. "
+        "Execute only the task text between BEGIN TASK and END TASK exactly; "
+        "do not summarize or restate."
+    )
+    screen = """
+❯ Read the file /tmp/smallops/task-d7411bcd0907.md.
+  Execute only the task text between BEGIN TASK and
+  END TASK exactly; do not summarize or restate.
+
+  Thought for 8s, read 1 file (ctrl+o to expand)
+
+● DOCKER-PONG
+
+✻ Worked for 8s
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on
+"""
+
+    parsed = tui.parse_blocks(screen, marker)
+
+    assert parsed.text == "DOCKER-PONG"
+    assert "BEGIN TASK" not in parsed.text
 
 
 @pytest.mark.offline
@@ -225,6 +274,23 @@ def test_classify_generated_active_spinner_verb_as_working() -> None:
 
 ✢ Whatchamacalliting… (1s · ↓ 1 tokens · thinking)
   ⎿  Tip: Use Plan Mode to prepare for a complex request before making changes.
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on · esc to interrupt
+"""
+
+    assert tui.classify_idle(screen) == IdleReason.GATE
+
+
+@pytest.mark.offline
+def test_classify_generated_active_spinner_ellipsis_as_working() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+❯ Read the file /tmp/smallops/task-current.md
+
+* Symbioting…
 
 ────────────────────────────────
 ❯

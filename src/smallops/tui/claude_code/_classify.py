@@ -126,6 +126,8 @@ def has_working_indicator(text: str) -> bool:
             lower = after.lower()
             if "(" in after and ("· thinking" in lower or "esc to interrupt" in lower):
                 return True
+            if after.endswith(("…", "...")):
+                return True
             if any(after.startswith(verb) for verb in _WORKING_VERBS):
                 return True
     return False

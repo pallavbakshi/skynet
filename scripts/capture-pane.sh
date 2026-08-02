@@ -2,9 +2,10 @@
 # Capture a terminal pane to the smallops Claude Code parser corpus.
 #
 # Usage:
-#   ./scripts/capture-pane.sh <category> <name> [session] [--tmux|--wezterm] [--force]
+#   ./scripts/capture-pane.sh <category> <name> [session] [--tmux|--wezterm|--herdr] [--force]
 #   ./scripts/capture-pane.sh ready fresh_launch agp-claude-reviewer
 #   ./scripts/capture-pane.sh captures latest --wezterm 123
+#   ./scripts/capture-pane.sh captures latest --herdr w1:p1
 
 set -euo pipefail
 
@@ -18,6 +19,7 @@ for arg in "$@"; do
     case "$arg" in
         --tmux)    backend="tmux" ;;
         --wezterm) backend="wezterm" ;;
+        --herdr)   backend="herdr" ;;
         --force)   force="true" ;;
         *)
             if [ -z "$category" ]; then
@@ -32,7 +34,7 @@ for arg in "$@"; do
 done
 
 [ -n "$category" ] && [ -n "$name" ] || {
-    echo "Usage: capture-pane.sh <category> <name> [session] [--tmux|--wezterm] [--force]" >&2
+    echo "Usage: capture-pane.sh <category> <name> [session] [--tmux|--wezterm|--herdr] [--force]" >&2
     exit 1
 }
 
@@ -60,6 +62,31 @@ esac
 if [ -z "$session" ]; then
     if [ "$backend" = "wezterm" ]; then
         session="$(wezterm cli list --format json | python3 -c 'import json,sys; panes=json.load(sys.stdin); print(panes[0]["pane_id"] if panes else "")')"
+    elif [ "$backend" = "herdr" ]; then
+        session="$(herdr workspace list | python3 -c '
+import json
+import subprocess
+import sys
+
+payload = json.load(sys.stdin)
+for workspace in payload.get("result", {}).get("workspaces", []):
+    wid = workspace.get("workspace_id")
+    if not wid:
+        continue
+    panes = subprocess.run(
+        ["herdr", "pane", "list", "--workspace", str(wid)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if panes.returncode != 0:
+        continue
+    pane_payload = json.loads(panes.stdout or "{}")
+    pane_list = pane_payload.get("result", {}).get("panes", [])
+    if pane_list:
+        print(pane_list[0].get("pane_id", ""))
+        break
+')"
     else
         session="${SESSION:-agp-claude-reviewer}"
     fi
@@ -138,6 +165,10 @@ publish_tmux_pair() {
 if [ "$backend" = "wezterm" ]; then
     wezterm cli get-text --pane-id "$session" > "$tmpdir/${name}.txt"
     publish_file "$tmpdir/${name}.txt" "$dir/${name}.txt"
+elif [ "$backend" = "herdr" ]; then
+    herdr pane read "$session" --source visible --raw > "$tmpdir/${name}.raw"
+    herdr pane read "$session" --source visible --format text > "$tmpdir/${name}.txt"
+    publish_tmux_pair "$tmpdir/${name}.raw" "$tmpdir/${name}.txt" "$dir/${name}.raw" "$dir/${name}.txt"
 else
     tmux capture-pane -t "$session" -p -e > "$tmpdir/${name}.raw"
     tmux capture-pane -t "$session" -p    > "$tmpdir/${name}.txt"

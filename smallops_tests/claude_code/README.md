@@ -9,3 +9,15 @@ Claude Code owns its parser corpus and live canaries under this package.
 
 Mux coverage is centralized through the `smallops_mux` pytest parameter in
 `smallops_tests/conftest.py` and the mux factory in `smallops_tests/helpers/harness.py`.
+The shared mux set currently covers `tmux`, `wezterm`, and `herdr` where the
+corresponding binary/server is available.
+
+Useful focused runs:
+
+```sh
+SMALLOPS_LIVE=1 python -m pytest smallops_tests/claude_code/test_live.py -k herdr
+SMALLOPS_DOCKER_ENV_FILE=.env.openrouter \
+SMALLOPS_DOCKER_PYTEST_ARGS='smallops_tests/claude_code/test_docker.py -m docker -k herdr -q --tb=short' \
+./scripts/docker/run-smallops-tests.sh
+make capture CAT=captures NAME=claude_herdr_latest MUX=herdr SESSION=w1:p1
+```
