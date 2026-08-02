@@ -65,7 +65,7 @@ def wait_for_ready(session: Session, config: Config) -> None:
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
         if _handle_gate(session.mux, session.tui, session._session, screen):
             gate_count += 1
@@ -125,7 +125,7 @@ def poll_until_done(
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
         if _handle_gate(session.mux, session.tui, session._session, screen):
             gate_count += 1
@@ -154,12 +154,7 @@ def poll_until_done(
             raise PaneDied("agent error detected on screen")
 
         if reason == IdleReason.GATE:
-            _log.debug("unknown gate, sending Enter")
-            session.mux.send_text(session._session, "", enter=True)
-            gate_count += 1
-            if gate_count > config.max_gate_dismissals:
-                raise FatalGate("too many gate dismissals")
-            unchanged = 0
+            _log.debug("gate or active working indicator with no auto-response; continuing to poll")
             continue
 
     # Extract response using scrollback
@@ -196,7 +191,7 @@ def wait_for_idle(
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
         if _handle_gate(session.mux, session.tui, session._session, screen):
             gate_count += 1

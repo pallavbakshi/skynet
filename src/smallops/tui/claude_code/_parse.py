@@ -162,9 +162,10 @@ def parse_response(text: str, marker: str) -> str:
 # Format: sTAT | model | effort | session_id | HH:MM:SS | pct%    N tokens
 
 _STAT_RE = re.compile(r"^\s*sTAT\s*\|")
-_TOKENS_RE = re.compile(r"(\d[\d,]*)\s+tokens?", re.IGNORECASE)
+_TOKENS_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmM]?)\s+tokens?", re.IGNORECASE)
 _PCT_RE = re.compile(r"(\d+)%")
 _TIME_RE = re.compile(r"\d{2}:\d{2}:\d{2}")
+_MODEL_SUFFIX_RE = re.compile(r"\[[^\]]+\]$")
 
 
 def parse_status(screen: str) -> Status:
@@ -198,10 +199,7 @@ def parse_status(screen: str) -> Status:
             context_pct = int(pct_match.group(1))
 
         # Token count — search the entire status block, not just the sTAT line
-        tokens = 0
-        tok_match = _TOKENS_RE.search(clean_screen)
-        if tok_match:
-            tokens = int(tok_match.group(1).replace(",", ""))
+        tokens = _parse_tokens(clean_screen)
 
         return Status(
             model=model,
@@ -212,7 +210,32 @@ def parse_status(screen: str) -> Status:
             last_completed=last_completed,
         )
 
-    return Status()
+    return Status(model=_parse_card_model(clean_screen), tokens=_parse_tokens(clean_screen))
+
+
+def _parse_tokens(text: str) -> int:
+    tok_match = _TOKENS_RE.search(text)
+    if not tok_match:
+        return 0
+    value = float(tok_match.group(1).replace(",", ""))
+    suffix = tok_match.group(2).lower()
+    if suffix == "k":
+        value *= 1_000
+    elif suffix == "m":
+        value *= 1_000_000
+    return int(value)
+
+
+def _parse_card_model(text: str) -> str:
+    for line in text.splitlines():
+        if "API Usage Billing" not in line or "·" not in line:
+            continue
+        for segment in line.split("│"):
+            if "API Usage Billing" not in segment or "·" not in segment:
+                continue
+            model = segment.split("·", 1)[0].strip()
+            return _MODEL_SUFFIX_RE.sub("", model).strip()
+    return ""
 
 
 def is_status(line: str) -> bool:

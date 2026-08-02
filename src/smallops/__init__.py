@@ -98,11 +98,16 @@ class Session:
 
     # ── Screen reading ─────────���─────────────────────────────────────
 
-    def _read_screen(self, n: int | None = None) -> str:
-        """Read screen, normalize, handle gates. Returns screen text."""
+    def _read_screen(self, n: int | None = None, *, handle_gates: bool = True) -> str:
+        """Read and normalize screen text.
+
+        Public observation helpers handle ambient gates. Polling loops disable
+        that and handle gates themselves so one screen cannot be dismissed twice.
+        """
         session = self._require_session()
         screen = normalize_screen(strip_ansi(self.mux.peek(session, n)))
-        _handle_gate(self.mux, self.tui, session, screen)
+        if handle_gates:
+            _handle_gate(self.mux, self.tui, session, screen)
         return screen
 
     # ── Lifecycle ─────────���──────────────────────────────────────────

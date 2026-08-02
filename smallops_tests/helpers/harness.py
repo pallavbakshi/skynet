@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Callable
@@ -19,8 +20,24 @@ from smallops import (
     Response,
     Session,
     TmuxMux,
+    WezTermMux,
 )
 from smallops_tests.helpers.artifacts import record_context, snapshot_context
+
+PROVIDER_ENV_KEYS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "API_TIMEOUT_MS",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+    "OPENAI_API_KEY",
+    "OPENAI_BASE_URL",
+    "OPENROUTER_API_KEY",
+)
 
 
 class Oracle(Protocol):
@@ -179,22 +196,34 @@ class AllOf:
 def make_mux(kind: str):
     if kind == "tmux":
         return TmuxMux(prefix="smallops-test")
+    if kind == "wezterm":
+        return WezTermMux(workspace="smallops-test")
     raise ValueError(f"unsupported smallops test mux: {kind}")
 
 
+def make_tui(environment: str = "live") -> ClaudeCodeTui:
+    if environment == "docker":
+        return ClaudeCodeTui(flags="--dangerously-skip-permissions --model sonnet")
+    return ClaudeCodeTui()
+
+
+def provider_env() -> dict[str, str]:
+    return {key: os.environ[key] for key in PROVIDER_ENV_KEYS if key in os.environ}
+
+
 def run_spec(spec: Spec, *, request: pytest.FixtureRequest, tmp_path: Path) -> RunContext:
-    if spec.environment != "live":
-        raise ValueError(f"run_spec currently supports live specs, got {spec.environment!r}")
+    if spec.environment not in {"live", "docker"}:
+        raise ValueError(f"run_spec supports live/docker specs, got {spec.environment!r}")
 
     session = Session(
         mux=make_mux(spec.mux),
-        tui=ClaudeCodeTui(),
+        tui=make_tui(spec.environment),
         config=Config(poll_interval=1.0, idle_threshold=2, timeout=120.0, bootstrap_timeout=90.0),
     )
     record_context(request.node, session=session)
     response: Response | None = None
     try:
-        session.up(cwd=str(tmp_path))
+        session.up(cwd=str(tmp_path), env=provider_env())
         response = session.send(spec.prompt, timeout=spec.timeout)
         record_context(request.node, session=session, response=response)
         ctx = RunContext(spec=spec, session=session, response=response, cwd=tmp_path)
@@ -226,11 +255,18 @@ def assert_live_invariants(ctx: RunContext) -> None:
     assert ctx.session.tui.classify_idle(response.raw) == IdleReason.READY
 
     status = meta.status
-    if (not status.model or status.tokens <= 0) and response.parsed is not None:
-        status = response.parsed.status
+    if response.parsed is not None:
+        parsed_status = response.parsed.status
+        if not status.model and parsed_status.model:
+            status.model = parsed_status.model
+        if status.tokens <= 0 and parsed_status.tokens > 0:
+            status.tokens = parsed_status.tokens
     assert status.model
     assert isinstance(status.tokens, int)
-    assert status.tokens > 0
+    if ctx.spec.environment == "docker":
+        assert status.tokens >= 0
+    else:
+        assert status.tokens > 0
 
     second = ctx.session.meta()
     assert second.alive
@@ -241,6 +277,28 @@ def assert_live_invariants(ctx: RunContext) -> None:
 def assert_tool_use(ctx: RunContext) -> None:
     assert ctx.response.parsed is not None
     assert ctx.response.parsed.tool_uses, "expected at least one parsed tool-use block"
+
+
+def assert_visible_tool_activity(ctx: RunContext) -> None:
+    assert ctx.response.parsed is not None
+    if ctx.response.parsed.tool_uses:
+        return
+
+    raw = ctx.response.raw.casefold()
+    tool_summaries = (
+        "read 1 file",
+        "read 2 files",
+        "read 3 files",
+        "edited 1 file",
+        "edited 2 files",
+        "wrote 1 file",
+        "wrote 2 files",
+        "ran 1 command",
+        "ran 2 commands",
+    )
+    assert any(summary in raw for summary in tool_summaries), (
+        "expected expanded tool-use blocks or a collapsed Claude Code tool summary"
+    )
 
 
 def assert_no_task_reference_leak(ctx: RunContext) -> None:

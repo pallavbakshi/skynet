@@ -15,11 +15,12 @@ from smallops_tests.helpers.harness import (
     Spec,
     assert_tool_use,
     make_mux,
+    provider_env,
     run_spec,
 )
 
 
-@pytest.fixture(params=["tmux"])
+@pytest.fixture(params=["tmux", "wezterm"])
 def smallops_mux(request: pytest.FixtureRequest) -> str:
     return request.param
 
@@ -56,7 +57,7 @@ def test_live_nudge_then_wait(request: pytest.FixtureRequest, tmp_path: Path, sm
     )
     record_context(request.node, session=session)
     try:
-        session.up(cwd=str(tmp_path))
+        session.up(cwd=str(tmp_path), env=provider_env())
         session.nudge("Reply with exactly: NUDGE77")
         reason = session.wait(timeout=120.0)
         assert reason == IdleReason.READY

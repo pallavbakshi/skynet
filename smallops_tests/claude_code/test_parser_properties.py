@@ -90,3 +90,43 @@ def test_category_level_parser_properties(case: CaptureCase) -> None:
         assert reason in IdleReason
     else:
         raise AssertionError(f"unexpected corpus category: {case.category}")
+
+
+@pytest.mark.offline
+def test_parse_status_accepts_claude_code_openrouter_card() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+╭─── Claude Code v2.1.170 ───╮
+│ x-ai/grok-4.20[1m] · API Usage Billing │
+╰────────────────────────────╯
+
+● Agent(Execute the exact task from the file)
+  ⎿  Done (0 tool uses · 9.5k tokens · 1s)
+❯
+"""
+
+    status = tui.parse_status(screen)
+
+    assert status.model == "x-ai/grok-4.20"
+    assert status.tokens == 9500
+
+
+@pytest.mark.offline
+def test_classify_does_not_treat_visible_calculating_as_ready() -> None:
+    tui = ClaudeCodeTui()
+    screen = """
+╭─── Claude Code v2.1.170 ───╮
+│ Sonnet 4 · API Usage Billing │
+╰────────────────────────────╯
+
+❯ Read the file /tmp/smallops/task-example.md
+
+* Calculating…
+
+────────────────────────────────
+❯
+────────────────────────────────
+  ⏵⏵ bypass permissions on · esc to interrupt
+"""
+
+    assert tui.classify_idle(screen) == IdleReason.GATE

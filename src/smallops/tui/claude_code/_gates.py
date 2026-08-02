@@ -45,18 +45,20 @@ FATAL_GATE_PATTERNS = (
 )
 
 # Map from pattern → key to send (empty string = Enter)
+_DOWN = "\x1b[B"
 GATE_CHOICES: dict[str, str] = {
     "choose the text style": "", "syntax highlighting": "",
     "login successful": "", "security notes": "",
     "press enter to continue": "",
     "how is claude doing": "0",       # dismiss survey
-    # Bypass permissions: "2" = "Yes, I accept"
-    "bypass permissions mode": "2", "accept all responsibility": "2",
-    "running in bypass permissions mode": "2",
-    # Trust dialog: "1" = trust
-    "yes, i trust this folder": "1", "i trust this folder": "1",
-    "i trust this project": "1", "trust the contents": "1",
-    "quick safety check": "1",
+    # Claude Code 2.1.170 uses an interactive select where "No" is focused.
+    # Move to "Yes, I accept" before pressing Enter.
+    "bypass permissions mode": _DOWN, "accept all responsibility": _DOWN,
+    "running in bypass permissions mode": _DOWN,
+    # Trust dialog defaults to "Yes"; Enter confirms it.
+    "yes, i trust this folder": "", "i trust this folder": "",
+    "i trust this project": "", "trust the contents": "",
+    "quick safety check": "",
     # Tool permissions: "y" = allow
     "allow tool": "y", "allow bash": "y", "allow read": "y",
     "allow edit": "y", "allow write": "y", "allow fetch": "y",

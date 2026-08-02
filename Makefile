@@ -628,11 +628,7 @@ test-live: ## Run smallops live tests (requires Claude Code)
 	SMALLOPS_LIVE=1 $(RUN) python -m pytest smallops_tests/ -m live
 
 test-docker: ## Run smallops Docker first-run tests
-	# TODO: Replace this guard with `SMALLOPS_DOCKER=1 $(RUN) python -m pytest smallops_tests/ -m docker`
-	# once Phase C first-run canaries exist.
-	@echo "Phase C Docker first-run canaries are not implemented yet." >&2
-	@echo "Add real tests under smallops_tests/ and replace this guard." >&2
-	@exit 1
+	@./scripts/docker/run-smallops-tests.sh
 
 lint: ## Run linter
 	$(RUN) python -m ruff check src/ tests/ smallops_tests/ scripts/inspect-smallops-corpus.py scripts/check-smallops-boundary.py

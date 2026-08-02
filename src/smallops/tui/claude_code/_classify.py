@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from smallops._types import IdleReason
 from smallops.tui.claude_code._markers import (
+    _WORKING_VERBS,
     PROMPT_PREFIX,
     RESPONSE_PREFIXES,
     SEPARATOR_RE,
+    SPINNER_CHARS,
     STATUS_BAR_RE,
     STATUS_LINE_RE,
 )
@@ -37,6 +39,12 @@ def classify_idle(screen: str) -> IdleReason:
 
     # Auto-dismissable gates
     if any(pat in lower for pat in AUTO_GATE_PATTERNS):
+        return IdleReason.GATE
+
+    # Claude Code can briefly render a prompt while a previous turn is still
+    # active, e.g. "* Calculating..." plus "esc to interrupt". Do not let the
+    # visible prompt alone terminate send polling.
+    if has_working_indicator(screen):
         return IdleReason.GATE
 
     # Ready prompt (❯ + TUI indicator)
@@ -105,6 +113,18 @@ def has_tui_indicator(text: str) -> bool:
             return True
         if any(s.startswith(c) for c in ("\u256d", "\u2570")):
             return True
+    return False
+
+
+def has_working_indicator(text: str) -> bool:
+    for line in text.splitlines():
+        s = line.strip()
+        for char in SPINNER_CHARS:
+            if not s.startswith(char):
+                continue
+            after = s[len(char):].strip()
+            if any(after.startswith(verb) for verb in _WORKING_VERBS):
+                return True
     return False
 
 
