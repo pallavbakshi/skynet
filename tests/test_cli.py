@@ -459,7 +459,7 @@ class ReplyCommandTest(unittest.TestCase):
         result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget", "--output-contract", "{"])
 
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("invalid JSON for --output-contract", result.output)
+        self.assertIn("invalid JSON for --output-contract", _plain_cli_output(result.output))
         mock_make.assert_not_called()
 
     @patch("agp.cli._helpers._make_client")
