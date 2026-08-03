@@ -296,7 +296,7 @@ def adapter_bootstrap(
     workspace: str | None = None,
 ) -> None:
     """Create or reuse a session and bootstrap the adapter into it."""
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.plugins import build_agent_adapter, build_terminal_host
     ws = _resolve_workspace(workspace)
     host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))
     adapter = build_agent_adapter(adapter_kind)
@@ -344,7 +344,7 @@ def adapter_run_once(
     workspace: str | None = None,
 ) -> None:
     """Run one standalone task through a host and adapter."""
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.plugins import build_agent_adapter, build_terminal_host
     from agp.runtime import StandalonePluginRunner
     ws = _resolve_workspace(workspace)
     runner = StandalonePluginRunner(
@@ -374,7 +374,7 @@ def plugin_run(
     workspace: str | None = None,
 ) -> None:
     """Run one standalone task through the shared plugin interfaces."""
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.plugins import build_agent_adapter, build_terminal_host
     from agp.runtime import StandalonePluginRunner
     ws = _resolve_workspace(workspace)
     runner = StandalonePluginRunner(
@@ -400,7 +400,7 @@ def plugin_repl(
     workspace: str | None = None,
 ) -> None:
     """Create or reuse a session, bootstrap it, and stream tasks from stdin until exit."""
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.plugins import build_agent_adapter, build_terminal_host
     from agp.runtime import StandalonePluginRunner
     ws = _resolve_workspace(workspace)
     host = build_terminal_host(host_kind, **_host_kwargs(host_kind, workspace=ws))

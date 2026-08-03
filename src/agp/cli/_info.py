@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import typer
 
 from agp.cli import app
 from agp.cli._helpers import (
-    _cli_client, _format_duration, _format_http_error,
-    _heartbeat_age_seconds, _SEPARATOR,
+    _SEPARATOR,
+    _cli_client,
+    _format_duration,
+    _format_http_error,
+    _heartbeat_age_seconds,
 )
 
 
@@ -59,12 +62,11 @@ def info(
 
     Use --diagnose to include runtime logs and registration details.
     """
-    from datetime import datetime, timezone
     import httpx as _httpx
 
     with _cli_client(server_url) as client:
         # Runtime detection: if target starts with "rtm_" or "rtm-", try runtime first
-        if target.startswith("rtm_") or target.startswith("rtm-"):
+        if target.startswith(("rtm_", "rtm-")):
             _info_runtime(target, client, output_json=output_json, diagnose=diagnose)
             return
 
@@ -89,7 +91,6 @@ def info(
 
 
 def _info_agent(agent: dict, client) -> None:
-    from datetime import datetime, timezone
 
     agent_id = agent["agent_id"]
 
@@ -101,7 +102,7 @@ def _info_agent(agent: dict, client) -> None:
     typer.echo(f"CAPABILITIES: {', '.join(agent.get('capabilities', [])) or '-'}")
 
     # Heartbeat
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     hb_age = _heartbeat_age_seconds(agent.get("last_heartbeat_at"))
     if hb_age is not None:
         typer.echo(f"HEARTBEAT:    {hb_age:.0f}s ago")
@@ -227,11 +228,11 @@ def _info_agent_diagnose(agent: dict, client) -> None:
     except Exception:
         pass
 
-    typer.echo(f"\n--- DIAGNOSTICS ---")
+    typer.echo("\n--- DIAGNOSTICS ---")
     typer.echo(f"REGISTERED:   {agent.get('created_at', '?')}")
 
     if rt:
-        typer.echo(f"\nRuntime Binding:")
+        typer.echo("\nRuntime Binding:")
         typer.echo(f"  runtime_id: {rt.get('runtime_id', '?')}")
         typer.echo(f"  status:     {rt.get('status', '?')}")
         typer.echo(f"  host:       {rt.get('hostname', '?')}")
@@ -266,7 +267,7 @@ def _info_agent_diagnose(agent: dict, client) -> None:
             for j in jobs:
                 typer.echo(f"  {j.get('job_id', '?')}  status={j.get('status', '?')}  created={j.get('created_at', '?')}")
         else:
-            typer.echo(f"\nJob History: none")
+            typer.echo("\nJob History: none")
     except Exception:
         pass
 
@@ -336,12 +337,12 @@ def _info_runtime(runtime_id: str, client, *, output_json: bool = False, diagnos
     typer.echo(f"  registered: {rt.get('created_at', '?')}")
 
     if payload["agents"]:
-        typer.echo(f"\n  Bound Agents:")
+        typer.echo("\n  Bound Agents:")
         for a in payload["agents"]:
             caps = ", ".join(a.get("capabilities", []))
             typer.echo(f"    {a['agent_id']}  status={a['status']}  caps=[{caps}]")
     else:
-        typer.echo(f"\n  Bound Agents: none")
+        typer.echo("\n  Bound Agents: none")
 
     if diagnose:
         logs = payload.get("recent_logs", [])

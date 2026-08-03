@@ -19,7 +19,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
-from agp.models import Job, QueueDeliveryRecord, utc_now
+from agp.models import Job
+from agp.models import QueueDeliveryRecord as QueueDeliveryRecord
+from agp.models import utc_now as utc_now
 
 
 def _new_delivery_id() -> str:
@@ -183,7 +185,7 @@ def get_queue_backend(name: str = "db") -> QueueBackend:
     from agp.queue_backend._db import DbQueueBackend
     from agp.queue_backend._delivery_table import DeliveryTableQueueBackend
     from agp.queue_backend._inmemory import _INMEMORY_BROKER
-    from agp.queue_backend._redis import RedisQueueBackend, _REDIS_BACKENDS
+    from agp.queue_backend._redis import _REDIS_BACKENDS, RedisQueueBackend
 
     if name == "db":
         return DbQueueBackend()
@@ -201,7 +203,13 @@ def get_queue_backend(name: str = "db") -> QueueBackend:
     raise ValueError(f"unsupported queue backend: {name}")
 
 # Re-export backend classes for external consumers
-from agp.queue_backend._db import DbQueueBackend as DbQueueBackend  # noqa: F401,E402
-from agp.queue_backend._delivery_table import DeliveryTableQueueBackend as DeliveryTableQueueBackend  # noqa: F401,E402
-from agp.queue_backend._inmemory import InMemoryBrokerQueueBackend as InMemoryBrokerQueueBackend  # noqa: F401,E402
-from agp.queue_backend._redis import RedisQueueBackend as RedisQueueBackend  # noqa: F401,E402
+from agp.queue_backend._db import DbQueueBackend as DbQueueBackend
+from agp.queue_backend._delivery_table import (
+    DeliveryTableQueueBackend as DeliveryTableQueueBackend,
+)
+from agp.queue_backend._inmemory import (
+    InMemoryBrokerQueueBackend as InMemoryBrokerQueueBackend,
+)
+from agp.queue_backend._redis import (
+    RedisQueueBackend as RedisQueueBackend,
+)

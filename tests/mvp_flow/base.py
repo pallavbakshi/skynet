@@ -1,55 +1,26 @@
 """Shared test base for MVP flow regression coverage."""
+# ruff: noqa: F401, F811
 
 from __future__ import annotations
 
+import json
+import shutil
 import unittest
-
+from datetime import timedelta
+from pathlib import Path
+from tempfile import mkdtemp
+from threading import Thread
+from time import sleep
 from unittest.mock import patch
 
-from datetime import timedelta
-
-from pathlib import Path
-
-from threading import Thread
-
-from time import sleep
-
-from tempfile import mkdtemp
-
-import shutil
-
-import typer
-
-import json
-
 import httpx
-
+import typer
+from fastapi.testclient import TestClient
+from sqlalchemy import delete, func, select
 from typer.testing import CliRunner
 
-from fastapi.testclient import TestClient
-
-from sqlalchemy import delete, func, select
-
-from agp.config import Settings, settings
-
 import agp.control_plane as control_plane_module
-
-from agp.artifact_store import S3ArtifactStore, reset_artifact_store_state
-
-from agp.control_plane import build_app
-
-from agp.db import Base, SessionLocal, engine, init_db
-
-from agp.models import Agent, Capability, Event, Job, Lease, Message, QueueDeliveryRecord, Run, Runtime, utc_now
-
-from agp.enums import HealthStatus, RuntimeStatus
-
-from agp.cli import app
-
-from agp.client import AgpClient
-
-from skyops.cli import app as skyops_app
-
+import agp.queue_backend as queue_backend_module
 from agp._ops_helpers import (
     create_backup_snapshot,
     get_upgrade_status,
@@ -57,12 +28,41 @@ from agp._ops_helpers import (
     prune_observability_logs,
     reconstruct_queue_from_state,
     restore_and_recover_snapshot,
+    restore_backup_snapshot,
     rollback_to_previous_version,
     run_failure_injection_scenario,
-    restore_backup_snapshot,
     validate_restored_state,
 )
-
+from agp.artifact_store import S3ArtifactStore, reset_artifact_store_state
+from agp.cli import app
+from agp.client import AgpClient
+from agp.config import Settings, settings
+from agp.control_plane import (
+    _block_job,
+    _require_job,
+    _unblock_job,
+    build_app,
+    refresh_active_leases,
+    sweep_draining_runtimes,
+    sweep_expired_leases,
+    sweep_stale_agents,
+    sweep_stale_runtimes,
+)
+from agp.db import Base, SessionLocal, engine, init_db
+from agp.enums import HealthStatus, RuntimeStatus
+from agp.models import (
+    Agent,
+    Capability,
+    Event,
+    Job,
+    Lease,
+    Message,
+    QueueDeliveryRecord,
+    Run,
+    Runtime,
+    utc_now,
+)
+from agp.queue_backend import get_queue_backend, reset_queue_backend_state
 from agp.runtime import (
     ClaudeCodeAdapter,
     CodexAdapter,
@@ -74,29 +74,14 @@ from agp.runtime import (
     RuntimeClient,
     RuntimeIdentity,
     RuntimeSupervisor,
-    _OutputAccumulator,
     _compute_output_delta,
+    _OutputAccumulator,
     _strip_ansi,
     build_agent_adapter,
     build_terminal_host,
 )
-
-from agp.control_plane import (
-    sweep_draining_runtimes,
-    sweep_expired_leases,
-    sweep_stale_agents,
-    sweep_stale_runtimes,
-    refresh_active_leases,
-)
-
-from agp.control_plane import _block_job, _require_job, _unblock_job
-
-from agp.queue_backend import get_queue_backend, reset_queue_backend_state
-
-import agp.queue_backend as queue_backend_module
-
 from agp.sweeper import SweeperService
-
+from skyops.cli import app as skyops_app
 from tests._base import FakeRedisClient
 
 
@@ -189,7 +174,6 @@ class MvpFlowTestBase(unittest.TestCase):
         shutil.rmtree(self._tmp_root, ignore_errors=True)
 
     def _cli_invoke(self, args: list[str]):
-        from unittest.mock import patch
         from agp.cli import app as cli_app
 
         def _mock_setup(mock):
@@ -198,7 +182,7 @@ class MvpFlowTestBase(unittest.TestCase):
 
         with patch("agp.cli._helpers._make_client") as m1, \
              patch("agp.cli._lifecycle._make_client") as m2, \
-             patch("agp.cli._status._make_client", new=m1) as m3:
+             patch("agp.cli._status._make_client", new=m1):
             _mock_setup(m1)
             _mock_setup(m2)
             return self.cli_runner.invoke(cli_app, args)

@@ -8,11 +8,23 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from agp.api.helpers import _cursor_field, _decode_cursor, _encode_cursor, _ok, _page, _serialize
+from agp.api.helpers import (
+    _cursor_field,
+    _decode_cursor,
+    _encode_cursor,
+    _ok,
+    _page,
+    _serialize,
+)
 from agp.db import get_db
 from agp.enums import LeaseStatus
 from agp.models import Agent, Job, Lease, Run, Runtime
-from agp.schemas import OkResponse, PeekResultRequest, RuntimeRegisterRequest, RuntimeResponse
+from agp.schemas import (
+    OkResponse,
+    PeekResultRequest,
+    RuntimeRegisterRequest,
+    RuntimeResponse,
+)
 from agp.services._helpers import _require_runtime
 from agp.services.runtimes import register_runtime_service
 

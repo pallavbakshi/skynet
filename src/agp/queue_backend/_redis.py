@@ -3,22 +3,22 @@
 from __future__ import annotations
 
 import json
-import time
-from datetime import UTC, datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from agp.enums import JobStatus
 from agp.models import Job, QueueDeliveryRecord, utc_now
-from agp.queue_backend import QueueDelivery, _new_delivery_id, _peek_queued_jobs, db_dialect_name
-
+from agp.queue_backend import (
+    QueueDelivery,
+    _new_delivery_id,
+    _peek_queued_jobs,
+)
 
 _REDIS_CLIENT_FACTORY = None
 
 
 def _load_redis_client(url: str):
-    global _REDIS_CLIENT_FACTORY
     if _REDIS_CLIENT_FACTORY is not None:
         return _REDIS_CLIENT_FACTORY(url)
     try:
@@ -179,7 +179,7 @@ class RedisQueueBackend:
     def peek_queue(self, db: Session, *, target_queues: list[str]) -> int:
         return _peek_queued_jobs(db, target_queues=target_queues)
 
-    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:  # noqa: ARG002
+    def ack_claim(self, db: Session, *, delivery: QueueDelivery, job: Job) -> None:
         record = db.get(QueueDeliveryRecord, delivery.delivery_id)
         if record is not None:
             record.state = "acked"
@@ -343,7 +343,7 @@ class RedisQueueBackend:
 
         return {"redriven_deliveries": redriven, "dead_lettered_deliveries": dead_lettered}
 
-    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:  # noqa: ARG002
+    def remove_jobs(self, db: Session, *, target_queue: str, job_ids: list[str]) -> None:
         if not job_ids:
             return
         job_id_set = set(job_ids)

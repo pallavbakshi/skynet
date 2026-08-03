@@ -3,20 +3,23 @@
 from __future__ import annotations
 
 import json
-import os
-import time
 import uuid
-from pathlib import Path
+from datetime import UTC
 
 import typer
 
 from agp.cli import app
 from agp.cli._helpers import (
-    _cli_client, _cli_idempotency_key, _extract_trailing_json_payload,
-    _format_http_error, _heartbeat_age_seconds, _make_client, _parse_attachment_option,
-    _peek_tip, _poll_until_done, _print_banner, _print_job_result,
-    _print_peek_tip, _repair_json_string, _strip_tui_action_traces,
-    _REVIEW_OUTPUT_CONTRACT, _SEPARATOR,
+    _REVIEW_OUTPUT_CONTRACT,
+    _cli_client,
+    _extract_trailing_json_payload,
+    _format_http_error,
+    _heartbeat_age_seconds,
+    _poll_until_done,
+    _print_banner,
+    _print_job_result,
+    _print_peek_tip,
+    _strip_tui_action_traces,
 )
 
 
@@ -52,7 +55,7 @@ def _build_review_state(
     last_verdict: str | None = None,
     review_attempt_id: str | None = None,
 ) -> dict:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     return {
         "review_session_id": review_session_id,
@@ -66,7 +69,7 @@ def _build_review_state(
         "active_job_id": active_job_id,
         "last_verdict": last_verdict,
         "review_attempt_id": review_attempt_id or review_session_id,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -241,8 +244,6 @@ def review_cmd(
 
     Use --resume <job_id> to resume a previously detached review session.
     """
-    import json
-    import time
     import httpx as _httpx
 
     def _print_review_detached(state: dict) -> None:
@@ -344,8 +345,8 @@ def review_cmd(
                     typer.echo(f"[review] Active job {active_job_id} still running, re-polling...")
                     active_job, timed_out = _poll_until_done(client, active_job_id, timeout_per_round)
                     if timed_out:
-                        from datetime import datetime, timezone
-                        _save_review_state(client, {**state, "updated_at": datetime.now(timezone.utc).isoformat()})
+                        from datetime import datetime
+                        _save_review_state(client, {**state, "updated_at": datetime.now(UTC).isoformat()})
                         _print_review_detached(state)
                         return
                     active_status = active_job.get("status", "")
@@ -751,7 +752,7 @@ def review_diagnose_cmd(
 
         rt_info = diagnosis.get("reviewer_runtime", {})
         if rt_info:
-            typer.echo(f"\n  Reviewer Runtime:")
+            typer.echo("\n  Reviewer Runtime:")
             typer.echo(f"    agent_status:   {rt_info.get('agent_status', '?')}")
             hb = rt_info.get("heartbeat_age")
             typer.echo(f"    heartbeat:      {f'{hb:.0f}s ago' if hb is not None else 'never'}")

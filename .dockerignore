@@ -10,3 +10,4 @@ agp.db
 .agp-artifacts
 .agp-logs
 tests
+test-artifacts

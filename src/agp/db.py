@@ -2,11 +2,11 @@
 
 import os
 import sqlite3
-from datetime import datetime
-from pathlib import Path
-
 from collections.abc import Generator
-from importlib.metadata import PackageNotFoundError, version as package_version
+from datetime import datetime
+from importlib.metadata import PackageNotFoundError
+from importlib.metadata import version as package_version
+from pathlib import Path
 
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
@@ -29,7 +29,7 @@ engine = create_engine(settings.database_url, **engine_kwargs)
 
 if settings.database_url.startswith("sqlite"):
     @event.listens_for(engine, "connect")
-    def _set_sqlite_pragmas(dbapi_connection, connection_record):  # type: ignore[no-redef]  # noqa: ARG001
+    def _set_sqlite_pragmas(dbapi_connection, connection_record):  # type: ignore[no-redef]
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA journal_mode=WAL;")
         cursor.execute("PRAGMA busy_timeout=30000;")

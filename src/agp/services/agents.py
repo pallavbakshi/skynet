@@ -5,7 +5,14 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+from agp.enums import (
+    AgentStatus,
+    HealthStatus,
+    JobStatus,
+    LeaseStatus,
+    RunStatus,
+    RuntimeStatus,
+)
 from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.services._helpers import _new_id, _queue_backend, _require_agent
 from agp.services.events import _create_event

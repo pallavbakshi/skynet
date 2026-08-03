@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 from urllib.parse import quote, unquote
 from uuid import uuid4
-from typing import Protocol
 
 
 def _sanitize_name(name: str) -> str:
@@ -452,7 +452,7 @@ class HttpProxyArtifactStore:
         role: str,
         content_type: str = "text/plain",
     ) -> StoredArtifact:
-        checksum, size_bytes = _checksum_text(content)
+        _checksum, _size_bytes = _checksum_text(content)
         response = self._client.post(
             "/artifacts/upload",
             json={

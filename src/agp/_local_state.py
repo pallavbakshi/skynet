@@ -8,7 +8,6 @@ import subprocess
 import time
 from pathlib import Path
 
-
 DEFAULT_CONTROL_PLANE_PID_FILE = Path(".skyops-pids/control-plane.pid")
 
 

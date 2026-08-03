@@ -8,14 +8,13 @@ from datetime import timedelta
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from agp.config import settings
 from agp.artifact_store import get_artifact_store
+from agp.config import settings
 from agp.control_plane import build_app, sweep_expired_leases
 from agp.db import SessionLocal
 from agp.enums import JobStatus
 from agp.models import Artifact, Job, Lease, QueueDeliveryRecord, Run, utc_now
 from agp.queue_backend import get_queue_backend
-
 
 _SCENARIOS = {
     "lease_expiry_requeue",

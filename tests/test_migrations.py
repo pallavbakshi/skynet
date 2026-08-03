@@ -4,27 +4,30 @@ from __future__ import annotations
 
 import os
 import unittest
-from unittest.mock import Mock
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from agp.cli import app as agp_app
 from agp.config import settings
 from agp.control_plane import build_app
-from agp.db import Base, SessionLocal, engine, ensure_sqlite_runtime_database_available, init_db
+from agp.db import (
+    SessionLocal,
+    engine,
+    ensure_sqlite_runtime_database_available,
+    init_db,
+)
 from agp.migrations import (
-    apply_migrations,
-    schema_status,
-    require_initialized_schema,
     _current_schema_version,
     _discover_migrations,
     _resolve_migrations_dir,
+    apply_migrations,
+    require_initialized_schema,
+    schema_status,
 )
 from tests._base import _reset_sqlite_database
-
 
 _ORIGINAL_DATABASE_URL = settings.database_url
 runner = CliRunner()
@@ -102,8 +105,9 @@ class CheckConstraintEnforcementTest(unittest.TestCase):
         settings.database_url = _ORIGINAL_DATABASE_URL
 
     def test_invalid_job_status_rejected(self) -> None:
-        from agp.models import Job, Message, Capability, utc_now
         from sqlalchemy.exc import IntegrityError
+
+        from agp.models import Capability, Job, Message, utc_now
         session = SessionLocal()
         try:
             session.add(Capability(capability_id="cap_t", name="t", version="v1", image_ref="", model_ref="", resource_tier="small", permission_profile="default", queue_mode="agent", created_at=utc_now(), updated_at=utc_now()))
@@ -117,8 +121,9 @@ class CheckConstraintEnforcementTest(unittest.TestCase):
             session.close()
 
     def test_invalid_runtime_status_rejected(self) -> None:
-        from agp.models import Runtime, utc_now
         from sqlalchemy.exc import IntegrityError
+
+        from agp.models import Runtime, utc_now
         session = SessionLocal()
         try:
             session.add(Runtime(runtime_id="rtm_bad", hostname="h", status="BOGUS", health_status="healthy", last_seen_at=utc_now(), created_at=utc_now(), updated_at=utc_now()))
@@ -129,8 +134,9 @@ class CheckConstraintEnforcementTest(unittest.TestCase):
             session.close()
 
     def test_invalid_lease_status_rejected(self) -> None:
-        from agp.models import Lease, utc_now
         from sqlalchemy.exc import IntegrityError
+
+        from agp.models import Lease, utc_now
         session = SessionLocal()
         try:
             session.add(Lease(lease_id="l_bad", run_id="r", agent_id="a", runtime_id="rt", fencing_token=1, status="NOPE", expires_at=utc_now(), created_at=utc_now()))

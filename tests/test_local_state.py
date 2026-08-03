@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import unittest
 import os
 import subprocess
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -45,15 +45,7 @@ class LocalControlPlaneGuardTest(unittest.TestCase):
             agp_log = root / "agp-invocation.txt"
 
             (bin_dir / "python").write_text(
-                "\n".join(
-                    [
-                        "#!/bin/sh",
-                        "cat >&2 <<'EOF'",
-                        "RuntimeError: local control plane is still running (pid 12345); stop it with `make local-down` or `make stop-cp` before resetting local state",
-                        "EOF",
-                        "exit 1",
-                    ]
-                )
+                "#!/bin/sh\ncat >&2 <<'EOF'\nRuntimeError: local control plane is still running (pid 12345); stop it with `make local-down` or `make stop-cp` before resetting local state\nEOF\nexit 1"
                 + "\n",
                 encoding="utf-8",
             )

@@ -5,7 +5,6 @@ agent deletion (M8b), 1:1 runtime uniqueness (M8c), force-delete auth guard
 (M6/M8), draining deadlock resolution (M1), and orphaned job cleanup (M12).
 """
 
-from datetime import timedelta
 from tests.mvp_flow.base import *
 
 
@@ -44,7 +43,7 @@ class TestAuditHistoryPreservation(MvpFlowTestBase):
             "target": {"type": "agent", "id": "agt_audit"},
             "message": {"text": "audit test"},
         })
-        job_id = sent.json()["data"]["job_id"]
+        sent.json()["data"]["job_id"]
         claim = self.client.post("/runs/claim", json={
             "runtime_id": "rtm_audit", "agent_id": "agt_audit", "lease_ttl_seconds": 30,
         })

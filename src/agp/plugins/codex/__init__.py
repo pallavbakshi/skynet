@@ -7,6 +7,6 @@ lives in adapter.py.
 
 from __future__ import annotations
 
-from agp.plugins.codex.adapter import CodexAdapter  # noqa: F401
+from agp.plugins.codex.adapter import CodexAdapter
 
 __all__ = ["CodexAdapter"]

@@ -71,6 +71,7 @@ class TmuxMux:
             args.extend(["-c", cwd])
         self._run(args)
         self._run(["set-option", "-t", sid, "history-limit", str(self._scrollback)])
+        self._run(["set-window-option", "-t", sid, "remain-on-exit", "on"])
         sleep(0.3)  # let tmux fully register the pane
         return SessionInfo(id=sid, name=name, cwd=cwd)
 
@@ -78,10 +79,18 @@ class TmuxMux:
         self._run(["kill-session", "-t", session.id], allow_failure=True)
 
     def session_exists(self, session: SessionInfo) -> bool:
-        return self._session_exists_raw(session.id)
+        if not self._session_exists_raw(session.id):
+            return False
+        dead = self._run(
+            ["display-message", "-t", session.id, "-p", "#{pane_dead}"],
+            allow_failure=True,
+        ).strip()
+        return dead != "1"
 
     def send_text(self, session: SessionInfo, text: str, *, enter: bool = True) -> None:
-        if text:
+        if text == "\x1b[B":
+            self._run(["send-keys", "-t", session.id, "Down"])
+        elif text:
             self._run(["send-keys", "-t", session.id, "-l", text])
         if enter:
             if text:

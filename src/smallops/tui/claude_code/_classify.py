@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from smallops._types import IdleReason
 from smallops.tui.claude_code._markers import (
+    _WORKING_VERBS,
     PROMPT_PREFIX,
     RESPONSE_PREFIXES,
     SEPARATOR_RE,
+    SPINNER_CHARS,
     STATUS_BAR_RE,
     STATUS_LINE_RE,
 )
@@ -23,6 +25,12 @@ def classify_idle(screen: str) -> IdleReason:
         AUTO_GATE_PATTERNS,
         FATAL_GATE_PATTERNS,
     )
+
+    # Claude Code can briefly render a prompt while a previous turn is still
+    # active, e.g. "* Calculating..." plus "esc to interrupt". Do not let the
+    # visible prompt or older completed scrollback terminate send polling.
+    if has_working_indicator(screen):
+        return IdleReason.GATE
 
     # If the screen shows a completed turn (prompt → response → prompt),
     # gate-like text in the response body is NOT a real gate.
@@ -108,6 +116,21 @@ def has_tui_indicator(text: str) -> bool:
     return False
 
 
+def has_working_indicator(text: str) -> bool:
+    for line in text.splitlines():
+        s = line.strip()
+        for char in SPINNER_CHARS:
+            if not s.startswith(char):
+                continue
+            after = s[len(char):].strip()
+            lower = after.lower()
+            if "(" in after and ("· thinking" in lower or "esc to interrupt" in lower):
+                return True
+            if any(after.startswith(verb) for verb in _WORKING_VERBS):
+                return True
+    return False
+
+
 def is_shell_returned(text: str) -> bool:
     """Check if the TUI exited and shell prompt is visible."""
     lines = text.strip().splitlines()
@@ -128,7 +151,7 @@ def is_shell_returned(text: str) -> bool:
             return False
 
     last = tail[-1]
-    if last.endswith("$") or last.endswith("%") or last.endswith("#"):
+    if last.endswith(("$", "%", "#")):
         return True
     if last == PROMPT_PREFIX or last == PROMPT_PREFIX + " ":
         has_tui = any(SEPARATOR_RE.match(ln) or STATUS_BAR_RE.match(ln) for ln in tail)

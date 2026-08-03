@@ -1,0 +1,21 @@
+WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp" (codex_home: AbsolutePathBuf("/tmp/smallops-home/.codex"))
+╭──────────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.146.0)                               │
+│                                                          │
+│ model:       openai/gpt-5.6-luna-pro low   /model to ch… │
+│ directory:   /tmp/…/test_docker_codex_session_api_0      │
+│ permissions: YOLO mode                                   │
+╰──────────────────────────────────────────────────────────╯
+
+  Tip: New Build faster with Codex.
+
+
+› SMALLOPS-CODEX-TASK-afa87bbce6a9 Output one line containing exactly CODEX-API-SEND-ONE. Do not create memories, schedules, files, todos, or tool calls. Do not explain.
+
+
+• CODEX-API-SEND-ONE
+
+
+› Find and fix a bug in @filename
+
+  openai/gpt-5.6-luna-pro low · /tmp/pytest-of-smallops/pytest-0/test_docker_codex_session_api_0

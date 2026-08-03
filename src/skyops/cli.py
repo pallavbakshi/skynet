@@ -4,23 +4,23 @@ from __future__ import annotations
 
 import typer
 
-from skyops._init_cmd import init_app
-from skyops._control_plane import cp_app
-from skyops._status import status_app
-from skyops._config_cmd import config_app
-from skyops._infra import deps_app
-from skyops._lifecycle import lifecycle_app
-from skyops._db import db_app
-from skyops._health import health_app
-from skyops._dispatch import dispatch_app, capability_app
-from skyops._monitor import logs_app
 from skyops._backup import backup_app
-from skyops._security import security_app
-from skyops._upgrade import upgrade_app
-from skyops._drill import drill_app
-from skyops._queue import queue_app, job_app, sweep_app
-from skyops._validate import test_app
+from skyops._config_cmd import config_app
+from skyops._control_plane import cp_app
+from skyops._db import db_app
 from skyops._debug import debug_app
+from skyops._dispatch import capability_app, dispatch_app
+from skyops._drill import drill_app
+from skyops._health import health_app
+from skyops._infra import deps_app
+from skyops._init_cmd import init_app
+from skyops._lifecycle import lifecycle_app
+from skyops._monitor import logs_app
+from skyops._queue import job_app, queue_app, sweep_app
+from skyops._security import security_app
+from skyops._status import status_app
+from skyops._upgrade import upgrade_app
+from skyops._validate import test_app
 
 app = typer.Typer(
     name="skyops",

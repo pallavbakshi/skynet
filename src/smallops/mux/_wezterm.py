@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from time import monotonic, sleep
 from typing import Any
 
 from smallops._types import SessionInfo
 from smallops._util import is_shell_foreground
+
 _PASTE_CHUNK_SIZE = 4096
 
 
@@ -206,7 +208,7 @@ class WezTermMux:
             args.extend(["--cwd", cwd])
         # Build command with env var exports prepended
         if env:
-            exports = " ".join(f"{k}={v}" for k, v in env.items())
+            exports = " ".join(f"{k}={shlex.quote(v)}" for k, v in env.items())
             command = f"env {exports} {command}"
         args.extend(["--", "sh", "-c", command])
         new_pane_id = self._run(args).strip()

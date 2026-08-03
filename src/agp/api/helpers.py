@@ -8,9 +8,8 @@ from datetime import datetime
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
-from sqlalchemy import or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
-from sqlalchemy import func, select
 
 
 def _ok(data: object) -> dict:
@@ -61,7 +60,7 @@ def _decode_cursor(cursor: str | None) -> dict[str, object] | None:
     try:
         raw = base64.urlsafe_b64decode(cursor.encode("ascii"))
         return json.loads(raw.decode("utf-8"))
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         raise HTTPException(status_code=400, detail="invalid cursor") from exc
 
 

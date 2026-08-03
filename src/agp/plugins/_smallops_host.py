@@ -9,16 +9,15 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from smallops import SessionInfo as _SessionInfo
-from smallops._protocols import Mux
-
+from agp.runtime._abc import TerminalHost
 from agp.runtime._types import (
     OutputCursor,
     OutputReadResult,
     SessionHealth,
     TerminalSession,
 )
-from agp.runtime._abc import TerminalHost
+from smallops import Mux
+from smallops import SessionInfo as _SessionInfo
 
 _logger = logging.getLogger(__name__)
 
@@ -165,11 +164,8 @@ class SmallopsTerminalHost(TerminalHost):
         """
         if not self.session_exists(session):
             return False
-        # If the foreground is a shell, the TUI is gone
-        if self._mux.shell_idle(_to_info(session)):
-            return False
-        # Pane exists and foreground is not a shell — TUI is alive
-        return True
+        # Pane exists and foreground is not a shell, so the TUI is alive.
+        return not self._mux.shell_idle(_to_info(session))
 
     def _get_pane_tty(self, session: TerminalSession) -> str | None:
         # Not needed — shell_idle delegates to mux directly

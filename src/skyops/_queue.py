@@ -15,7 +15,8 @@ job_app = typer.Typer(help="Job management commands.")
 sweep_app = typer.Typer(help="One-shot sweep operations.")
 
 # Import trace/events from monitor and register on job_app
-from skyops._monitor import trace as _trace_cmd, events as _events_cmd  # noqa: E402
+from skyops._monitor import events as _events_cmd
+from skyops._monitor import trace as _trace_cmd
 
 job_app.command("trace")(_trace_cmd)
 job_app.command("events")(_events_cmd)
@@ -52,7 +53,7 @@ def _redis_set_members(client, key: str) -> list[str]:
     if callable(smembers):
         values = smembers(key)
         return sorted(str(value) for value in values)
-    return sorted(list(getattr(client, "sets", {}).get(key, set())))
+    return sorted(getattr(client, "sets", {}).get(key, set()))
 
 
 def _redis_scan_keys(client, pattern: str) -> list[str]:
@@ -70,7 +71,11 @@ def _inspect_queue_state() -> dict[str, object]:
     from agp.config import settings
     from agp.db import SessionLocal
     from agp.models import Job, QueueDeliveryRecord
-    from agp.queue_backend import RedisQueueBackend, InMemoryBrokerQueueBackend, get_queue_backend
+    from agp.queue_backend import (
+        InMemoryBrokerQueueBackend,
+        RedisQueueBackend,
+        get_queue_backend,
+    )
 
     backend = get_queue_backend(settings.queue_backend)
     session = SessionLocal()
@@ -125,8 +130,7 @@ def _inspect_queue_state() -> dict[str, object]:
                 if not key.startswith(queue_prefix):
                     continue
                 target_queue = key.removeprefix(queue_prefix)
-                if target_queue.endswith(pending_suffix):
-                    target_queue = target_queue[: -len(pending_suffix)]
+                target_queue = target_queue.removesuffix(pending_suffix)
                 if target_queue:
                     target_queues.add(target_queue)
             inflight_keys = list(getattr(backend.client, "hkeys", lambda name: [])(backend._inflight_hash_key()))
@@ -303,7 +307,7 @@ def job_unblock(
             env={"_JOB_ID": job_id, "_REASON": reason},
         )
         return
-    from agp.control_plane import _unblock_job, _require_job
+    from agp.control_plane import _require_job, _unblock_job
     from agp.db import SessionLocal
 
     session = SessionLocal()

@@ -7,7 +7,7 @@ lives in adapter.py.
 
 from __future__ import annotations
 
-from agp.plugins.claude_code.adapter import ClaudeCodeAdapter  # noqa: F401
+from agp.plugins.claude_code.adapter import ClaudeCodeAdapter
 
 __all__ = [
     "ClaudeCodeAdapter",

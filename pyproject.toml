@@ -31,6 +31,94 @@ packages = ["src/agp", "src/skyops", "src/smallops"]
 
 [dependency-groups]
 dev = [
+    "import-linter>=2,<3",
     "jsonschema>=4.26.0",
     "pytest>=9.0,<10.0",
+    "ruff>=0.8,<1.0",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+  "offline: deterministic parser property tests, no live agent (default on)",
+  "live: real Claude Code install required (SMALLOPS_LIVE=1)",
+  "docker: pristine Docker fresh-first-run (SMALLOPS_DOCKER=1 + ANTHROPIC_API_KEY)",
+  "judge: uses the LLM-judge oracle, soft signal (SMALLOPS_JUDGE=1 + ANTHROPIC_API_KEY)",
+]
+addopts = "-ra --strict-markers"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "SIM", "PLR", "C4", "RUF", "B", "S"]
+ignore = [
+  # FastAPI and Typer intentionally use dependency/option factories in defaults.
+  "B008",
+  # Existing codebase style/security rules not covered by this cleanup.
+  "E402",
+  "E501",
+  "E741",
+  "F403",
+  "F405",
+  "S101",
+  "S104",
+  "S105",
+  "S106",
+  "S108",
+  "S310",
+  "S603",
+  "S606",
+  "S607",
+  "S608",
+  # This codebase has many best-effort cleanup/probing paths where broad catches
+  # and quiet failures are intentional. Tighten these locally when touching code.
+  "BLE001",
+  "S110",
+  "S112",
+  # CLI subprocess probes often inspect return codes manually.
+  "PLW1510",
+  # Style migrations that are too noisy for this cleanup.
+  "B904",
+  "PLR0911",
+  "PLR0912",
+  "PLR0913",
+  "PLR0915",
+  "PLR0917",
+  "PLR2004",
+  "PYI034",
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  "RUF005",
+  "RUF021",
+  "RUF036",
+  "SIM105",
+  "SIM108",
+  "SIM110",
+  "SIM117",
+  "UP042",
+  "UP036",
+  "UP046",
+]
+
+[tool.importlinter]
+root_packages = ["agp", "smallops", "skyops"]
+
+[[tool.importlinter.contracts]]
+name = "agp depends only on smallops public API"
+type = "forbidden"
+source_modules = ["agp"]
+forbidden_modules = [
+  "smallops._types",
+  "smallops._util",
+  "smallops._protocols",
+  "smallops._poll",
+  "smallops.tui.claude_code._classify",
+  "smallops.tui.claude_code._markers",
+  "smallops.tui.claude_code._parse",
+  "smallops.tui.claude_code._gates",
+  "smallops.tui.codex._classify",
+  "smallops.tui.codex._markers",
+  "smallops.tui.codex._parse",
+  "smallops.tui.codex._gates",
+  "smallops.mux._tmux",
+  "smallops.mux._wezterm",
+]
+allow_indirect_imports = true

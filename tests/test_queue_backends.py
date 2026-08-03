@@ -7,6 +7,7 @@ the full control-plane route layer.
 from __future__ import annotations
 
 import threading
+from datetime import UTC
 
 from sqlalchemy import select
 
@@ -17,16 +18,14 @@ from agp.queue_backend import (
     DbQueueBackend,
     DeliveryTableQueueBackend,
     InMemoryBrokerQueueBackend,
-    RedisQueueBackend,
     QueueDelivery,
+    RedisQueueBackend,
     queue_backlog_info,
     queue_backlogs_by_target_queue,
     queue_oldest_queued_at,
 )
-import agp.queue_backend as queue_backend_module
 from agp.queue_backend import _redis as _qb_redis_mod
 from agp.services.jobs import _block_job, _unblock_job
-
 from tests._base import AgpTestCase, FakeRedisClient
 
 
@@ -314,10 +313,11 @@ class DeliveryTableBackendContractTest(AgpTestCase):
                 rec = session.get(QueueDeliveryRecord, d.delivery_id)
                 rec.last_delivered_at = utc_now().__class__(2000, 1, 1, tzinfo=rec.last_delivered_at.tzinfo)
                 session.commit()
-                result = backend.redrive_stale_deliveries(session, visibility_timeout_seconds=0, max_delivery_attempts=3)
+                backend.redrive_stale_deliveries(session, visibility_timeout_seconds=0, max_delivery_attempts=3)
                 session.commit()
-            from agp.models import QueueDeliveryRecord as QDR
             from sqlalchemy import select
+
+            from agp.models import QueueDeliveryRecord as QDR
             dead = session.scalars(select(QDR).where(QDR.job_id == job.job_id, QDR.state == "dead_lettered")).first()
             self.assertIsNotNone(dead)
         finally:
@@ -624,7 +624,8 @@ class RedisBackendContractTest(AgpTestCase):
 
     def test_phase2_recovery_sql_delivered_missing_redis_inflight(self) -> None:
         """Crash after SQL marked 'delivered' but before Redis inflight written."""
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from agp.models import QueueDeliveryRecord
         backend = self._make_backend()
         session = SessionLocal()
@@ -643,7 +644,7 @@ class RedisBackendContractTest(AgpTestCase):
             backend.client.srem(backend._inflight_jobs_key(), job.job_id)
             # Backdate the SQL record so it's past the visibility timeout
             rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
-            rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+            rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=UTC)
             session.commit()
             # Phase 2 should find the orphaned SQL "delivered" record
             result = backend.redrive_stale_deliveries(
@@ -848,7 +849,8 @@ class RedisBackendContractTest(AgpTestCase):
 
     def test_phase2_dead_letters_after_max_attempts(self) -> None:
         """Phase 2 recovery dead-letters if delivery_attempt >= max."""
-        from datetime import datetime, timezone
+        from datetime import datetime
+
         from agp.models import QueueDeliveryRecord
         backend = self._make_backend()
         session = SessionLocal()
@@ -864,7 +866,7 @@ class RedisBackendContractTest(AgpTestCase):
                 if delivery is None:
                     break
                 rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
-                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=UTC)
                 session.commit()
                 backend.redrive_stale_deliveries(
                     session, visibility_timeout_seconds=0, max_delivery_attempts=3
@@ -878,7 +880,7 @@ class RedisBackendContractTest(AgpTestCase):
                 backend.client.hdel(backend._inflight_hash_key(), delivery.delivery_id)
                 backend.client.srem(backend._inflight_jobs_key(), job.job_id)
                 rec = session.get(QueueDeliveryRecord, delivery.delivery_id)
-                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+                rec.last_delivered_at = datetime(2000, 1, 1, tzinfo=UTC)
                 session.commit()
                 result = backend.redrive_stale_deliveries(
                     session, visibility_timeout_seconds=0, max_delivery_attempts=3

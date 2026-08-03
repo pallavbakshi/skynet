@@ -29,13 +29,13 @@ if TYPE_CHECKING:
 _log = logging.getLogger(__name__)
 
 
-def _check_alive(session: "Session") -> None:
+def _check_alive(session: Session) -> None:
     """Raise PaneDied if the pane no longer exists."""
     if not session.mux.session_exists(session._session):
         raise PaneDied(f"pane {session._session.id} disappeared")
 
 
-def _handle_gate(mux: "Mux", tui: "Tui", pane: "SessionInfo", screen: str) -> bool:
+def _handle_gate(mux: Mux, tui: Tui, pane: SessionInfo, screen: str) -> bool:
     """Check for gate prompt and auto-dismiss if possible.
 
     Returns True if a gate was dismissed (caller should re-poll).
@@ -51,7 +51,7 @@ def _handle_gate(mux: "Mux", tui: "Tui", pane: "SessionInfo", screen: str) -> bo
     return True
 
 
-def wait_for_ready(session: "Session", config: Config) -> None:
+def wait_for_ready(session: Session, config: Config) -> None:
     """Block until the agent TUI shows a ready prompt.
 
     Handles gates during bootstrap. Raises BootstrapTimeout or FatalGate.
@@ -60,19 +60,37 @@ def wait_for_ready(session: "Session", config: Config) -> None:
     prev = ""
     unchanged = 0
     gate_count = 0
+    last_gate_response: str | None = None
+    repeated_gate_polls = 0
 
     while monotonic() < deadline:
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
-        if _handle_gate(session.mux, session.tui, session._session, screen):
+        gate_response = session.tui.gate_response(screen)
+        if gate_response is not None:
+            if gate_response == last_gate_response:
+                repeated_gate_polls += 1
+                if repeated_gate_polls < config.idle_threshold:
+                    unchanged = 0
+                    continue
+            else:
+                repeated_gate_polls = 0
+            last_gate_response = gate_response
+            if session.tui.is_fatal_gate(screen):
+                raise FatalGate("fatal gate detected — requires human intervention")
+            _log.debug("gate detected, sending response: %r", gate_response)
+            session.mux.send_text(session._session, gate_response, enter=True)
             gate_count += 1
+            repeated_gate_polls = 0
             if gate_count > config.max_gate_dismissals:
                 raise FatalGate("too many gate dismissals during bootstrap")
             unchanged = 0
             continue
+        repeated_gate_polls = 0
+        last_gate_response = None
 
         if screen == prev:
             unchanged += 1
@@ -95,7 +113,7 @@ def wait_for_ready(session: "Session", config: Config) -> None:
 
 
 def poll_until_done(
-    session: "Session",
+    session: Session,
     marker: str,
     config: Config,
     *,
@@ -125,7 +143,7 @@ def poll_until_done(
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
         if _handle_gate(session.mux, session.tui, session._session, screen):
             gate_count += 1
@@ -154,12 +172,7 @@ def poll_until_done(
             raise PaneDied("agent error detected on screen")
 
         if reason == IdleReason.GATE:
-            _log.debug("unknown gate, sending Enter")
-            session.mux.send_text(session._session, "", enter=True)
-            gate_count += 1
-            if gate_count > config.max_gate_dismissals:
-                raise FatalGate("too many gate dismissals")
-            unchanged = 0
+            _log.debug("gate or active working indicator with no auto-response; continuing to poll")
             continue
 
     # Extract response using scrollback
@@ -171,7 +184,7 @@ def poll_until_done(
 
 
 def wait_for_idle(
-    session: "Session",
+    session: Session,
     config: Config,
     *,
     timeout: float | None = None,
@@ -196,7 +209,7 @@ def wait_for_idle(
         sleep(config.poll_interval)
         _check_alive(session)
 
-        screen = session._read_screen()
+        screen = session._read_screen(handle_gates=False)
 
         if _handle_gate(session.mux, session.tui, session._session, screen):
             gate_count += 1

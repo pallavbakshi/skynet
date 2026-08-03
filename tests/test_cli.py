@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import unittest
+from datetime import UTC
 from unittest.mock import MagicMock, patch
 
 from typer.testing import CliRunner
@@ -21,6 +23,11 @@ from agp.cli import (
 )
 
 runner = CliRunner()
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain_cli_output(output: str) -> str:
+    return _ANSI_RE.sub("", output)
 
 
 class CliHelpersTest(unittest.TestCase):
@@ -318,7 +325,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("did you mean", result.output)
-        self.assertIn("--timeout", result.output)
+        self.assertIn("--timeout", _plain_cli_output(result.output))
         mock_make.assert_not_called()
 
     @patch("agp.cli._helpers._make_client")
@@ -439,7 +446,7 @@ class ReplyCommandTest(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 2, result.output)
         self.assertIn("did you mean", result.output)
-        self.assertIn("--timeout", result.output)
+        self.assertIn("--timeout", _plain_cli_output(result.output))
         mock_make.assert_not_called()
 
     @patch("agp.cli._helpers._make_client")
@@ -452,7 +459,7 @@ class ReplyCommandTest(unittest.TestCase):
         result = runner.invoke(app, ["reply", "job_src", "--fire-and-forget", "--output-contract", "{"])
 
         self.assertEqual(result.exit_code, 2, result.output)
-        self.assertIn("invalid JSON for --output-contract", result.output)
+        self.assertIn("invalid JSON for --output-contract", _plain_cli_output(result.output))
         mock_make.assert_not_called()
 
     @patch("agp.cli._helpers._make_client")
@@ -935,9 +942,7 @@ class CaptureGitDiffTest(unittest.TestCase):
                 result.stdout = "true\n"
             elif "ls-files" in cmd:
                 result.stdout = "new_file.py\n"
-            elif "--stat" in cmd:
-                result.stdout = ""
-            elif "diff" in cmd and "HEAD" in cmd:
+            elif "--stat" in cmd or "diff" in cmd and "HEAD" in cmd:
                 result.stdout = ""
             return result
 
@@ -957,9 +962,7 @@ class CaptureGitDiffTest(unittest.TestCase):
                 result.stdout = "true\n"
             elif "ls-files" in cmd:
                 result.stdout = "new_file.py\n"
-            elif "--stat" in cmd:
-                result.stdout = ""
-            elif "diff" in cmd and "HEAD" in cmd:
+            elif "--stat" in cmd or "diff" in cmd and "HEAD" in cmd:
                 result.stdout = ""
             return result
 
@@ -986,9 +989,9 @@ class PollUntilDoneTest(unittest.TestCase):
     @patch("time.sleep", new=MagicMock())
     @patch("time.monotonic")
     def test_renders_last_line_hint(self, mock_monotonic: MagicMock) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now_ts = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(UTC).isoformat()
         client = self._make_client(
             job_sequence=[
                 {"status": "running"},
@@ -1003,7 +1006,7 @@ class PollUntilDoneTest(unittest.TestCase):
         mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
 
         with patch("agp.cli.typer.echo") as mock_echo:
-            job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+            _job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
 
         self.assertFalse(timed_out)
         echo_calls = [c.args[0] for c in mock_echo.call_args_list]
@@ -1013,9 +1016,9 @@ class PollUntilDoneTest(unittest.TestCase):
     @patch("time.sleep", new=MagicMock())
     @patch("time.monotonic")
     def test_renders_output_chars_when_no_last_line(self, mock_monotonic: MagicMock) -> None:
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now_ts = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(UTC).isoformat()
         client = self._make_client(
             job_sequence=[
                 {"status": "running"},
@@ -1049,7 +1052,7 @@ class PollUntilDoneTest(unittest.TestCase):
         mock_monotonic.side_effect = [0, 0, 0, 11, 11, 12]
 
         with patch("agp.cli.typer.echo") as mock_echo:
-            job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
+            _job, timed_out = _poll_until_done(client, "job_1", timeout=60, heartbeat_interval=10)
 
         self.assertFalse(timed_out)
         echo_calls = [c.args[0] for c in mock_echo.call_args_list]
@@ -1059,9 +1062,9 @@ class PollUntilDoneTest(unittest.TestCase):
     @patch("time.sleep", new=MagicMock())
     @patch("time.monotonic")
     def test_stall_detection_when_event_is_old(self, mock_monotonic: MagicMock) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
-        old_ts = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()
+        old_ts = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
         client = self._make_client(
             job_sequence=[
                 {"status": "running"},
@@ -1085,9 +1088,9 @@ class PollUntilDoneTest(unittest.TestCase):
 
     def _run_with_tui_state(self, tui_state: str, last_line: str = "", output_chars: int = 0) -> list[str]:
         """Helper: run _poll_until_done with a given tui_state and return echo output lines."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now_ts = datetime.now(timezone.utc).isoformat()
+        now_ts = datetime.now(UTC).isoformat()
         details: dict = {"tui_state": tui_state, "output_chars": output_chars}
         if last_line:
             details["last_line"] = last_line
@@ -1170,18 +1173,20 @@ class HeartbeatAgeSecondsTest(unittest.TestCase):
         self.assertIsNone(_heartbeat_age_seconds(""))
 
     def test_returns_positive_float_for_past_timestamp(self) -> None:
+        from datetime import datetime, timedelta
+
         from agp.cli import _heartbeat_age_seconds
-        from datetime import datetime, timezone, timedelta
-        past = (datetime.now(timezone.utc) - timedelta(seconds=30)).isoformat()
+        past = (datetime.now(UTC) - timedelta(seconds=30)).isoformat()
         age = _heartbeat_age_seconds(past)
         self.assertIsNotNone(age)
         self.assertGreater(age, 25)
         self.assertLess(age, 60)
 
     def test_handles_z_suffix(self) -> None:
+        from datetime import datetime, timedelta
+
         from agp.cli import _heartbeat_age_seconds
-        from datetime import datetime, timezone, timedelta
-        past = (datetime.now(timezone.utc) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        past = (datetime.now(UTC) - timedelta(seconds=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
         age = _heartbeat_age_seconds(past)
         self.assertIsNotNone(age)
         self.assertGreater(age, 5)
@@ -1196,8 +1201,8 @@ class InfoDiagnoseAgentTest(unittest.TestCase):
 
     @patch("agp.cli._helpers._make_client")
     def test_info_diagnose_agent_shows_agent_info(self, mock_make: MagicMock) -> None:
-        from datetime import datetime, timezone, timedelta
-        hb_time = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+        from datetime import datetime, timedelta
+        hb_time = (datetime.now(UTC) - timedelta(seconds=5)).isoformat()
 
         fake_client = MagicMock()
         fake_client.get_agent.return_value = {

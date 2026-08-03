@@ -7,8 +7,8 @@ import secrets
 
 import typer
 
-from skyops.config import load_config
 from skyops._client import build_client
+from skyops.config import load_config
 
 security_app = typer.Typer(help="Secret and credential management.")
 
@@ -48,8 +48,8 @@ def secrets_show() -> None:
 @security_app.command("generate")
 def secrets_generate() -> None:
     """Generate fresh random credentials and write to skyops.local.toml."""
-    from skyops.config import find_config
     from skyops._config_cmd import _write_toml
+    from skyops.config import find_config
 
     config_path = find_config()
     if config_path is None:
@@ -99,8 +99,6 @@ def secrets_generate_k8s(
     db_url = cfg.database.url
     s3_access_key = cfg.s3.access_key_id
     s3_secret_key = cfg.s3.secret_access_key
-    operator_token = cfg.security.operator_token
-    runtime_token = cfg.security.runtime_token
 
     yaml_content = f"""\
 apiVersion: v1

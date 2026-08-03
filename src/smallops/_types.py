@@ -51,7 +51,7 @@ class ParsedResponse:
 
     raw: str                                         # capture: everything after marker, unfiltered
     blocks: tuple[Block, ...] = ()                   # parse: structured blocks
-    status: "Status" = field(default_factory=lambda: Status())  # parsed status metadata
+    status: Status = field(default_factory=lambda: Status())  # parsed status metadata
 
     @property
     def text(self) -> str:

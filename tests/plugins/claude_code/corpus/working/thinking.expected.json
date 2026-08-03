@@ -1,9 +1,0 @@
-{
-  "classify": {
-    "is_ready": false,
-    "is_working": true,
-    "ends_with_prompt": false,
-    "is_shell_returned": false,
-    "gate_kind": "NONE"
-  }
-}

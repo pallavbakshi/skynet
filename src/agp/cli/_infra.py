@@ -10,7 +10,7 @@ import time
 import typer
 
 from agp.cli import app
-from agp.cli._helpers import _connectable_host, _default_server_url
+from agp.cli._helpers import _default_server_url
 
 
 @app.command(hidden=True)
@@ -66,6 +66,7 @@ def serve(
 
 
     import uvicorn
+
     from agp.config import settings
     from agp.control_plane import build_app
     from agp.migrations import require_initialized_schema
@@ -87,13 +88,14 @@ def _runtime_debug_log(runtime_id: str, entry: dict) -> None:
     if not _rtl.isEnabledFor(logging.DEBUG):
         return
     try:
-        from datetime import datetime, UTC
-        from agp.logs import append_jsonl_log
+        from datetime import UTC, datetime
+
         from agp.config import settings
+        from agp.logs import append_jsonl_log
         path = settings.log_root / f"runtime-{runtime_id}.jsonl"
         payload = {"created_at": datetime.now(UTC).isoformat(), "kind": "runtime_lifecycle", **entry}
         append_jsonl_log(path, payload, rotation_bytes=settings.observability_log_rotation_bytes)
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
 
 
@@ -125,9 +127,9 @@ def runtime_work_loop(
     import socket as _socket
     from threading import Event
 
-    from agp.config import settings
     from agp.client import RuntimeClient, RuntimeIdentity
-    from agp.plugins import build_terminal_host, build_agent_adapter
+    from agp.config import settings
+    from agp.plugins import build_agent_adapter, build_terminal_host
     from agp.runtime import RuntimeSupervisor
 
     actual_server_url = server_url if server_url is not None else _default_server_url()
@@ -197,7 +199,7 @@ def runtime_work_loop(
                 err=True,
             )
             raise typer.Exit(1) from exc
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _runtime_debug_log(runtime_id, {"action": "worker_crash", "error": f"{type(exc).__name__}: {exc}", "attempt": restart_attempt + 1})
             restart_attempt += 1
         finally:
@@ -225,7 +227,7 @@ def _runtime_binding_warning(client, agent_id: str) -> str | None:
     try:
         getter = getattr(client, "ops_get_runtime", None) or getattr(client, "get_runtime", None)
         runtime = getter(runtime_id) if getter is not None else None
-    except Exception:  # noqa: BLE001
+    except Exception:
         runtime = None
     if not runtime:
         return f"WARNING: No runtime bound. Start one with: make runtime AGP_RUNTIME_AGENT_ID={agent_id}"

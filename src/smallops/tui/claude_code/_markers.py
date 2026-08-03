@@ -92,4 +92,13 @@ SPINNER_CHARS = (
     "*",       # platform fallback (Ghostty, Linux)
 )
 
-_WORKING_VERBS = ("Working", "Thinking", "Running", "Waiting", "Reconnecting", "Exploring")
+_WORKING_VERBS = (
+    "Working",
+    "Thinking",
+    "Running",
+    "Waiting",
+    "Reconnecting",
+    "Exploring",
+    "Calculating",
+    "Whirlpooling",
+)

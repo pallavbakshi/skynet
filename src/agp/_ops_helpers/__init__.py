@@ -6,8 +6,8 @@ Re-exports all public functions for backward compatibility with
 
 from agp._ops_helpers._backup import (  # noqa: F401
     create_backup_snapshot,
-    restore_backup_snapshot,
     restore_and_recover_snapshot,
+    restore_backup_snapshot,
     validate_restored_state,
 )
 from agp._ops_helpers._drill import run_failure_injection_scenario  # noqa: F401

@@ -7,9 +7,9 @@ from urllib.parse import urlparse
 
 import typer
 
+from skyops._client import build_client, resolve_host_for_url, resolve_server_url
+from skyops._status import _probe_http_health, _probe_tcp
 from skyops.config import load_config
-from skyops._client import resolve_server_url, resolve_host_for_url, build_client
-from skyops._status import _probe_tcp, _probe_http_health
 
 health_app = typer.Typer(help="Deep health check.")
 

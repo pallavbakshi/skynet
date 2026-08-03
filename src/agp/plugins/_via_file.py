@@ -208,6 +208,6 @@ def cleanup_stale_task_files(*, max_age_seconds: float = 1800) -> int:
                 if age > max_age_seconds:
                     f.unlink()
                     cleaned += 1
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
     return cleaned

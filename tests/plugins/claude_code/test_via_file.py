@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import unittest
 from pathlib import Path
@@ -171,7 +170,7 @@ class WriteAndCleanupTest(unittest.TestCase):
     def test_fresh_files_not_cleaned(self) -> None:
         path = write_task_file(run_id="test_fresh_001", content="fresh content")
         try:
-            cleaned = cleanup_stale_task_files(max_age_seconds=1800)
+            cleanup_stale_task_files(max_age_seconds=1800)
             # The fresh file should NOT be cleaned
             self.assertTrue(Path(path).exists())
         finally:

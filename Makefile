@@ -613,19 +613,31 @@ codex-orc: ## Launch codex orchestrator (read-only sandbox, delegates to claude-
 
 # ── Dev/test targets ─────────────────────────────────────────────────
 
-.PHONY: test lint test-parser capture
+.PHONY: test lint test-parser test-smallops test-live test-docker capture
 
 test: ## Run test suite
-	$(RUN) python -m pytest tests/ -x -q --tb=short
+	env -u SMALLOPS_LIVE -u SMALLOPS_DOCKER -u SMALLOPS_JUDGE $(RUN) python -m pytest tests/ smallops_tests/ -x -q --tb=short
 
 test-parser: ## Run Claude Code parser tests only
-	$(RUN) python -m pytest tests/plugins/claude_code/ -v
+	$(RUN) python -m pytest smallops_tests/ -m offline -v
+
+test-smallops: ## Run smallops offline tests
+	$(RUN) python -m pytest smallops_tests/ -m offline
+
+test-live: ## Run smallops live tests (requires Claude Code)
+	SMALLOPS_LIVE=1 $(RUN) python -m pytest smallops_tests/ -m live
+
+test-docker: ## Run smallops Docker first-run tests
+	@./scripts/docker/run-smallops-tests.sh
 
 lint: ## Run linter
-	$(RUN) python -m ruff check src/ tests/
+	$(RUN) python -m ruff check src/ tests/ smallops_tests/ scripts/inspect-smallops-corpus.py scripts/check-smallops-boundary.py
+	$(RUN) python scripts/check-smallops-boundary.py
+	$(RUN) lint-imports
 
-capture: ## Capture tmux pane to corpus (usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer])
-	@./scripts/capture-pane.sh $(CAT) $(NAME) $(SESSION)
+capture: ## Capture pane to smallops corpus (usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer])
+	@test -n "$(CAT)" && test -n "$(NAME)" || (echo "Usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer]" >&2; exit 1)
+	@./scripts/capture-pane.sh "$(CAT)" "$(NAME)" "$(SESSION)" $(if $(FORCE),--force,)
 
 # ── Help ─────────────────────────────────────────────────────────────
 

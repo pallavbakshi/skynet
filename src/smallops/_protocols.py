@@ -70,6 +70,14 @@ class Tui(Protocol):
         """If screen shows a gate prompt, return the key to send.  None = no gate."""
         ...
 
+    def ends_with_prompt(self, screen: str) -> bool:
+        """True if the last meaningful screen line is an idle prompt."""
+        ...
+
+    def is_shell_returned(self, screen: str) -> bool:
+        """True if the agent TUI exited and the shell prompt is visible."""
+        ...
+
     def is_fatal_gate(self, screen: str) -> bool:
         """True if screen shows a gate that cannot be auto-dismissed."""
         ...

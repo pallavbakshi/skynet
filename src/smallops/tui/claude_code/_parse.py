@@ -12,6 +12,7 @@ import re
 
 from smallops._types import Block, BlockKind, ParsedResponse, Status
 from smallops.tui.claude_code._markers import (
+    _WORKING_VERBS,
     NOISE_PREFIXES,
     PROMPT_PREFIX,
     RESPONSE_PREFIXES,
@@ -21,9 +22,7 @@ from smallops.tui.claude_code._markers import (
     STATUS_CONTINUATION_RE,
     STATUS_LINE_RE,
     STATUS_TAIL_RE,
-    _WORKING_VERBS,
 )
-
 
 # ── Tool-use detection ──────────────────────────────────────────────
 # Claude Code renders tool calls as: ⏺ ToolName(arguments)
@@ -31,6 +30,20 @@ from smallops.tui.claude_code._markers import (
 
 _TOOL_USE_RE = re.compile(r"^[A-Z]\w*\(")
 _TOOL_RESULT_PREFIX = "\u23bf"  # ⎿
+_COLLAPSED_TOOL_SUMMARY_RE = re.compile(
+    r"^Thought for \S+(?:,\s+[^()]*)?\s+\(ctrl\+o to expand\)$",
+    re.IGNORECASE,
+)
+_COLLAPSED_TOOL_VERBS = (
+    ("read ", "Read"),
+    ("searched ", "Search"),
+    ("search ", "Search"),
+    ("ran ", "Bash"),
+    ("edited ", "Edit"),
+    ("updated ", "Edit"),
+    ("wrote ", "Write"),
+    ("created ", "Write"),
+)
 
 
 def _is_tool_use_header(content: str) -> bool:
@@ -42,6 +55,17 @@ def _tool_name(content: str) -> str:
     """Extract tool name from 'ToolName(args...)'."""
     paren = content.find("(")
     return content[:paren] if paren > 0 else content.split()[0] if content else ""
+
+
+def _collapsed_tool_name(content: str) -> str:
+    """Extract an approximate tool name from Claude's collapsed summary line."""
+    if not _COLLAPSED_TOOL_SUMMARY_RE.match(content):
+        return ""
+    lower = content.lower()
+    for needle, name in _COLLAPSED_TOOL_VERBS:
+        if needle in lower:
+            return name
+    return "ToolSummary"
 
 
 # ── Capture + Parse ─────────────────────────────────────────────────
@@ -84,7 +108,7 @@ def parse(captured: str) -> ParsedResponse:
         if not started:
             if any(s.startswith(p) for p in RESPONSE_PREFIXES):
                 started = True  # fall through to handle this line
-            elif s.startswith(PROMPT_PREFIX):
+            elif _collapsed_tool_name(s) or s.startswith(PROMPT_PREFIX):
                 started = True  # fall through
             else:
                 continue
@@ -108,6 +132,14 @@ def parse(captured: str) -> ParsedResponse:
             else:
                 current_kind = BlockKind.TEXT
                 current_lines = [content] if content else []
+            continue
+
+        collapsed_tool = _collapsed_tool_name(s)
+        if collapsed_tool:
+            _flush()
+            current_kind = BlockKind.TOOL_USE
+            current_tool = collapsed_tool
+            current_lines = [s]
             continue
 
         # Status lines (sTAT, status bar, token count) → STATUS block
@@ -163,9 +195,10 @@ def parse_response(text: str, marker: str) -> str:
 # Format: sTAT | model | effort | session_id | HH:MM:SS | pct%    N tokens
 
 _STAT_RE = re.compile(r"^\s*sTAT\s*\|")
-_TOKENS_RE = re.compile(r"(\d[\d,]*)\s+tokens?", re.IGNORECASE)
+_TOKENS_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmM]?)\s+tokens?", re.IGNORECASE)
 _PCT_RE = re.compile(r"(\d+)%")
 _TIME_RE = re.compile(r"\d{2}:\d{2}:\d{2}")
+_MODEL_SUFFIX_RE = re.compile(r"\[[^\]]+\]$")
 
 
 def parse_status(screen: str) -> Status:
@@ -199,10 +232,7 @@ def parse_status(screen: str) -> Status:
             context_pct = int(pct_match.group(1))
 
         # Token count — search the entire status block, not just the sTAT line
-        tokens = 0
-        tok_match = _TOKENS_RE.search(clean_screen)
-        if tok_match:
-            tokens = int(tok_match.group(1).replace(",", ""))
+        tokens = _parse_tokens(clean_screen)
 
         return Status(
             model=model,
@@ -213,7 +243,32 @@ def parse_status(screen: str) -> Status:
             last_completed=last_completed,
         )
 
-    return Status()
+    return Status(model=_parse_card_model(clean_screen), tokens=_parse_tokens(clean_screen))
+
+
+def _parse_tokens(text: str) -> int:
+    tok_match = _TOKENS_RE.search(text)
+    if not tok_match:
+        return 0
+    value = float(tok_match.group(1).replace(",", ""))
+    suffix = tok_match.group(2).lower()
+    if suffix == "k":
+        value *= 1_000
+    elif suffix == "m":
+        value *= 1_000_000
+    return int(value)
+
+
+def _parse_card_model(text: str) -> str:
+    for line in text.splitlines():
+        if "API Usage Billing" not in line or "·" not in line:
+            continue
+        for segment in line.split("│"):
+            if "API Usage Billing" not in segment or "·" not in segment:
+                continue
+            model = segment.split("·", 1)[0].strip()
+            return _MODEL_SUFFIX_RE.sub("", model).strip()
+    return ""
 
 
 def is_status(line: str) -> bool:
@@ -227,9 +282,7 @@ def is_status(line: str) -> bool:
         return True
     if STATUS_TAIL_RE.match(s):
         return True
-    if STATUS_CONTINUATION_RE.match(s):
-        return True
-    return False
+    return bool(STATUS_CONTINUATION_RE.match(s))
 
 
 def is_noise(line: str) -> bool:
@@ -247,10 +300,10 @@ def is_noise(line: str) -> bool:
         return True
     if s.startswith("1:") and "dismiss" in s.lower():
         return True
-    # Working indicator lines — require spinner char + known verb
-    if _is_working_line(s):
+    if _is_completed_timing_line(s):
         return True
-    return False
+    # Working indicator lines — require spinner char + known verb
+    return bool(_is_working_line(s))
 
 
 def _is_working_line(s: str) -> bool:
@@ -259,7 +312,26 @@ def _is_working_line(s: str) -> bool:
         if not s.startswith(char):
             continue
         after = s[len(char):].strip()
+        lower = after.lower()
+        if "(" in after and ("· thinking" in lower or "esc to interrupt" in lower):
+            return True
         for verb in _WORKING_VERBS:
             if after.startswith(verb):
                 return True
+    return False
+
+
+def _is_completed_timing_line(s: str) -> bool:
+    """Match post-response spinner summaries like '✻ <verb> for 7s'.
+
+    Claude rotates this verb text frequently. The stable contract is the
+    spinner prefix plus a completed duration, while active spinner lines carry
+    parenthesized telemetry such as "(1s · ... · thinking)".
+    """
+    for char in SPINNER_CHARS:
+        if not s.startswith(char):
+            continue
+        after = s[len(char):].strip()
+        if "(" not in after and re.search(r"\bfor\s+\d+(?:\.\d+)?[smh]\b", after):
+            return True
     return False

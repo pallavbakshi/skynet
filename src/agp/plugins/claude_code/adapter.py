@@ -11,28 +11,16 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from smallops import (
-    ClaudeCodeTui,
-    Config as SmallopsConfig,
-    Session,
-)
-from smallops._types import (
-    BootstrapTimeout as _BootstrapTimeout,
-    FatalGate as _FatalGate,
-    PaneDied as _PaneDied,
-    SendTimeout as _SendTimeout,
-)
-from smallops._util import strip_ansi as _strip_ansi
-
 from agp.plugins._output_contracts import (
     apply_output_contract_instruction,
     is_json_contract,
     prompt_for_claim,
     result_file_path_for_run,
 )
-from agp.plugins._structured_output import select_structured_result
 from agp.plugins._provider_env import collect_provider_env
+from agp.plugins._structured_output import select_structured_result
 from agp.plugins._via_file import build_task_content
+from agp.runtime._abc import AgentAdapter, TerminalHost
 from agp.runtime._types import (
     AdapterExecutionFailed,
     ArtifactPayload,
@@ -43,7 +31,28 @@ from agp.runtime._types import (
     PaneDied,
     TerminalSession,
 )
-from agp.runtime._abc import AgentAdapter, TerminalHost
+from smallops import (
+    BootstrapTimeout as _BootstrapTimeout,
+)
+from smallops import (
+    ClaudeCodeTui,
+    Session,
+)
+from smallops import (
+    Config as SmallopsConfig,
+)
+from smallops import (
+    FatalGate as _FatalGate,
+)
+from smallops import (
+    PaneDied as _PaneDied,
+)
+from smallops import (
+    SendTimeout as _SendTimeout,
+)
+from smallops import (
+    strip_ansi as _strip_ansi,
+)
 
 if TYPE_CHECKING:
     from agp.runtime._supervisor import RuntimeSupervisor
@@ -112,8 +121,9 @@ class ClaudeCodeAdapter(AgentAdapter):
         items = claimed.get("job_attachments") or []
         if not items:
             return None
-        from agp.runtime._attachments import staged_attachment_relative_path
         from urllib.parse import unquote, urlparse
+
+        from agp.runtime._attachments import staged_attachment_relative_path
         workspace = session.workspace_ref or ""
         if "://" in workspace:
             parsed = urlparse(workspace)
@@ -141,18 +151,14 @@ class ClaudeCodeAdapter(AgentAdapter):
     def inspect_output(self, *, text: str, run_id: str | None = None) -> dict[str, Any]:
         clean = _strip_ansi(text)
         tui = ClaudeCodeTui(cli=self.cli_command)
-        from smallops.tui.claude_code._classify import (
-            ends_with_prompt,
-            is_shell_returned,
-        )
         return {
             "adapter_kind": self.kind,
             "mode": "tui",
             "run_id": run_id,
             "cleaned_output": tui.parse_response(clean, ""),
-            "looks_like_ready": ends_with_prompt(clean),
+            "looks_like_ready": tui.ends_with_prompt(clean),
             "looks_like_gate_prompt": tui.gate_response(clean) is not None,
-            "looks_like_shell_returned": is_shell_returned(clean),
+            "looks_like_shell_returned": tui.is_shell_returned(clean),
             "supported": True,
         }
 
@@ -196,7 +202,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         host: TerminalHost,
         session: TerminalSession,
         claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         return self._execute_run_impl(
             host=host, session=session, claimed=claimed, supervisor=supervisor,
@@ -208,7 +214,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         host: TerminalHost,
         session: TerminalSession,
         claimed: dict[str, Any],
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         """Send prompt via smallops, wrap Response -> ExecutionResult."""
         run_id = claimed["run"]["run_id"]
@@ -381,7 +387,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         claimed: dict[str, Any],
         attempt: int,
         error: Exception,
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> None:
         session.metadata.pop("claude_code_bootstrapped", None)
         if self._smallops_session is not None:
@@ -402,7 +408,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         session: TerminalSession,
         claimed: dict[str, Any],
         error: Exception,
-        supervisor: "RuntimeSupervisor",
+        supervisor: RuntimeSupervisor,
     ) -> ExecutionResult:
         screen = ""
         try:

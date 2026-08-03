@@ -16,6 +16,7 @@ agp.db-wal
 .vscode/
 *.log
 logs/
+test-artifacts/
 *.sqlite3
 .env
 skyops.local.toml
@@ -28,6 +29,7 @@ superset/
 .agp-test-verify.db-shm
 .agp-test-verify.db-wal
 .claude/
+.env.openrouter
 prompts/
 
 # scratch docs

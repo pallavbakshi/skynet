@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from time import monotonic
 
 
@@ -83,7 +83,7 @@ class PeekStore:
             text=text,
             session_id=session_id,
             host_kind=host_kind,
-            captured_at=datetime.now(timezone.utc),
+            captured_at=datetime.now(UTC),
         )
         with self._lock:
             self._gc()
@@ -102,7 +102,7 @@ class PeekStore:
         self._pending = {
             k: v for k, v in self._pending.items() if v.created_at > cutoff
         }
-        utc_cutoff = datetime.now(timezone.utc).timestamp() - self.TTL_SECONDS
+        utc_cutoff = datetime.now(UTC).timestamp() - self.TTL_SECONDS
         self._results = {
             k: v for k, v in self._results.items()
             if v.captured_at.timestamp() > utc_cutoff

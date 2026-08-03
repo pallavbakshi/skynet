@@ -8,7 +8,14 @@ from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 from agp.config import settings
-from agp.enums import AgentStatus, HealthStatus, JobStatus, LeaseStatus, RunStatus, RuntimeStatus
+from agp.enums import (
+    AgentStatus,
+    HealthStatus,
+    JobStatus,
+    LeaseStatus,
+    RunStatus,
+    RuntimeStatus,
+)
 from agp.models import Agent, Job, Lease, QueueDeliveryRecord, Run, Runtime, utc_now
 from agp.queue_backend import get_queue_backend
 from agp.services._helpers import (

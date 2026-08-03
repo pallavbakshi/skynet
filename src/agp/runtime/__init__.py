@@ -8,23 +8,8 @@
 
 from __future__ import annotations
 
-# --- Data classes and exceptions ---
-from agp.runtime._types import (
-    AdapterExecutionFailed,
-    AuthFailure,
-    ArtifactPayload,
-    BootstrapFailure,
-    ExecutionResult,
-    ExecutionTimeout,
-    InterruptRequested,
-    OutputCursor,
-    OutputReadResult,
-    PaneDied,
-    RecoverableExecutionError,
-    SessionHealth,
-    StableButIndeterminate,
-    TerminalSession,
-)
+# --- Re-exports from SDK package ---
+from agp.client._runtime import RuntimeClient, RuntimeIdentity
 
 # --- ABCs ---
 from agp.runtime._abc import AgentAdapter, TerminalHost
@@ -32,9 +17,17 @@ from agp.runtime._abc import AgentAdapter, TerminalHost
 # --- Output utilities ---
 from agp.runtime._output import (
     _ANSI_RE,
-    _OutputAccumulator,
     _compute_output_delta,
+    _OutputAccumulator,
     _strip_ansi,
+)
+
+# --- Standalone runner ---
+from agp.runtime._standalone import (
+    StandaloneArtifactRecord,
+    StandalonePluginRunner,
+    StandaloneRunResult,
+    _StandaloneSupervisorContext,
 )
 
 # --- Core supervisor ---
@@ -47,16 +40,23 @@ from agp.runtime._supervisor import (
     register_runtime,
 )
 
-# --- Standalone runner ---
-from agp.runtime._standalone import (
-    StandaloneArtifactRecord,
-    StandalonePluginRunner,
-    StandaloneRunResult,
-    _StandaloneSupervisorContext,
+# --- Data classes and exceptions ---
+from agp.runtime._types import (
+    AdapterExecutionFailed,
+    ArtifactPayload,
+    AuthFailure,
+    BootstrapFailure,
+    ExecutionResult,
+    ExecutionTimeout,
+    InterruptRequested,
+    OutputCursor,
+    OutputReadResult,
+    PaneDied,
+    RecoverableExecutionError,
+    SessionHealth,
+    StableButIndeterminate,
+    TerminalSession,
 )
-
-# --- Re-exports from SDK package ---
-from agp.client._runtime import RuntimeClient, RuntimeIdentity  # noqa: F401
 
 # --- Backward-compatible lazy imports for plugin classes ---
 
@@ -83,42 +83,42 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # _types
-    "ExecutionResult",
+    "_ANSI_RE",
+    "AdapterExecutionFailed",
+    "AgentAdapter",
     "ArtifactPayload",
-    "TerminalSession",
-    "OutputCursor",
-    "OutputReadResult",
-    "SessionHealth",
-    "InterruptRequested",
-    "RecoverableExecutionError",
-    "PaneDied",
-    "ExecutionTimeout",
     "AuthFailure",
     "BootstrapFailure",
-    "StableButIndeterminate",
-    "AdapterExecutionFailed",
-    # _abc
-    "TerminalHost",
-    "AgentAdapter",
-    # _output
-    "_OutputAccumulator",
-    "_compute_output_delta",
-    "_ANSI_RE",
-    "_strip_ansi",
-    # _supervisor
-    "RuntimeSupervisor",
-    "_failure_snapshot_payloads",
-    "_runtime_log_path",
-    "_append_runtime_log",
-    "_make_logging_runtime_client",
-    "register_runtime",
-    # _standalone
-    "StandalonePluginRunner",
-    "StandaloneRunResult",
-    "StandaloneArtifactRecord",
-    "_StandaloneSupervisorContext",
+    # _types
+    "ExecutionResult",
+    "ExecutionTimeout",
+    "InterruptRequested",
+    "OutputCursor",
+    "OutputReadResult",
+    "PaneDied",
+    "RecoverableExecutionError",
     # client re-exports
     "RuntimeClient",
     "RuntimeIdentity",
+    # _supervisor
+    "RuntimeSupervisor",
+    "SessionHealth",
+    "StableButIndeterminate",
+    "StandaloneArtifactRecord",
+    # _standalone
+    "StandalonePluginRunner",
+    "StandaloneRunResult",
+    # _abc
+    "TerminalHost",
+    "TerminalSession",
+    # _output
+    "_OutputAccumulator",
+    "_StandaloneSupervisorContext",
+    "_append_runtime_log",
+    "_compute_output_delta",
+    "_failure_snapshot_payloads",
+    "_make_logging_runtime_client",
+    "_runtime_log_path",
+    "_strip_ansi",
+    "register_runtime",
 ]

@@ -12,16 +12,15 @@ from unittest.mock import patch
 import httpx
 from typer.testing import CliRunner
 
-from skyops.cli import app
 from skyops._client import build_profile
 from skyops._db import db_seed
 from skyops._runtime_deploy import _build_docker_run, _build_script, _build_systemd
+from skyops.cli import app
 from skyops.config import (
     SkyopsConfig,
     _deep_merge,
     load_config,
 )
-
 
 runner = CliRunner()
 
@@ -646,7 +645,7 @@ class TestSkyopsClient(unittest.TestCase):
         self.assertEqual(profile.server_url, "http://127.0.0.1:9001")
 
 
-class TestDbSeed(unittest.TestCase):
+class TestDbInit(unittest.TestCase):
     def test_db_seed_can_clear_workspace_ref_on_existing_agent(self):
         import tempfile
 
@@ -775,9 +774,8 @@ class TestConfigSet(unittest.TestCase):
 
 class TestStatus(unittest.TestCase):
     def test_status_no_config(self):
-        with patch("skyops._status.find_config", return_value=None):
-            with patch("skyops._status.load_config", side_effect=FileNotFoundError("no config")):
-                result = runner.invoke(app, ["status"])
+        with patch("skyops._status.load_config", side_effect=FileNotFoundError("no config")):
+            result = runner.invoke(app, ["status"])
         self.assertEqual(result.exit_code, 1)
         self.assertIn("not found", result.output)
 
@@ -969,7 +967,7 @@ class TestHealth(unittest.TestCase):
                         mock_client.list_agents.return_value = {"items": []}
                         mock_client.__enter__ = lambda s: mock_client
                         mock_client.__exit__ = lambda s, *a: None
-                        with patch("skyops._client.build_client", return_value=mock_client):
+                        with patch("skyops._health.build_client", return_value=mock_client):
                             result = runner.invoke(app, ["health"])
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("PASS", result.output)
@@ -1047,7 +1045,7 @@ class TestDispatchSend(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
-            cfg = load_config(toml_path)
+            load_config(toml_path)
             with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["send", "agt_local", "hello world"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1063,7 +1061,7 @@ class TestDispatchJobs(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
-            cfg = load_config(toml_path)
+            load_config(toml_path)
             with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["jobs"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1078,7 +1076,7 @@ class TestDispatchAgents(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
-            cfg = load_config(toml_path)
+            load_config(toml_path)
             with patch("skyops._dispatch._client", return_value=mock_client):
                     result = runner.invoke(app, ["agents"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1154,7 +1152,7 @@ class TestMonitorMetrics(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
-            cfg = load_config(toml_path)
+            load_config(toml_path)
             with patch("skyops._health.build_client", return_value=mock_client):
                     result = runner.invoke(app, ["health", "--metrics"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1169,7 +1167,7 @@ class TestMonitorAlerts(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             toml_path = Path(td) / "skyops.toml"
             toml_path.write_text("[server]\nport = 7860\n")
-            cfg = load_config(toml_path)
+            load_config(toml_path)
             with patch("skyops._health.build_client", return_value=mock_client):
                     result = runner.invoke(app, ["health", "--alerts"])
         self.assertEqual(result.exit_code, 0, result.output)
@@ -1433,7 +1431,7 @@ class TestQueueInspect(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def execute(self, query):  # noqa: ARG002
+            def execute(self, query):
                 self.calls += 1
                 if self.calls == 1:
                     return _Result([("pending", 1)])
@@ -1477,7 +1475,7 @@ class TestQueueInspect(unittest.TestCase):
             def __init__(self):
                 self.calls = 0
 
-            def execute(self, query):  # noqa: ARG002
+            def execute(self, query):
                 self.calls += 1
                 if self.calls == 1:
                     return _Result([("pending", 1)])

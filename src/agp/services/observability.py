@@ -10,7 +10,11 @@ from sqlalchemy.orm import Session
 from agp.config import settings
 from agp.enums import HealthStatus, JobStatus
 from agp.models import Agent, Event, Job, QueueDeliveryRecord, Runtime, utc_now
-from agp.queue_backend import agent_queue_targets, queue_backlogs_by_target_queue, queue_oldest_queued_at
+from agp.queue_backend import (
+    agent_queue_targets,
+    queue_backlogs_by_target_queue,
+    queue_oldest_queued_at,
+)
 
 
 def _current_alerts_payload(db: Session) -> dict:
