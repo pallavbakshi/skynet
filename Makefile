@@ -635,9 +635,9 @@ lint: ## Run linter
 	$(RUN) python scripts/check-smallops-boundary.py
 	$(RUN) lint-imports
 
-capture: ## Capture pane to smallops corpus (usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer])
-	@test -n "$(CAT)" && test -n "$(NAME)" || (echo "Usage: make capture CAT=ready NAME=fresh_launch [SESSION=agp-claude-reviewer]" >&2; exit 1)
-	@./scripts/capture-pane.sh "$(CAT)" "$(NAME)" "$(SESSION)" $(if $(FORCE),--force,)
+capture: ## Capture pane to smallops corpus (usage: make capture CAT=ready NAME=fresh_launch [MUX=tmux|wezterm|herdr] [SESSION=...])
+	@test -n "$(CAT)" && test -n "$(NAME)" || (echo "Usage: make capture CAT=ready NAME=fresh_launch [MUX=tmux|wezterm|herdr] [SESSION=...]" >&2; exit 1)
+	@./scripts/capture-pane.sh "$(CAT)" "$(NAME)" "$(SESSION)" --$(or $(MUX),tmux) $(if $(FORCE),--force,)
 
 # ── Help ─────────────────────────────────────────────────────────────
 

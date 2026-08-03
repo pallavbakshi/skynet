@@ -38,6 +38,7 @@ from smallops_tests.helpers.harness import TestPasses as SpecTestPasses
 
 CODEX_VERSION = "0.146.0"
 WEZTERM_VERSION = "20260117-154428-05343b38"
+HERDR_VERSION = "0.7.5"
 READY_SCREEN = """
 ╭────────────────────────────────────────╮
 │ >_ OpenAI Codex                        │
@@ -116,6 +117,16 @@ def test_docker_image_has_pinned_codex_and_muxes() -> None:
     )
     assert wezterm.returncode == 0, wezterm.stderr or wezterm.stdout
     assert WEZTERM_VERSION in wezterm.stdout + wezterm.stderr
+
+    herdr = subprocess.run(
+        ["herdr", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15.0,
+    )
+    assert herdr.returncode == 0, herdr.stderr or herdr.stdout
+    assert herdr.stdout.strip() == f"herdr {HERDR_VERSION}"
 
 
 @pytest.mark.docker

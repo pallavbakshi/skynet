@@ -18,6 +18,7 @@ class ArtifactContext:
     response: Any | None = None
     peek_text: str | None = None
     response_raw: str | None = None
+    mux_diagnostics: dict[str, str] | None = None
 
 
 ARTIFACT_CONTEXT: pytest.StashKey[ArtifactContext] = pytest.StashKey()
@@ -44,6 +45,8 @@ def snapshot_context(item: pytest.Item) -> None:
                 ctx.peek_text = "<no active smallops pane>"
         except (AttributeError, OSError, RuntimeError) as exc:
             ctx.peek_text = f"<peek failed: {exc!r}>"
+    if ctx.session is not None and ctx.mux_diagnostics is None:
+        ctx.mux_diagnostics = _collect_mux_diagnostics(ctx.session)
     if ctx.response is not None and ctx.response_raw is None:
         ctx.response_raw = getattr(ctx.response, "raw", "") or ""
     item.stash[ARTIFACT_CONTEXT] = ctx
@@ -72,6 +75,12 @@ def dump_failure_artifacts(item: pytest.Item) -> Path | None:
     elif ctx.response is not None:
         (out_dir / "response.raw.txt").write_text(getattr(ctx.response, "raw", "") or "", encoding="utf-8")
 
+    if ctx.mux_diagnostics:
+        diag_dir = out_dir / "mux"
+        diag_dir.mkdir(exist_ok=True)
+        for name, text in ctx.mux_diagnostics.items():
+            (diag_dir / name).write_text(text, encoding="utf-8", errors="replace")
+
     return out_dir
 
 
@@ -86,6 +95,7 @@ def dump_docker_diagnostics(item: pytest.Item, *, out_dir: Path | None = None) -
     _write_command(diag_dir / "codex-version.txt", ["codex", "--version"])
     _write_command(diag_dir / "tmux-version.txt", ["tmux", "-V"])
     _write_command(diag_dir / "wezterm-version.txt", ["wezterm", "--version"])
+    _write_command(diag_dir / "herdr-version.txt", ["herdr", "--version"])
     _write_command(diag_dir / "tmux-sessions.txt", ["tmux", "list-sessions", "-F", "#{session_name}:#{session_attached}:#{session_windows}"])
     _write_command(diag_dir / "tmux-panes.txt", ["tmux", "list-panes", "-a", "-F", "#{session_name}:#{pane_id}:#{pane_current_command}:#{pane_dead}:#{pane_tty}:#{pane_current_path}"])
     _write_command(diag_dir / "wezterm-panes.json", ["wezterm", "cli", "list", "--format", "json"])
@@ -108,6 +118,14 @@ def dump_docker_diagnostics(item: pytest.Item, *, out_dir: Path | None = None) -
     ctx = item.stash.get(ARTIFACT_CONTEXT, ArtifactContext())
     session = ctx.session
     pane = getattr(session, "_session", None) if session is not None else None
+    mux = getattr(session, "mux", None) if session is not None else None
+    herdr_env = None
+    if mux is not None and getattr(mux, "kind", "") == "herdr":
+        try:
+            herdr_env = mux._env()
+        except (AttributeError, OSError, RuntimeError):
+            herdr_env = None
+    _write_command(diag_dir / "herdr-workspaces.json", ["herdr", "workspace", "list"], env=herdr_env)
     if pane is not None:
         pane_id = getattr(pane, "id", "")
         _write_command(diag_dir / "tmux-pane-visible.txt", ["tmux", "capture-pane", "-t", pane_id, "-p"])
@@ -115,6 +133,21 @@ def dump_docker_diagnostics(item: pytest.Item, *, out_dir: Path | None = None) -
         _write_command(diag_dir / "tmux-pane-scrollback.txt", ["tmux", "capture-pane", "-t", pane_id, "-p", "-S", "-500"])
         _write_command(diag_dir / "wezterm-pane-visible.txt", ["wezterm", "cli", "get-text", "--pane-id", pane_id])
         _write_command(diag_dir / "wezterm-pane-scrollback.txt", ["wezterm", "cli", "get-text", "--pane-id", pane_id, "--start-line", "-500"])
+        _write_command(
+            diag_dir / "herdr-pane-visible.txt",
+            ["herdr", "pane", "read", pane_id, "--source", "visible"],
+            env=herdr_env,
+        )
+        _write_command(
+            diag_dir / "herdr-pane-scrollback.txt",
+            ["herdr", "pane", "read", pane_id, "--source", "recent-unwrapped", "--lines", "500"],
+            env=herdr_env,
+        )
+        _write_command(
+            diag_dir / "herdr-pane-process-info.json",
+            ["herdr", "pane", "process-info", "--pane", pane_id],
+            env=herdr_env,
+        )
 
     return diag_dir
 
@@ -172,7 +205,11 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8", errors="replace")
 
 
-def _write_command(path: Path, cmd: list[str]) -> None:
+def _write_command(path: Path, cmd: list[str], *, env: dict[str, str] | None = None) -> None:
+    path.write_text(_command_output(cmd, env=env), encoding="utf-8", errors="replace")
+
+
+def _command_output(cmd: list[str], *, env: dict[str, str] | None = None) -> str:
     try:
         result = subprocess.run(
             cmd,
@@ -180,15 +217,58 @@ def _write_command(path: Path, cmd: list[str]) -> None:
             text=True,
             check=False,
             timeout=15.0,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        path.write_text(f"$ {' '.join(cmd)}\n<failed: {exc!r}>\n", encoding="utf-8")
-        return
-    path.write_text(
-        f"$ {' '.join(cmd)}\nexit={result.returncode}\n\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
-        encoding="utf-8",
-        errors="replace",
-    )
+        return f"$ {' '.join(cmd)}\n<failed: {exc!r}>\n"
+    return f"$ {' '.join(cmd)}\nexit={result.returncode}\n\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+
+
+def _collect_mux_diagnostics(session: Any) -> dict[str, str]:
+    mux = getattr(session, "mux", None)
+    pane = getattr(session, "_session", None)
+    if mux is None or pane is None:
+        return {}
+
+    kind = getattr(mux, "kind", "")
+    pane_id = getattr(pane, "id", "")
+    if not pane_id:
+        return {}
+
+    if kind == "herdr":
+        try:
+            env = mux._env()
+        except (AttributeError, OSError, RuntimeError):
+            env = None
+        return {
+            "herdr-workspaces.json": _command_output(["herdr", "workspace", "list"], env=env),
+            "herdr-pane-visible.txt": _command_output(
+                ["herdr", "pane", "read", pane_id, "--source", "visible"],
+                env=env,
+            ),
+            "herdr-pane-scrollback.txt": _command_output(
+                ["herdr", "pane", "read", pane_id, "--source", "recent-unwrapped", "--lines", "500"],
+                env=env,
+            ),
+            "herdr-pane-process-info.json": _command_output(
+                ["herdr", "pane", "process-info", "--pane", pane_id],
+                env=env,
+            ),
+        }
+    if kind == "tmux":
+        return {
+            "tmux-pane-visible.txt": _command_output(["tmux", "capture-pane", "-t", pane_id, "-p"]),
+            "tmux-pane-ansi.raw": _command_output(["tmux", "capture-pane", "-t", pane_id, "-p", "-e"]),
+            "tmux-pane-scrollback.txt": _command_output(["tmux", "capture-pane", "-t", pane_id, "-p", "-S", "-500"]),
+        }
+    if kind == "wezterm":
+        return {
+            "wezterm-pane-visible.txt": _command_output(["wezterm", "cli", "get-text", "--pane-id", pane_id]),
+            "wezterm-pane-scrollback.txt": _command_output(
+                ["wezterm", "cli", "get-text", "--pane-id", pane_id, "--start-line", "-500"]
+            ),
+        }
+    return {}
 
 
 def _write_tree(path: Path, root: Path) -> None:

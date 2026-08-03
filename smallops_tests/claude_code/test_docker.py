@@ -35,6 +35,7 @@ from smallops_tests.helpers.harness import TestPasses as SpecTestPasses
 
 CLAUDE_CODE_VERSION = "2.1.170"
 WEZTERM_VERSION = "20260117-154428-05343b38"
+HERDR_VERSION = "0.7.5"
 BYPASS_ACCEPT = "\x1b[B"
 
 
@@ -54,7 +55,7 @@ def test_docker_00_starts_with_pristine_claude_home() -> None:
 
 
 @pytest.mark.docker
-def test_docker_image_has_pinned_claude_code_and_tmux() -> None:
+def test_docker_image_has_pinned_claude_code_and_muxes() -> None:
     _require_smallops_container()
     claude = subprocess.run(
         ["claude", "--version"],
@@ -84,6 +85,16 @@ def test_docker_image_has_pinned_claude_code_and_tmux() -> None:
     )
     assert wezterm.returncode == 0, wezterm.stderr or wezterm.stdout
     assert WEZTERM_VERSION in wezterm.stdout + wezterm.stderr
+
+    herdr = subprocess.run(
+        ["herdr", "--version"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15.0,
+    )
+    assert herdr.returncode == 0, herdr.stderr or herdr.stdout
+    assert herdr.stdout.strip() == f"herdr {HERDR_VERSION}"
 
 
 @pytest.mark.docker

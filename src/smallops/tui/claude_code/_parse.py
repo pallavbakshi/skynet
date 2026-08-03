@@ -72,10 +72,38 @@ def _collapsed_tool_name(content: str) -> str:
 
 def capture(text: str, marker: str) -> str:
     """Phase 1: extract everything after the marker. No filtering."""
+    if not marker:
+        return text
+
+    anchor = None
     idx = text.find(marker)
     if idx >= 0:
-        return text[idx + len(marker):]
-    return text
+        anchor = idx + len(marker)
+    else:
+        path_match = re.search(r"Read the file\s+(\S+)", marker)
+        if path_match:
+            path = path_match.group(1).rstrip(".")
+            idx = text.find(path)
+            if idx >= 0:
+                anchor = idx + len(path)
+
+    if anchor is None:
+        return text
+
+    structural_idx = _first_structural_response_index(text, anchor)
+    if structural_idx is not None:
+        return text[structural_idx:]
+    return text[anchor:]
+
+
+def _first_structural_response_index(text: str, start: int) -> int | None:
+    pos = start
+    for line in text[start:].splitlines(keepends=True):
+        s = line.strip()
+        if any(s.startswith(p) for p in RESPONSE_PREFIXES) or _collapsed_tool_name(s):
+            return pos
+        pos += len(line)
+    return None
 
 
 def parse(captured: str) -> ParsedResponse:
@@ -199,6 +227,7 @@ _TOKENS_RE = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*([kKmM]?)\s+tokens?", re.IGNORE
 _PCT_RE = re.compile(r"(\d+)%")
 _TIME_RE = re.compile(r"\d{2}:\d{2}:\d{2}")
 _MODEL_SUFFIX_RE = re.compile(r"\[[^\]]+\]$")
+_CARD_MODEL_RE = re.compile(r"\b(?:Opus|Sonnet|Haiku)\s+\d+(?:\.\d+)?\b", re.IGNORECASE)
 
 
 def parse_status(screen: str) -> Status:
@@ -260,7 +289,8 @@ def _parse_tokens(text: str) -> int:
 
 
 def _parse_card_model(text: str) -> str:
-    for line in text.splitlines():
+    lines = text.splitlines()
+    for line in lines:
         if "API Usage Billing" not in line or "·" not in line:
             continue
         for segment in line.split("│"):
@@ -268,6 +298,13 @@ def _parse_card_model(text: str) -> str:
                 continue
             model = segment.split("·", 1)[0].strip()
             return _MODEL_SUFFIX_RE.sub("", model).strip()
+    for idx, line in enumerate(lines):
+        if "API Usage Billing" not in line:
+            continue
+        for candidate in reversed(lines[max(0, idx - 3):idx]):
+            match = _CARD_MODEL_RE.search(candidate)
+            if match:
+                return match.group(0)
     return ""
 
 

@@ -11,7 +11,7 @@ from smallops._types import IdleReason, ParsedResponse, SessionInfo, Status
 class Mux(Protocol):
     """Terminal multiplexer that owns panes.
 
-    Implementations: TmuxMux, WezTermMux.
+    Implementations: TmuxMux, WezTermMux, HerdrMux.
     """
 
     kind: str  # e.g. "tmux", "wezterm"

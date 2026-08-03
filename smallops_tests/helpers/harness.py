@@ -22,6 +22,7 @@ from smallops import (
     ClaudeCodeTui,
     CodexTui,
     Config,
+    HerdrMux,
     IdleReason,
     Response,
     Session,
@@ -48,7 +49,7 @@ PROVIDER_ENV_KEYS = (
     "AGP_CODEX_MODEL",
 )
 
-SMALLOPS_MUXES = ("tmux", "wezterm")
+SMALLOPS_MUXES = ("tmux", "wezterm", "herdr")
 CODEX_PROVIDER_PREFLIGHT: dict[str, tuple[bool, str]] = {}
 
 
@@ -215,6 +216,10 @@ def make_mux(kind: str):
         if os.environ.get("SMALLOPS_DOCKER") != "1":
             _require_local_wezterm_mux()
         return WezTermMux(workspace="smallops-test")
+    if kind == "herdr":
+        if which("herdr") is None:
+            pytest.skip("herdr is not installed")
+        return HerdrMux(prefix="smallops-test")
     raise ValueError(f"unsupported smallops test mux: {kind}")
 
 
@@ -337,6 +342,12 @@ def assert_live_invariants(ctx: RunContext) -> None:
             status.model = parsed_status.model
         if status.tokens <= 0 and parsed_status.tokens > 0:
             status.tokens = parsed_status.tokens
+    if not status.model or status.tokens <= 0:
+        raw_status = ctx.session.tui.parse_status(response.raw)
+        if not status.model and raw_status.model:
+            status.model = raw_status.model
+        if status.tokens <= 0 and raw_status.tokens > 0:
+            status.tokens = raw_status.tokens
     assert status.model
     assert isinstance(status.tokens, int)
     if ctx.spec.environment == "docker":

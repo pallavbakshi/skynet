@@ -44,7 +44,7 @@ from smallops._util import (
     write_nudge_file,
     write_via_file,
 )
-from smallops.mux import TmuxMux, WezTermMux
+from smallops.mux import HerdrMux, TmuxMux, WezTermMux
 from smallops.tui import ClaudeCodeTui, CodexTui
 
 __all__ = [
@@ -56,6 +56,7 @@ __all__ = [
     "CodexTui",
     "Config",
     "FatalGate",
+    "HerdrMux",
     "IdleReason",
     "Meta",
     "Mux",
@@ -325,6 +326,12 @@ class Session:
 
         # Parse TUI status line
         status = self.tui.parse_status(screen) if screen else Status()
+        if alive and not status.model:
+            try:
+                history = self._read_screen(500, handle_gates=False)
+                status = self.tui.parse_status(history)
+            except Exception:
+                pass
 
         return Meta(
             state=state,

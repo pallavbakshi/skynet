@@ -120,5 +120,6 @@ forbidden_modules = [
   "smallops.tui.codex._gates",
   "smallops.mux._tmux",
   "smallops.mux._wezterm",
+  "smallops.mux._herdr",
 ]
 allow_indirect_imports = true
