@@ -40,6 +40,14 @@ uv sync --all-groups          # install everything (dev + test groups)
 make test-smallops            # 142 offline parser tests, no external deps (~1.5s)
 ```
 
+### See it run — no agent installed
+
+```bash
+# In-process stub host: proves the dispatch → execute → artifact flow.
+# No Claude Code, tmux, or API key required.
+skyops debug plugin run inprocess default demo --task "hello, agp"
+```
+
 ### Drive a real agent (the core capability, in 4 lines)
 
 ```python
@@ -63,24 +71,20 @@ response. Zero third-party dependencies (Python stdlib only).
 agp initdb
 agp serve &                                 # http://localhost:7860
 
-# Start a runtime that registers the `claude-dev` agent and executes its jobs.
-# Set a provider key if you have one (OPENROUTER_API_KEY / OPENAI_API_KEY);
-# otherwise Claude Code falls back to its OAuth login.
+# Start a runtime that registers the `claude-dev` agent and runs its jobs.
+# Claude Code must be usable locally: logged in via `claude` OAuth, or with
+# ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL set (e.g. an OpenRouter Anthropic endpoint).
 make claude-dev &
+
+# Give it a few seconds to register + bootstrap, then confirm it's IDLE:
+agp status claude-dev
 
 # Dispatch, wait, fetch. (fire-and-forget + wait is deterministic — see
 # "For AI orchestrators" below for the safe contract.)
 agp send claude-dev "refactor the auth module into a service" --fire-and-forget
+# ↑ the output prints a `JOB_ID:` line — use that id below:
 agp wait <job_id> --poll-timeout 1800       # block until a terminal state
 agp result <job_id>                         # fetch the result artifact
-```
-
-### Try it with no agent installed
-
-```bash
-# In-process stub host — no Claude Code, tmux, or API key required.
-# Demonstrates the full dispatch → execute → artifact flow.
-skyops debug plugin run inprocess default demo --task "hello, agp"
 ```
 
 ---
