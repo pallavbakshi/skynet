@@ -5,7 +5,7 @@ image.
 
 - Codex CLI: `@openai/codex@0.146.0`
 - WezTerm: `20260117-154428-05343b38`
-- Muxes: `tmux`, `wezterm`
+- Muxes: `tmux`, `wezterm`, `herdr`
 - Source run: `test-artifacts/docker/20260802-180753`
 
 These files are not blessed expected outputs. Offline tests assert parser and
@@ -20,3 +20,12 @@ SMALLOPS_CODEX_CORPUS_OUT=/app/test-artifacts/docker-current/codex-corpus \
 SMALLOPS_DOCKER_PYTEST_ARGS='smallops_tests/codex/test_docker.py -q --tb=short' \
 scripts/docker/run-smallops-tests.sh
 ```
+
+The preferred version-bump path is:
+
+```sh
+SMALLOPS_DOCKER_ENV_FILE=.env.openrouter make test-smallops-qualify
+```
+
+Review the generated `codex-corpus-candidate/` directory under the Docker
+artifact run before promoting useful captures into this corpus.

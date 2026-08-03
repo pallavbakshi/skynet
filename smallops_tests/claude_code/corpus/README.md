@@ -1,6 +1,6 @@
 # Claude Code TUI Corpus
 
-Real tmux pane captures of Claude Code at various TUI states.
+Real pane captures of Claude Code at various TUI states.
 Used as offline inputs for smallops parser property tests. These are not blessed
 snapshots; tests assert invariants and category-level properties only.
 
@@ -18,17 +18,24 @@ make capture CAT=ready NAME=fresh_launch FORCE=1  # overwrite intentionally
 
 ## What gets saved
 
-Each tmux capture produces 2 files:
+Each capture should produce 2 files:
 
 | File | Content |
 |------|---------|
 | `{name}.raw` | Raw tmux output with ANSI escapes (source of truth) |
 | `{name}.txt` | Plain text (ANSI stripped by tmux) |
 
-WezTerm captures currently produce `{name}.txt` only.
-
 Do not add `{name}.expected.json` files. The offline layer intentionally avoids
 snapshot equality.
+
+Docker version qualification can also emit candidate captures:
+
+```bash
+SMALLOPS_DOCKER_ENV_FILE=.env.openrouter make test-smallops-qualify
+```
+
+Review the generated `claude-code-corpus-candidate/` directory under the Docker
+artifact run before promoting useful captures into this corpus.
 
 ## Directory layout
 

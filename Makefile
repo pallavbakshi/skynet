@@ -613,7 +613,7 @@ codex-orc: ## Launch codex orchestrator (read-only sandbox, delegates to claude-
 
 # ── Dev/test targets ─────────────────────────────────────────────────
 
-.PHONY: test lint test-parser test-smallops test-live test-docker capture
+.PHONY: test lint test-parser test-smallops test-live test-docker test-smallops-qualify capture
 
 test: ## Run test suite
 	env -u SMALLOPS_LIVE -u SMALLOPS_DOCKER -u SMALLOPS_JUDGE $(RUN) python -m pytest tests/ smallops_tests/ -x -q --tb=short
@@ -629,6 +629,9 @@ test-live: ## Run smallops live tests (requires Claude Code)
 
 test-docker: ## Run smallops Docker first-run tests
 	@./scripts/docker/run-smallops-tests.sh
+
+test-smallops-qualify: ## Run Docker smallops version qualification and emit candidate parser corpora
+	@./scripts/docker/qualify-smallops-version.sh
 
 lint: ## Run linter
 	$(RUN) python -m ruff check src/ tests/ smallops_tests/ scripts/inspect-smallops-corpus.py scripts/check-smallops-boundary.py

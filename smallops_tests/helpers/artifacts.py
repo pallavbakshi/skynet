@@ -176,11 +176,13 @@ def _docker_env_report() -> str:
         "API_TIMEOUT_MS",
         "CLAUDE_CODE_SUBAGENT_MODEL",
         "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+        "SMALLOPS_CLAUDE_CODE_CORPUS_OUT",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "OPENROUTER_API_KEY",
         "SMALLOPS_CODEX_OPENROUTER_API_KEY",
         "SMALLOPS_CODEX_MODEL",
+        "SMALLOPS_CODEX_CORPUS_OUT",
         "AGP_CODEX_MODEL",
     ]
     lines = []

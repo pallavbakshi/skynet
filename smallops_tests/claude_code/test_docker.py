@@ -17,6 +17,8 @@ from smallops import (
     IdleReason,
     Session,
     SessionInfo,
+    normalize_screen,
+    strip_ansi,
 )
 from smallops_tests.helpers.artifacts import record_context, snapshot_context
 from smallops_tests.helpers.harness import (
@@ -239,7 +241,9 @@ def test_docker_claude_code_exact_reply(
         mux=smallops_mux,
         timeout=180.0,
     )
-    run_spec(spec, request=request, tmp_path=tmp_path)
+    ctx = run_spec(spec, request=request, tmp_path=tmp_path)
+    _capture_corpus("ready", f"post_response_{smallops_mux}", ctx.response.raw)
+    _capture_corpus("turns", f"exact_reply_{smallops_mux}", ctx.response.raw)
 
 
 @pytest.mark.docker
@@ -260,7 +264,8 @@ def test_docker_claude_code_read_tool_use(
         mux=smallops_mux,
         timeout=180.0,
     )
-    run_spec(spec, request=request, tmp_path=tmp_path)
+    ctx = run_spec(spec, request=request, tmp_path=tmp_path)
+    _capture_corpus("turns", f"tool_read_{smallops_mux}", ctx.response.raw)
 
 
 @pytest.mark.docker
@@ -284,7 +289,8 @@ def test_docker_claude_code_file_write(
         mux=smallops_mux,
         timeout=180.0,
     )
-    run_spec(spec, request=request, tmp_path=tmp_path)
+    ctx = run_spec(spec, request=request, tmp_path=tmp_path)
+    _capture_corpus("turns", f"file_write_{smallops_mux}", ctx.response.raw)
 
 
 @pytest.mark.docker
@@ -320,7 +326,8 @@ def test_docker_claude_code_test_fix(
         mux=smallops_mux,
         timeout=240.0,
     )
-    run_spec(spec, request=request, tmp_path=tmp_path)
+    ctx = run_spec(spec, request=request, tmp_path=tmp_path)
+    _capture_corpus("turns", f"test_fix_{smallops_mux}", ctx.response.raw)
 
 
 @pytest.mark.docker
@@ -355,6 +362,7 @@ def test_docker_session_api_surface(
             timeout=180.0,
         )
         record_context(request.node, session=session, response=first)
+        _capture_corpus("turns", f"api_send_{smallops_mux}", first.raw)
         assert "API-SEND-ONE" in first.text
         assert first.marker
         assert first.raw
@@ -393,6 +401,7 @@ def test_docker_session_api_surface(
 
         after_reset = session.send(_literal_prompt("API-AFTER-RESET"), timeout=180.0)
         record_context(request.node, session=session, response=after_reset)
+        _capture_corpus("turns", f"after_reset_{smallops_mux}", after_reset.raw)
         assert "API-AFTER-RESET" in after_reset.text
 
         session.interrupt()
@@ -435,6 +444,7 @@ def test_docker_interrupts_active_turn(
             meta = session.meta()
             if meta.state == AgentState.WORKING:
                 saw_working = True
+                _capture_corpus("working", f"active_turn_{smallops_mux}", session.peek())
                 break
 
         assert saw_working, "expected Claude Code to enter WORKING before interrupt"
@@ -454,6 +464,20 @@ def _literal_prompt(token: str) -> str:
         "Do not create memories, schedules, files, todos, or tool calls. "
         "Do not explain."
     )
+
+
+def _capture_corpus(category: str, name: str, screen: str) -> None:
+    root = os.environ.get("SMALLOPS_CLAUDE_CODE_CORPUS_OUT")
+    if not root:
+        return
+    out_dir = Path(root) / category
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw = screen if screen.endswith("\n") else f"{screen}\n"
+    (out_dir / f"{name}.raw").write_text(raw, encoding="utf-8", errors="replace")
+    normalized = normalize_screen(strip_ansi(screen))
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    (out_dir / f"{name}.txt").write_text(normalized, encoding="utf-8", errors="replace")
 
 
 @dataclass(slots=True)
