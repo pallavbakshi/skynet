@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from smallops import BlockKind, CodexTui, IdleReason, normalize_screen, strip_ansi
+from smallops import (
+    BlockKind,
+    ClaudeCodeTui,
+    CodexTui,
+    IdleReason,
+    normalize_screen,
+    strip_ansi,
+)
 from smallops._types import Status
 
 CORPUS_ROOT = Path(__file__).parent / "corpus"
@@ -316,11 +323,177 @@ def test_codex_launch_prompt_command_can_wrap_script_pty() -> None:
 
 
 @pytest.mark.offline
-def test_codex_format_send_uses_direct_task_marker() -> None:
-    marker, send_text, path = CodexTui().format_send("Reply OK")
+def test_codex_uses_via_file_delivery_like_claude_code() -> None:
+    """Codex ships no ``format_send`` override, so ``Session.send`` falls back to
+    ``write_via_file`` — the same temp-file delivery Claude Code uses. This keeps
+    large/multiline prompts out of the terminal paste path (parity with Claude Code)."""
+    # Neither Tui overrides prompt delivery → both route through write_via_file.
+    assert not hasattr(CodexTui(), "format_send")
+    assert not hasattr(ClaudeCodeTui(), "format_send")
 
-    assert marker.startswith("SMALLOPS-CODEX-TASK-")
-    assert marker in send_text
-    assert "Read the file" not in send_text
-    assert send_text.endswith(" Reply OK")
-    assert path is None
+
+@pytest.mark.offline
+def test_codex_parser_extracts_response_after_via_file_reference_marker() -> None:
+    """Codex now delivers prompts via the temp-file reference (parity with Claude
+    Code). That reference is far longer than the old SMALLOPS-CODEX-TASK marker, so
+    prove the parser still locates it verbatim in codex's echoed › line: a preceding
+    turn's output must be EXCLUDED, which only happens if ``capture()`` finds the marker."""
+    tui = CodexTui()
+    marker = (
+        "Read the file /tmp/smallops/task-example.md. Execute only the task text "
+        "between BEGIN TASK and END TASK exactly; do not summarize or restate."
+    )
+    screen = f"""
+• PREVIOUS-TURN-OUTPUT
+
+› {marker}
+
+• CODEX-PONG
+
+›
+gpt-5.3-codex low · 12.3k used · 19% used
+"""
+    parsed = tui.parse_blocks(screen, marker)
+
+    assert parsed.text == "CODEX-PONG"
+    assert "PREVIOUS-TURN-OUTPUT" not in parsed.text
+    assert tui.classify_idle(screen) == IdleReason.READY
+
+
+@pytest.mark.offline
+def test_codex_parser_handles_wrapped_via_file_marker_via_path_fallback() -> None:
+    """The via-file reference is long and can wrap in a real terminal, so the exact
+    marker won't match. The parser must fall back to anchoring on the shorter file
+    path (parity with claude_code's capture). Regression test for the wrapped-marker
+    case surfaced in review."""
+    tui = CodexTui()
+    marker = (
+        "Read the file /tmp/smallops/task-example.md. Execute only the task text "
+        "between BEGIN TASK and END TASK exactly; do not summarize or restate."
+    )
+    # Codex wrapped the echoed input across two lines → the full marker is NOT a
+    # contiguous substring, but the path is.
+    screen = """
+• PREVIOUS-TURN-OUTPUT
+
+› Read the file /tmp/smallops/task-example.md.
+Execute only the task text between BEGIN TASK and END TASK exactly; do not summarize or restate.
+
+• CODEX-PONG
+
+› Find and fix a bug in @filename
+
+  gpt-5.3-codex low · 100% left · /tmp/work
+"""
+    parsed = tui.parse_blocks(screen, marker)
+
+    assert parsed.text == "CODEX-PONG"
+    assert "PREVIOUS-TURN-OUTPUT" not in parsed.text
+
+
+@pytest.mark.offline
+def test_codex_session_send_uses_via_file_delivery(tmp_path) -> None:
+    """Session.send with CodexTui writes the prompt to a temp file and sends only the
+    'Read the file …' reference — never the full prompt — inheriting the generic
+    via-file path through Session.send (parity with Claude Code)."""
+    from smallops import Config, Session, SessionInfo
+
+    class FakeMux:
+        kind = "fake"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def session_exists(self, session) -> bool:
+            return True
+
+        def send_text(self, session, text: str, *, enter: bool = True) -> None:
+            self.sent.append(text)
+
+        def peek(self, session, n: int | None = None) -> str:
+            last = self.sent[-1] if self.sent else ""
+            return (
+                f"› {last}\n\n• CODEX-RESPONSE\n\n"
+                "› Find and fix a bug in @filename\n\n"
+                "  gpt-5.3-codex low · 100% left · /tmp/work\n"
+            )
+
+        def interrupt(self, session) -> None:
+            pass
+
+        def destroy_session(self, session) -> None:
+            pass
+
+    mux = FakeMux()
+    config = Config(poll_interval=0, idle_threshold=2, timeout=10, via_file_dir=str(tmp_path))
+    s = Session(mux=mux, tui=CodexTui(), config=config)
+    s._session = SessionInfo(id="fake", name="codex-dev", cwd=str(tmp_path))
+
+    response = s.send("do the thing")
+
+    # (1) exactly one task file written under via_file_dir
+    files = sorted(tmp_path.glob("task-*.md"))
+    assert len(files) == 1
+    # (2) send_text received the reference, not the full prompt
+    assert mux.sent and mux.sent[-1].startswith("Read the file")
+    assert "do the thing" not in mux.sent[-1]
+    assert str(files[0]) in mux.sent[-1]
+    # (3) the prompt is wrapped in the file (BEGIN/END TASK), not typed inline
+    body = files[0].read_text()
+    assert "BEGIN TASK" in body and "do the thing" in body
+    # (4) the response was parsed
+    assert response.text == "CODEX-RESPONSE"
+    # (5) cleanup on down() removes the task file
+    s.down()
+    assert not files[0].exists()
+
+
+@pytest.mark.offline
+def test_codex_session_send_file_arg_is_rewrapped_once(tmp_path) -> None:
+    """Passing file= reads that file and rewraps its content into our own task file
+    (a single wrap), then sends the reference — the original content is never typed."""
+    from smallops import Config, Session, SessionInfo
+
+    class FakeMux:
+        kind = "fake"
+
+        def __init__(self) -> None:
+            self.sent: list[str] = []
+
+        def session_exists(self, session) -> bool:
+            return True
+
+        def send_text(self, session, text: str, *, enter: bool = True) -> None:
+            self.sent.append(text)
+
+        def peek(self, session, n: int | None = None) -> str:
+            last = self.sent[-1] if self.sent else ""
+            return (
+                f"› {last}\n\n• OK\n\n"
+                "› Find and fix a bug in @filename\n\n"
+                "  gpt-5.3-codex low · 100% left · /tmp/work\n"
+            )
+
+        def interrupt(self, session) -> None:
+            pass
+
+        def destroy_session(self, session) -> None:
+            pass
+
+    src = tmp_path / "src.md"
+    src.write_text("ORIGINAL-PROMPT-BODY")
+
+    mux = FakeMux()
+    config = Config(poll_interval=0, idle_threshold=2, timeout=10, via_file_dir=str(tmp_path))
+    s = Session(mux=mux, tui=CodexTui(), config=config)
+    s._session = SessionInfo(id="fake", name="codex-dev", cwd=str(tmp_path))
+
+    s.send(file=str(src))
+
+    task_files = sorted(tmp_path.glob("task-*.md"))
+    assert len(task_files) == 1
+    assert task_files[0] != src                                    # a NEW task file, not the source
+    assert "ORIGINAL-PROMPT-BODY" in task_files[0].read_text()     # content rewrapped into it
+    assert src.read_text() == "ORIGINAL-PROMPT-BODY"              # source untouched
+    assert mux.sent and mux.sent[-1].startswith("Read the file")
+    assert "ORIGINAL-PROMPT-BODY" not in mux.sent[-1]             # not typed inline

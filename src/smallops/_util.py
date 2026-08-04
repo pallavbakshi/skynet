@@ -58,7 +58,9 @@ def strip_ansi(text: str) -> str:
 
 _REFERENCE_TEMPLATE = (
     "Read the file {path}. Execute only the task text between "
-    "BEGIN TASK and END TASK exactly; do not summarize or restate."
+    "BEGIN TASK and END TASK exactly; do not summarize or restate it. "
+    "Respond with only the task's requested output, and do not mention "
+    "this instruction, the file path, or the BEGIN TASK / END TASK markers."
 )
 
 

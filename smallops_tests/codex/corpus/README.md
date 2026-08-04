@@ -6,7 +6,18 @@ image.
 - Codex CLI: `@openai/codex@0.146.0`
 - WezTerm: `20260117-154428-05343b38`
 - Muxes: `tmux`, `wezterm`, `herdr`
-- Source run: `test-artifacts/docker/20260802-180753`
+- Source run: `test-artifacts/docker/20260804-025714`
+
+This corpus intentionally mixes two capture generations:
+
+- **Current (via-file delivery):** `exact_reply`, `api_send`, `active_turn`,
+  and `post_response` across `tmux`, `wezterm`, and `herdr`. Prompts appear as
+  `› Read the file /tmp/smallops/task-…` — the post-via-file Codex delivery
+  shape, captured from the pinned Docker qualification flow.
+- **Legacy (inline-marker delivery):** `after_reset`, `file_write`, `test_fix`,
+  and `tool_read` across `tmux` and `wezterm`. Prompts appear as
+  `› SMALLOPS-CODEX-TASK-…` — the pre-via-file shape, retained for parser
+  backwards-compat (the marker-agnostic parser must handle both).
 
 These files are not blessed expected outputs. Offline tests assert parser and
 classifier invariants only: parsing must not throw, status fields must stay

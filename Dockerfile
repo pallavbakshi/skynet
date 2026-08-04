@@ -12,6 +12,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 COPY pyproject.toml /app/
 COPY uv.lock /app/
 COPY research/master-prd.md /app/research/master-prd.md
+COPY README.md /app/README.md
 COPY src /app/src
 COPY migrations /app/migrations
 COPY scripts /app/scripts
@@ -137,6 +138,7 @@ FROM agp-runtime-deps AS agp-runtime
 COPY pyproject.toml /app/
 COPY uv.lock /app/
 COPY research/master-prd.md /app/research/master-prd.md
+COPY README.md /app/README.md
 COPY src /app/src
 COPY migrations /app/migrations
 COPY scripts /app/scripts

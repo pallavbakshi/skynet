@@ -55,10 +55,21 @@ def _is_tool_header(content: str) -> str:
 # ── Capture + Parse ─────────────────────────────────────────────────
 
 def capture(text: str, marker: str) -> str:
-    """Phase 1: extract everything after the marker. No filtering."""
+    """Phase 1: extract everything after the marker. No filtering.
+
+    The via-file reference marker is long and can wrap/truncate in the terminal,
+    so an exact match may miss. Fall back to anchoring on the shorter file path,
+    mirroring claude_code's capture().
+    """
     idx = text.find(marker)
     if idx >= 0:
         return text[idx + len(marker):]
+    path_match = re.search(r"Read the file\s+(\S+)", marker)
+    if path_match:
+        path = path_match.group(1).rstrip(".")
+        idx = text.find(path)
+        if idx >= 0:
+            return text[idx + len(path):]
     return text
 
 

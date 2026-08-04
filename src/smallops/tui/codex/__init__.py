@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from shlex import quote
-from uuid import uuid4
 
 from smallops._types import IdleReason, ParsedResponse, Status
 from smallops.tui.codex._classify import (
@@ -51,23 +49,6 @@ class CodexTui:
         if self.script_pty:
             return f"script -qfec {quote(command)} /tmp/smallops-codex.typescript"
         return command
-
-    def format_send(
-        self,
-        prompt: str,
-        *,
-        file: str | None = None,
-        sections: str | None = None,
-        directory: str = "/tmp/smallops",
-    ) -> tuple[str, str, str | None]:
-        if file is not None:
-            prompt = Path(file).read_text(encoding="utf-8")
-
-        marker = f"SMALLOPS-CODEX-TASK-{uuid4().hex[:12]}"
-        send_text = f"{marker} {prompt}"
-        if sections:
-            send_text += f"\n\n{sections}"
-        return marker, send_text, None
 
     def classify_idle(self, screen: str) -> IdleReason:
         return classify_idle(screen)
