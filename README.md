@@ -299,7 +299,7 @@ AGP is **early and actively developed** — usable, but expect change.
 
 - ✅ Core control plane, runtime, and substrate are implemented and self-consistent.
 - ✅ Offline parser suite is green; the `skyops → agp → smallops` boundary is enforced by `make lint`.
-- ⚠️ **No semver or changelog yet** — the public API may change without notice.
+- ⚠️ **No formal release process yet** — `agp --version` reports each build (`<version>+<git-sha>`), but there's no changelog or compatibility promise; the API may change without notice.
 - ⚠️ Real-agent execution is validated via Docker qualification, not yet via unit tests on the
   `agp ↔ smallops` execution seam.
 - ⚠️ `smallops` ships inside the `agp` distribution; standalone packaging is not yet available.

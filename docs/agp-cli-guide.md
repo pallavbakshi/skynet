@@ -15,7 +15,7 @@ Practical guide to orchestrating work across AI agents using the `agp` command-l
 ```
 agp status                          # system dashboard
 agp send <agent> "task"             # send work, wait for result
-agp send <agent> "task" --detach    # fire and forget
+agp send <agent> "task" --fire-and-forget    # fire and forget
 agp wait <job_id> [job_id2 ...]     # wait for one or more jobs
 agp result <job_id>                 # get clean output
 agp peek <agent>                    # see agent's live terminal
@@ -54,7 +54,7 @@ agp info <runtime_id>
 ### Basics
 
 ```bash
-# Wait for result (auto-detaches after 90s if still running)
+# Wait for result (auto-detaches after 300s if still running)
 agp send <agent_id> "Your task here"
 
 # No quoting needed — words after agent ID are joined
@@ -64,7 +64,7 @@ agp send <agent_id> Read src/main.py and find bugs
 agp send <agent_id> "Complex analysis" --timeout 300
 
 # Fire-and-forget — returns job ID immediately
-agp send <agent_id> "Long task" --detach
+agp send <agent_id> "Long task" --fire-and-forget
 ```
 
 ### Complex prompts
@@ -134,8 +134,8 @@ Send to multiple agents, then wait for all:
 
 ```bash
 # Dispatch (note job IDs from output)
-agp send reviewer-a "Review for correctness" --detach   # → job_aaa
-agp send reviewer-b "Review for security" --detach      # → job_bbb
+agp send reviewer-a "Review for correctness" --fire-and-forget   # → job_aaa
+agp send reviewer-b "Review for security" --fire-and-forget      # → job_bbb
 
 # Wait for both — results stream as each finishes
 agp wait job_aaa job_bbb --poll-timeout 300
@@ -179,7 +179,7 @@ Reply to a completed job — the agent sees its previous work:
 
 ```bash
 agp reply <job_id> "Now fix what you found"
-agp reply <job_id> "Follow up on the security issue" --detach
+agp reply <job_id> "Follow up on the security issue" --fire-and-forget
 ```
 
 Supports the same flags as `send` (`--attach`, `--timeout`, `--via-file`, etc.).
@@ -209,8 +209,8 @@ The review loop: reviewer returns `{"verdict": "approved"|"changes_requested", "
 When you want two reviewers in parallel, use `--review` for structured output:
 
 ```bash
-agp send reviewer-a "Review this change" --review --detach
-agp send reviewer-b "Review this change" --review --detach
+agp send reviewer-a "Review this change" --review --fire-and-forget
+agp send reviewer-b "Review this change" --review --fire-and-forget
 agp wait <job_a> <job_b>
 ```
 
@@ -267,16 +267,16 @@ agp info <agent_id> --diagnose
 
 ```bash
 # 1. Dev implements
-agp send dev-agent "Implement rate limiting on /api/submit" --detach
+agp send dev-agent "Implement rate limiting on /api/submit" --fire-and-forget
 agp wait job_impl --poll-timeout 600
 
 # 2. Two reviewers in parallel
-agp send reviewer-a "Review for correctness" --review --detach
-agp send reviewer-b "Review for security" --review --detach
+agp send reviewer-a "Review for correctness" --review --fire-and-forget
+agp send reviewer-b "Review for security" --review --fire-and-forget
 agp wait job_rev_a job_rev_b --poll-timeout 300
 
 # 3. Dev fixes based on review findings
-agp reply job_impl "Fix these issues: <paste findings>" --detach
+agp reply job_impl "Fix these issues: <paste findings>" --fire-and-forget
 ```
 
 ### Chain agent outputs
@@ -297,7 +297,7 @@ agp review job_fix reviewer-agent --dev dev-agent --diff --max-rounds 3
 ## Tips
 
 - **`wait` accepts multiple job IDs** — `agp wait job_a job_b job_c` streams results as each completes. No need to wait sequentially.
-- **`--detach` for parallel work** — send multiple tasks with `--detach`, then collect with one `agp wait`.
+- **`--fire-and-forget` for parallel work** — send multiple tasks with `--fire-and-forget`, then collect with one `agp wait`.
 - **`--via-file` for complex prompts** — avoids shell quoting nightmares. Write your prompt in a file, pass the path.
 - **`peek` works remotely** — as long as CLI and runtime talk to the same CP. Timeout is 45s to accommodate heartbeat cycles over tunnels.
 - **`status` is the dashboard** — no args for system overview, pass a job/agent ID for details.

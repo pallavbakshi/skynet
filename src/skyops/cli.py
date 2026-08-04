@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import typer
 
+from agp.cli._version import format_version
 from skyops._backup import backup_app
 from skyops._config_cmd import config_app
 from skyops._control_plane import cp_app
@@ -27,6 +28,27 @@ app = typer.Typer(
     help="Operator CLI for the AGP stack.",
     no_args_is_help=True,
 )
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"skyops {format_version()}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the skyops version and exit.",
+    ),
+) -> None:
+    """Operator CLI for the AGP stack."""
+
 
 # Phase B: skeleton
 app.add_typer(init_app, name="init", invoke_without_command=True)

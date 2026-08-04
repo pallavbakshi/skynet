@@ -14,7 +14,30 @@ Split into submodules for maintainability:
 
 import typer
 
+from agp.cli._version import format_version
+
 app = typer.Typer(help="AGP agent CLI.")
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"agp {format_version()}")
+        raise typer.Exit()
+
+
+@app.callback()
+def _main(
+    version: bool = typer.Option(
+        None,
+        "--version",
+        "-V",
+        callback=_version_callback,
+        is_eager=True,
+        help="Show the agp version and exit.",
+    ),
+) -> None:
+    """AGP agent CLI."""
+
 
 # Import all command modules so their @app.command() decorators register.
 from agp.cli import _info as _info
